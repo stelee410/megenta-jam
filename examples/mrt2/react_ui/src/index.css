@@ -292,6 +292,189 @@ body.dragging-vertical * {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
+/* ─── DJ Prompt Mixer ─────────────────────────────────────── */
+
+.dj-mixer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+}
+
+.dj-deck {
+  min-width: 0;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.015)),
+    #202124;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.dj-deck-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dj-deck-kicker {
+  color: var(--deck-color);
+  font-family: "Google Sans", system-ui, sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1.2px;
+  line-height: 12px;
+  text-transform: uppercase;
+}
+
+.dj-deck-weight {
+  color: #fff;
+  font-family: "Google Sans", system-ui, sans-serif;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 28px;
+}
+
+.dj-deck-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.dj-platter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 104px;
+}
+
+.dj-platter-ring {
+  width: 92px;
+  height: 92px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    repeating-radial-gradient(circle, rgba(255,255,255,0.10) 0 1px, transparent 1px 7px),
+    radial-gradient(circle at 35% 30%, rgba(255,255,255,0.20), transparent 42%),
+    #111214;
+  border: 2px solid var(--deck-color);
+  box-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.28),
+    inset 0 0 0 8px rgba(255, 255, 255, 0.035);
+}
+
+.dj-platter-core {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: var(--deck-color);
+  color: #111214;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: "Google Sans", system-ui, sans-serif;
+  font-size: 17px;
+  font-weight: 800;
+}
+
+.dj-prompt-input {
+  width: 100%;
+  min-height: 74px;
+  resize: none;
+  box-sizing: border-box;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(0, 0, 0, 0.22);
+  color: #fff;
+  outline: none;
+  padding: 10px;
+  font-family: "Google Sans Text", system-ui, sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
+.dj-prompt-input::placeholder {
+  color: rgba(255, 255, 255, 0.38);
+}
+
+.dj-prompt-input:focus {
+  border-color: var(--deck-color);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--deck-color) 45%, transparent);
+}
+
+.dj-crossfader-panel {
+  grid-column: 1 / -1;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: #17181a;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.dj-fader-label-row,
+.dj-fader-readout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #A3A3A5;
+  font-family: "Google Sans", system-ui, sans-serif;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+.dj-fader-readout {
+  color: rgba(255, 255, 255, 0.72);
+  letter-spacing: 0.6px;
+}
+
+.dj-crossfader {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 28px;
+  border-radius: 999px;
+  outline: none;
+  background:
+    linear-gradient(
+      to right,
+      var(--deck-a-color) 0%,
+      var(--deck-a-color) var(--fader-pct),
+      var(--deck-b-color) var(--fader-pct),
+      var(--deck-b-color) 100%
+    );
+  box-shadow: inset 0 0 0 7px rgba(0, 0, 0, 0.34);
+}
+
+.dj-crossfader::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  background: #e8eaed;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.38);
+}
+
+.dj-extra-prompts {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
 
 /* ─── Scrollbar ────────────────────────────────────────────── */
 .no-scrollbar::-webkit-scrollbar { display: none; }

@@ -333,22 +333,62 @@ export default function App() {
     postMessage({ type: 'textPrompts', value: mapped });
   };
 
+  const withPromptSlot = (
+    currentPrompts: typeof prompts,
+    idx: number,
+    fallbackWeight = 0,
+  ) => {
+    const next = [...currentPrompts];
+    while (next.length <= idx) {
+      next.push({ text: '', weight: fallbackWeight, isAudio: false });
+    }
+    return next;
+  };
+
   const handlePromptTextChange = (idx: number, text: string) => {
     setPrompts(currentPrompts => {
-      const next = [...currentPrompts];
+      const next = withPromptSlot(currentPrompts, idx);
       next[idx] = { ...next[idx], text };
       postNormalizedPrompts(next);
       return next;
     });
   };
 
+  const handlePromptTextDraftChange = (idx: number, text: string) => {
+    setPrompts(currentPrompts => {
+      const next = withPromptSlot(currentPrompts, idx);
+      next[idx] = { ...next[idx], text };
+      return next;
+    });
+  };
+
   const handlePromptWeightChange = (idx: number, weight: number) => {
     setPrompts(currentPrompts => {
-      const next = [...currentPrompts];
+      const next = withPromptSlot(currentPrompts, idx);
       next[idx] = { ...next[idx], weight };
       postNormalizedPrompts(next);
       return next;
     });
+  };
+
+  const handleDeckFaderChange = (value: number) => {
+    const nextValue = Math.max(0, Math.min(1, value));
+    setPrompts(currentPrompts => {
+      const next = withPromptSlot(currentPrompts, 1);
+      next[0] = { ...next[0], weight: 1 - nextValue };
+      next[1] = { ...next[1], weight: nextValue };
+      return next;
+    });
+    sendParamChange(10, 1 - nextValue);
+    sendParamChange(11, nextValue);
+  };
+
+  const handleRandomizeDeck = (idx: number) => {
+    if (deckIndexRef.current >= SHUFFLED_SUGGESTIONS.length) {
+      shuffle(SHUFFLED_SUGGESTIONS);
+      deckIndexRef.current = 0;
+    }
+    handlePromptTextDraftChange(idx, SHUFFLED_SUGGESTIONS[deckIndexRef.current++]);
   };
 
   const handlePromptRemove = (idx: number) => {
@@ -595,6 +635,12 @@ export default function App() {
   }, [keyboardMidiEnabled]);
 
   const isDawPlaying = metrics.transportFlags >= 0 && (metrics.transportFlags & 2) !== 0;
+  const deckA = prompts[0] ?? { text: '', weight: 0.5, isAudio: false };
+  const deckB = prompts[1] ?? { text: '', weight: 0.5, isAudio: false };
+  const deckTotal = Math.max(0, deckA.weight) + Math.max(0, deckB.weight);
+  const deckFaderValue = deckTotal > 0 ? Math.max(0, Math.min(1, deckB.weight / deckTotal)) : 0.5;
+  const deckAWeightPct = Math.round((1 - deckFaderValue) * 100);
+  const deckBWeightPct = Math.round(deckFaderValue * 100);
 
   return (
     <div style={{
@@ -797,23 +843,128 @@ export default function App() {
                   flexShrink: 0,
                   display: mixMode === 'surface' ? 'none' : 'flex',
                   flexDirection: 'column',
-                  gap: '10px',
+                  gap: '12px',
                 }}>
-                  {prompts.map((p, idx) => (
-                    <PromptRow
-                      key={idx}
-                      text={p.text}
-                      color={ALL_COLORS[idx % ALL_COLORS.length]}
-                      weight={p.weight}
-                      isEmpty={!p.text && !p.isAudio}
-                      isAudio={p.isAudio}
-                      onTextChange={(newText) => handlePromptTextChange(idx, newText)}
-                      onWeightChange={(newWeight) => handlePromptWeightChange(idx, newWeight)}
-                      onRemove={() => handlePromptRemove(idx)}
-                      onUpload={() => handlePromptUpload(idx)}
-                      onClearAudio={() => handleClearAudio(idx)}
-                    />
-                  ))}
+                  <div className="dj-mixer">
+                    {[0, 1].map((idx) => {
+                      const deck = idx === 0 ? deckA : deckB;
+                      const color = ALL_COLORS[idx % ALL_COLORS.length];
+                      const pct = idx === 0 ? deckAWeightPct : deckBWeightPct;
+                      return (
+                        <div
+                          key={idx}
+                          className={`dj-deck dj-deck-${idx === 0 ? 'a' : 'b'}`}
+                          style={{ '--deck-color': color } as React.CSSProperties}
+                        >
+                          <div className="dj-deck-header">
+                            <div>
+                              <div className="dj-deck-kicker">Deck {idx === 0 ? 'A' : 'B'}</div>
+                              <div className="dj-deck-weight">{pct}%</div>
+                            </div>
+                            <div className="dj-deck-actions">
+                              <Tooltip title="Send prompts" arrow placement="top">
+                                <IconButton
+                                  onClick={() => postNormalizedPrompts(prompts)}
+                                  variant="ghost"
+                                  sx={{ width: 30, height: 30, color: 'var(--color-muted)' }}
+                                >
+                                  <span className="material-symbols-outlined" style={{ fontSize: '17px' }}>send</span>
+                                </IconButton>
+                              </Tooltip>
+                              <Tooltip title="Random prompt" arrow placement="top">
+                                <IconButton
+                                  onClick={() => handleRandomizeDeck(idx)}
+                                  variant="ghost"
+                                  sx={{ width: 30, height: 30, color: 'var(--color-muted)' }}
+                                >
+                                  <span className="material-symbols-outlined" style={{ fontSize: '17px' }}>casino</span>
+                                </IconButton>
+                              </Tooltip>
+                              <Tooltip title="Clear deck" arrow placement="top">
+                                <IconButton
+                                  onClick={() => handlePromptTextDraftChange(idx, '')}
+                                  variant="ghost"
+                                  sx={{ width: 30, height: 30, color: 'var(--color-muted)' }}
+                                >
+                                  <span className="material-symbols-outlined" style={{ fontSize: '17px' }}>close</span>
+                                </IconButton>
+                              </Tooltip>
+                            </div>
+                          </div>
+                          <div className="dj-platter">
+                            <div className="dj-platter-ring">
+                              <div className="dj-platter-core">
+                                <span>{idx === 0 ? 'A' : 'B'}</span>
+                              </div>
+                            </div>
+                          </div>
+                          <textarea
+                            className="dj-prompt-input"
+                            value={deck.isAudio ? deck.text : deck.text}
+                            onChange={(e) => handlePromptTextDraftChange(idx, e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                                e.preventDefault();
+                                postNormalizedPrompts(prompts);
+                              }
+                            }}
+                            placeholder={idx === 0 ? 'Prompt for Deck A' : 'Prompt for Deck B'}
+                            rows={3}
+                          />
+                        </div>
+                      );
+                    })}
+
+                    <div className="dj-crossfader-panel">
+                      <div className="dj-fader-label-row">
+                        <span>A</span>
+                        <span>Weight Fader</span>
+                        <span>B</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={1}
+                        step={0.01}
+                        value={deckFaderValue}
+                        onChange={(e) => handleDeckFaderChange(parseFloat(e.target.value))}
+                        className="dj-crossfader"
+                        style={{
+                          '--deck-a-color': ALL_COLORS[0],
+                          '--deck-b-color': ALL_COLORS[1],
+                          '--fader-pct': `${deckFaderValue * 100}%`,
+                        } as React.CSSProperties}
+                      />
+                      <div className="dj-fader-readout">
+                        <span>{deckAWeightPct}% A</span>
+                        <span>{deckBWeightPct}% B</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {prompts.length > 2 && (
+                    <div className="dj-extra-prompts">
+                      <div className="section-header" style={{ margin: 0, fontSize: '10px' }}>Aux Prompts</div>
+                      {prompts.slice(2).map((p, relIdx) => {
+                        const idx = relIdx + 2;
+                        return (
+                          <PromptRow
+                            key={idx}
+                            text={p.text}
+                            color={ALL_COLORS[idx % ALL_COLORS.length]}
+                            weight={p.weight}
+                            isEmpty={!p.text && !p.isAudio}
+                            isAudio={p.isAudio}
+                            onTextChange={(newText) => handlePromptTextChange(idx, newText)}
+                            onWeightChange={(newWeight) => handlePromptWeightChange(idx, newWeight)}
+                            onRemove={() => handlePromptRemove(idx)}
+                            onUpload={() => handlePromptUpload(idx)}
+                            onClearAudio={() => handleClearAudio(idx)}
+                          />
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

@@ -430,6 +430,33 @@ static BOOL isDevServerRunning(void) {
             [self applyParamToEngine:indexValue.intValue value:paramValue.floatValue];
         }
     }
+    else if ([type isEqualToString:@"performance"]) {
+        NSString* key = body[@"key"];
+        NSNumber* value = body[@"value"];
+        if ([key isKindOfClass:[NSString class]] &&
+            [value isKindOfClass:[NSNumber class]] &&
+            self.sharedState) {
+            float v = value.floatValue;
+            if (v < 0.0f) v = 0.0f;
+            if (v > 1.0f) v = 1.0f;
+
+            if ([key isEqualToString:@"filterX"]) {
+                self.sharedState->filterX.store(v, std::memory_order_relaxed);
+            } else if ([key isEqualToString:@"filterY"]) {
+                self.sharedState->filterY.store(v, std::memory_order_relaxed);
+            } else if ([key isEqualToString:@"drive"]) {
+                self.sharedState->drive.store(v, std::memory_order_relaxed);
+            } else if ([key isEqualToString:@"delayMix"]) {
+                self.sharedState->delayMix.store(v, std::memory_order_relaxed);
+            } else if ([key isEqualToString:@"delayFeedback"]) {
+                self.sharedState->delayFeedback.store(v, std::memory_order_relaxed);
+            } else if ([key isEqualToString:@"reverbMix"]) {
+                self.sharedState->reverbMix.store(v, std::memory_order_relaxed);
+            } else if ([key isEqualToString:@"limiter"]) {
+                self.sharedState->limiter.store(v, std::memory_order_relaxed);
+            }
+        }
+    }
     else if ([type isEqualToString:@"setSoloMode"]) {
         NSNumber* valueVal = body[@"value"];
         if (valueVal) {

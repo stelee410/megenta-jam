@@ -431,12 +431,13 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
     _window = [[NSWindow alloc] initWithContentRect:frame
                                            styleMask:NSWindowStyleMaskTitled |
                                                      NSWindowStyleMaskClosable |
-                                                     NSWindowStyleMaskMiniaturizable
+                                                     NSWindowStyleMaskMiniaturizable |
+                                                     NSWindowStyleMaskResizable
                                              backing:NSBackingStoreBuffered
                                                defer:NO];
     _window.title = @"MRT2 - Jam";
     _window.minSize = NSMakeSize(850, 605);
-    _window.maxSize = NSMakeSize(850, 605);
+    _window.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
     _window.contentViewController = _controller;
     [_window center];
     [_window makeKeyAndOrderFront:nil];
@@ -565,6 +566,7 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
             engine->set_cfg_notes(cfgNotesSliderVal->load(std::memory_order_relaxed));
         }
 
+        shared->processPerformanceFX(outL, outR, frameCount);
         shared->pushAudioSamples(outL, outR, frameCount);
         return noErr;
     }];

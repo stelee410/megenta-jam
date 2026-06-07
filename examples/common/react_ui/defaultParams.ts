@@ -34,7 +34,7 @@ export const DEFAULT_CFG_NOTES = 2.4;
 
 export const DEFAULT_CFG_DRUMS = 4.0;
 export const DEFAULT_UNMASK_WIDTH = 0;
-export const DEFAULT_BUFFER_SIZE = 0;
+export const DEFAULT_BUFFER_SIZE = 1;
 export const DEFAULT_VOLUME = 0.0;
 
 // ─── Per-app overrides ───────────────────────────────────────────────────────

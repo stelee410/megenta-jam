@@ -23,8 +23,6 @@ import {
   IconButton,
   MenuItem,
   CircularProgress,
-  TextField,
-  InputAdornment,
   Tooltip,
 } from '@mui/material';
 import {
@@ -38,7 +36,6 @@ import {
   Refresh,
   PlayArrow,
   Pause,
-  Save,
 } from '@mui/icons-material';
 
 // ─── WebKit bridge ───────────────────────────────────────────────────────────
@@ -78,7 +75,7 @@ const CFG_MIN = 0;
 const CFG_MAX = 5;
 
 // Column width constant for the 3-column layout
-const CENTER_COL_WIDTH = '435px';
+const CENTER_COL_WIDTH = '560px';
 
 // Deterministically assign a color from ALL_COLORS to any prompt string
 const getPromptColor = (prompt: string): string => {
@@ -86,6 +83,71 @@ const getPromptColor = (prompt: string): string => {
   const hash = prompt.charCodeAt(0);
   const index = Math.abs(hash) % ALL_COLORS.length;
   return ALL_COLORS[index];
+};
+
+type PerformanceKey =
+  | 'filterX'
+  | 'filterY'
+  | 'drive'
+  | 'delayMix'
+  | 'delayFeedback'
+  | 'reverbMix'
+  | 'limiter';
+
+type PerformanceState = Record<PerformanceKey, number>;
+
+type PromptMode = 'single' | 'mix' | 'solo';
+type MixLayoutMode = 'standard' | 'circle' | 'surface';
+
+type MixPrompt = {
+  id: number;
+  text: string;
+  weight: number;
+  color: string;
+};
+
+const DEFAULT_MIX_PROMPTS: MixPrompt[] = [
+  { id: 1, text: 'techno', weight: 0.34, color: '#ff4f7b' },
+  { id: 2, text: 'glitch', weight: 0.08, color: '#6aa6ff' },
+  { id: 3, text: 'hard bop', weight: 0.12, color: '#f0aa26' },
+  { id: 4, text: 'piano arp', weight: 0.26, color: '#49d7a6' },
+  { id: 5, text: 'vinyl hiss', weight: 0.06, color: '#9f8cff' },
+  { id: 6, text: 'deep bass', weight: 0.14, color: '#f06a44' },
+];
+
+const STANDARD_MIX_POSITIONS = [
+  { x: 18, y: 24 },
+  { x: 76, y: 28 },
+  { x: 84, y: 58 },
+  { x: 20, y: 66 },
+  { x: 44, y: 18 },
+  { x: 60, y: 76 },
+];
+
+const CIRCLE_MIX_POSITIONS = [
+  { x: 50, y: 15 },
+  { x: 78, y: 31 },
+  { x: 78, y: 68 },
+  { x: 50, y: 84 },
+  { x: 22, y: 68 },
+  { x: 22, y: 31 },
+];
+
+const SURFACE_MIX_POSITIONS = [
+  { x: 22, y: 22 },
+  { x: 72, y: 24 },
+  { x: 82, y: 54 },
+  { x: 26, y: 64 },
+  { x: 47, y: 36 },
+  { x: 60, y: 78 },
+];
+
+const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
+
+const getMixPositions = (layout: MixLayoutMode) => {
+  if (layout === 'circle') return CIRCLE_MIX_POSITIONS;
+  if (layout === 'surface') return SURFACE_MIX_POSITIONS;
+  return STANDARD_MIX_POSITIONS;
 };
 
 // ─── App ─────────────────────────────────────────────────────────────────────
@@ -126,10 +188,29 @@ function App() {
 
   // Prompt state
   const [promptText, setPromptText] = useState('');
+  const [promptTextB, setPromptTextB] = useState(() => PROMPT_SUGGESTIONS[1] ?? '');
+  const [composerText, setComposerText] = useState('');
+  const [deckFader, setDeckFader] = useState(0.5);
+  const [promptMode, setPromptMode] = useState<PromptMode>('single');
+  const [draftText, setDraftText] = useState('');
+  const [isPromptEditing, setIsPromptEditing] = useState(false);
+  const [mixLayout, setMixLayout] = useState<MixLayoutMode>('surface');
+  const [focusedMixIndex, setFocusedMixIndex] = useState(0);
+  const [mixPrompts, setMixPrompts] = useState<MixPrompt[]>(DEFAULT_MIX_PROMPTS);
   const [isPromptEdited, setIsPromptEdited] = useState(false);
   const [isAudioPrompt, setIsAudioPrompt] = useState(false);
   const lastSentText = useRef('');
-  const promptInputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
+  const promptSurfaceRef = useRef<HTMLDivElement | null>(null);
+  const xyPadRef = useRef<HTMLDivElement | null>(null);
+  const [performance, setPerformance] = useState<PerformanceState>({
+    filterX: 1.0,
+    filterY: 0.02,
+    drive: 0.0,
+    delayMix: 0.0,
+    delayFeedback: 0.25,
+    reverbMix: 0.0,
+    limiter: 0.35,
+  });
 
   // Color state
   const [activeColor, setActiveColor] = useState(() => ALL_COLORS[Math.floor(Math.random() * ALL_COLORS.length)]);
@@ -175,13 +256,11 @@ function App() {
   const applyPresetAtIndex = useCallback((list: string[], index: number) => {
     const preset = list[index];
     if (preset) {
-      if (isAudioPrompt) post({ type: 'clearAudioPrompt' });
-      setPromptText(preset);
+      setComposerText(preset);
       setActiveColor(getPromptColor(preset));
-      sendPrompt(preset, true);
       setIsPromptEdited(false);
     }
-  }, [isAudioPrompt]);
+  }, []);
 
   /** Navigate to the next/previous preset sequentially. */
   const navigatePreset = useCallback((direction: 1 | -1) => {
@@ -226,11 +305,20 @@ function App() {
     });
   }, [promptText, isSoloMode, rockerIndex, userPresetsSolo, userPresetsJam, persistUserPresets]);
 
-  const handleModeChange = (solo: boolean) => {
+  const handleModeChange = (mode: PromptMode) => {
+    const solo = mode === 'solo';
+    setPromptMode(mode);
+    setDraftText('');
+    setIsPromptEditing(false);
     setIsSoloMode(solo);
     post({ type: 'setSoloMode', value: solo });
     sendParamChange(7, solo ? 127 : 0); // unmaskwidth
     setParamsState(p => ({ ...p, unmaskwidth: solo ? 127 : 0 }));
+
+    if (mode === 'mix') {
+      sendMixPrompts(mixPrompts, false);
+      return;
+    }
 
     // Pick the first preset from the new mode's preset list (top to bottom)
     const list = getActivePresetList(solo);
@@ -271,7 +359,7 @@ function App() {
   }, []);
 
   // Computer keyboard → MIDI
-  const [keyboardMidiEnabled, setKeyboardMidiEnabled] = useState(false);
+  const [keyboardMidiEnabled, setKeyboardMidiEnabled] = useState(true);
   const keyboardBaseNote = useRef(KEYBOARD_MIDI_BASE_DEFAULT);
   const pressedKeys = useRef<Map<string, number>>(new Map()); // key → MIDI note currently held
 
@@ -298,28 +386,33 @@ function App() {
     }, 2000);
   };
 
-  const sendPrompt = (text: string, immediate = false, soloOverride?: boolean) => {
+  const sendPrompt = (
+    text: string,
+    immediate = false,
+    soloOverride?: boolean,
+  ) => {
     const soloActive = soloOverride !== undefined ? soloOverride : isSoloMode;
     const textWithPrefix = soloActive ? `SOLO ${text}` : text;
+    const signature = `${soloActive ? 'solo' : 'single'}\u0000${text}`;
 
-    if (text === lastSentText.current && soloActive === lastSentSoloMode.current) return;
+    if (signature === lastSentText.current && soloActive === lastSentSoloMode.current) return;
 
     const prompts = [
-      { text: textWithPrefix, weight: 1.0 },
-    ];
+      { text: textWithPrefix, weight: 1 },
+    ].filter(p => p.text.trim().length > 0 && p.weight > 0);
     if (textUpdateTimeout.current) {
       clearTimeout(textUpdateTimeout.current);
       textUpdateTimeout.current = null;
     }
     if (immediate) {
-      lastSentText.current = text;
+      lastSentText.current = signature;
       lastSentSoloMode.current = soloActive;
       waitingForEncoder.current = true;
       startEncoderTimeout();
       post({ type: 'textPrompts', value: prompts });
     } else {
       textUpdateTimeout.current = window.setTimeout(() => {
-        lastSentText.current = text;
+        lastSentText.current = signature;
         lastSentSoloMode.current = soloActive;
         waitingForEncoder.current = true;
         startEncoderTimeout();
@@ -329,9 +422,190 @@ function App() {
     }
   };
 
+  const sendMixPrompts = (items: MixPrompt[], immediate = true) => {
+    const activeItems = items.filter(item => item.text.trim() && item.weight > 0);
+    const total = activeItems.reduce((sum, item) => sum + item.weight, 0) || 1;
+    const prompts = activeItems.map(item => ({
+      text: item.text,
+      weight: item.weight / total,
+    }));
+    const signature = `mix\u0000${prompts.map(p => `${p.text}:${p.weight.toFixed(3)}`).join('\u0000')}`;
+    if (signature === lastSentText.current && !lastSentSoloMode.current) return;
+
+    if (textUpdateTimeout.current) {
+      clearTimeout(textUpdateTimeout.current);
+      textUpdateTimeout.current = null;
+    }
+
+    const send = () => {
+      lastSentText.current = signature;
+      lastSentSoloMode.current = false;
+      waitingForEncoder.current = true;
+      startEncoderTimeout();
+      post({ type: 'textPrompts', value: prompts });
+    };
+
+    if (immediate) {
+      send();
+    } else {
+      textUpdateTimeout.current = window.setTimeout(() => {
+        send();
+        textUpdateTimeout.current = null;
+      }, 160);
+    }
+  };
+
+  const handleDeckBFaderChange = (value: number) => {
+    const next = Math.max(0, Math.min(1, value));
+    setDeckFader(next);
+    sendParamChange(10, 1 - next);
+    sendParamChange(11, next);
+  };
+
+  const sendComposerToDeck = (deck: 'A' | 'B') => {
+    const text = composerText.trim();
+    if (!text) return;
+
+    if (deck === 'A') {
+      if (isAudioPrompt) post({ type: 'clearAudioPrompt' });
+      setPromptText(text);
+      setActiveColor(getPromptColor(text));
+      setIsPromptEdited(false);
+      sendPrompt(text, true);
+    } else {
+      setPromptTextB(text);
+      sendPrompt(promptText || text, true);
+    }
+    setComposerText('');
+  };
+
+  const commitDraftText = useCallback(() => {
+    const text = draftText.trim();
+    if (!text) return;
+
+    if (promptMode === 'mix') {
+      setMixPrompts(prev => {
+        const next = prev.map((item, index) => (
+          index === focusedMixIndex
+            ? { ...item, text, color: getPromptColor(text) }
+            : item
+        ));
+        sendMixPrompts(next, true);
+        return next;
+      });
+      setDraftText('');
+      setIsPromptEdited(false);
+      return;
+    }
+
+    if (isAudioPrompt) post({ type: 'clearAudioPrompt' });
+    setPromptText(text);
+    setActiveColor(getPromptColor(text));
+    setIsAudioPrompt(false);
+    setIsPromptEdited(false);
+    sendPrompt(text, true, promptMode === 'solo');
+    setDraftText('');
+    setIsPromptEditing(false);
+    promptSurfaceRef.current?.blur();
+  }, [draftText, focusedMixIndex, isAudioPrompt, promptMode]);
+
+  const handlePromptSurfaceKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    if ((promptMode === 'single' || promptMode === 'solo') && !isPromptEditing) return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitDraftText();
+      return;
+    }
+
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      setDraftText('');
+      setIsPromptEditing(false);
+      promptSurfaceRef.current?.blur();
+      return;
+    }
+
+    if (e.key === 'Backspace') {
+      e.preventDefault();
+      setDraftText(prev => prev.slice(0, -1));
+      setIsPromptEdited(true);
+      return;
+    }
+
+    if (e.key === 'Tab') {
+      if (promptMode !== 'mix') return;
+      e.preventDefault();
+      setFocusedMixIndex(index => (index + (e.shiftKey ? 5 : 1)) % 6);
+      setDraftText('');
+      return;
+    }
+
+    if (e.key.length === 1) {
+      e.preventDefault();
+      setDraftText(prev => prev + e.key);
+      setIsPromptEdited(true);
+    }
+  }, [commitDraftText, isPromptEditing, promptMode]);
+
+  const handlePromptSurfacePaste = useCallback((e: React.ClipboardEvent<HTMLDivElement>) => {
+    const text = e.clipboardData.getData('text/plain');
+    if (!text) return;
+    e.preventDefault();
+    setDraftText(prev => prev + text.replace(/\s+/g, ' '));
+    setIsPromptEdited(true);
+  }, []);
+
+  const updateMixWeightsFromPointer = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = clamp01((e.clientX - rect.left) / rect.width) * 100;
+    const y = clamp01((e.clientY - rect.top) / rect.height) * 100;
+    const positions = getMixPositions(mixLayout);
+    const raw = positions.map(pos => {
+      const dx = pos.x - x;
+      const dy = pos.y - y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      if (mixLayout === 'surface') {
+        return Math.exp(-(distance * distance) / (2 * 26 * 26)) + 0.035;
+      }
+      return 1 / Math.max(mixLayout === 'circle' ? 8 : 12, distance);
+    });
+    const total = raw.reduce((sum, value) => sum + value, 0) || 1;
+    setMixPrompts(prev => {
+      const next = prev.map((item, index) => ({
+        ...item,
+        weight: raw[index] / total,
+      }));
+      sendMixPrompts(next, false);
+      return next;
+    });
+  }, [mixLayout]);
+
   const sendParamChange = (index: number, value: number) => {
     post({ type: 'param', index, value });
   };
+
+  const sendPerformanceChange = (key: PerformanceKey, value: number) => {
+    const next = clamp01(value);
+    setPerformance(p => ({ ...p, [key]: next }));
+    post({ type: 'performance', key, value: next });
+  };
+
+  const nudgePerformance = (key: PerformanceKey, value: number, delta: number) => {
+    sendPerformanceChange(key, value + delta);
+  };
+
+  const handleXYPointer = (e: any) => {
+    const el = xyPadRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const x = clamp01((e.clientX - rect.left) / rect.width);
+    const y = clamp01(1 - ((e.clientY - rect.top) / rect.height));
+    sendPerformanceChange('filterX', x);
+    sendPerformanceChange('filterY', y);
+  };
+
   const handleResetDefaults = () => {
     sendParamChange(0, DEFAULT_TEMPERATURE);       // temperature
     sendParamChange(1, DEFAULT_TOPK);              // topk
@@ -343,6 +617,15 @@ function App() {
     sendParamChange(39, 0);   // drumless
     sendParamChange(46, 0);   // onsetmode = false (Auto-Strum = true)
     setParamsState(p => ({ ...p, cfgnotesuser: DEFAULT_CFG_NOTES, cfgmusiccoca: DEFAULT_CFG_MUSICCOCA }));
+    ([
+      ['filterX', 1.0],
+      ['filterY', 0.02],
+      ['drive', 0.0],
+      ['delayMix', 0.0],
+      ['delayFeedback', 0.25],
+      ['reverbMix', 0.0],
+      ['limiter', 0.35],
+    ] as Array<[PerformanceKey, number]>).forEach(([key, value]) => sendPerformanceChange(key, value));
   };
 
   const togglePlay = () => {
@@ -531,14 +814,6 @@ function App() {
     post({ type: 'uiReady' });
     post({ type: 'listRemoteModels' });
 
-    // Auto-focus prompt text input on app mount and place caret at the end
-    if (promptInputRef.current) {
-      const el = promptInputRef.current;
-      el.focus();
-      const len = el.value.length;
-      el.setSelectionRange(len, len);
-    }
-
     return () => {
       delete (window as any).updateState;
       if (encoderTimeoutRef.current) {
@@ -550,12 +825,19 @@ function App() {
   // Transport keys
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (document.activeElement instanceof HTMLInputElement || document.activeElement instanceof HTMLTextAreaElement) return;
+      if (promptSurfaceRef.current?.contains(document.activeElement)) return;
       if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        e.preventDefault();
+        const step = e.shiftKey ? 0.1 : 0.02;
+        handleDeckBFaderChange(deckFader + (e.key === 'ArrowRight' ? step : -step));
+      }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isPlaying]);
+  }, [isPlaying, deckFader]);
 
   // Solo mode: auto-stop after timeout of no incoming notes
   useEffect(() => {
@@ -567,26 +849,7 @@ function App() {
     return () => clearTimeout(timer);
   }, [isSoloMode, isPlaying, noteActivityCounter]);
 
-  // Automatically trigger a model reset when MusicCoCa embedding finishes
-  // loading. This covers all prompt-change paths: typing, rocker arrows,
-  // mode switch, audio file drop, and settings changes.
-  //
-  // IMPORTANT: We must wait for MusicCoCa to fully finish encoding
-  // (textEncoderStatus goes 1→0 AND the debounced prompt has been sent)
-  // before resetting. Resetting too early causes a race condition where the
-  // state is cleared but the new prompt hasn't been applied yet, leading to
-  // bleed from the previous prompt.
   const isProgressActive = metrics.textEncoderStatus === 1 || waitingForEncoder.current;
-  const prevProgressActive = useRef(false);
-
-  useEffect(() => {
-    if (prevProgressActive.current && !isProgressActive) {
-      resetModel();
-    }
-    prevProgressActive.current = isProgressActive;
-  }, [isProgressActive]);
-
-
 
   // Computer keyboard → MIDI. Only intercept when enabled and when no input
   // is focused (so typing prompts still works).
@@ -601,7 +864,9 @@ function App() {
     }
 
     const handleDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       if (document.activeElement instanceof HTMLInputElement || document.activeElement instanceof HTMLTextAreaElement) return;
+      if (promptSurfaceRef.current?.contains(document.activeElement)) return;
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       const key = e.key.toLowerCase();
       if (key === 'z') {
@@ -659,6 +924,13 @@ function App() {
   const keyboardStartNote = keyboardMidiEnabled ? 60 : 48;
   const keyboardEndNote = keyboardMidiEnabled ? 76 : 72;
   const noModel = !modelName || modelName === 'No model loaded';
+  const liveFxSliders: Array<{ key: PerformanceKey; label: string; value: number }> = [
+    { key: 'drive', label: 'Drive', value: performance.drive },
+    { key: 'delayMix', label: 'Delay', value: performance.delayMix },
+    { key: 'delayFeedback', label: 'Feedback', value: performance.delayFeedback },
+    { key: 'reverbMix', label: 'Reverb', value: performance.reverbMix },
+    { key: 'limiter', label: 'Limiter', value: performance.limiter },
+  ];
 
   // Current preset list for the rocker display
   const currentPresetList = getActivePresetList(isSoloMode);
@@ -666,6 +938,22 @@ function App() {
   // Determine if the user has modified the prompt relative to the saved preset
   const savedPresetText = currentPresetList[rockerIndex] ?? '';
   const promptIsDirty = isPromptEdited && promptText.trim() !== '' && promptText !== savedPresetText;
+  const committedPromptLabel = isAudioPrompt ? 'Audio prompt loaded' : (promptText || 'just type');
+  const activeModeLabel = promptMode.toUpperCase();
+  const totalMixWeight = mixPrompts.reduce((sum, item) => sum + item.weight, 0) || 1;
+  const mixPositions = getMixPositions(mixLayout);
+  const normalizedMixPrompts = mixPrompts.map(item => ({
+    ...item,
+    displayWeight: Math.round((item.weight / totalMixWeight) * 100),
+  }));
+  const weightedCenter = normalizedMixPrompts.reduce((acc, item, index) => {
+    const pos = mixPositions[index];
+    const weight = item.weight / totalMixWeight;
+    return {
+      x: acc.x + pos.x * weight,
+      y: acc.y + pos.y * weight,
+    };
+  }, { x: 0, y: 0 });
 
   // Tab style helper for the Solo/Jam switcher
   const modeTabStyle = (active: boolean): React.CSSProperties => ({
@@ -731,332 +1019,241 @@ function App() {
         fontFamily: "'Google Sans Text', system-ui, sans-serif",
       }}
     >
-      {/* ══════════════════════════════════════════════════════════════════
-          UPPER SECTION — colored background, contains rows 1 & 2, octave rocker
-          ══════════════════════════════════════════════════════════════════ */}
-      <div
-        style={{
-          flex: '1 1 auto',
-          background: activeColor,
-          transition: 'background-color 0.3s ease',
-          display: 'flex',
-          flexDirection: 'column',
-          padding: '18px 24px',
-          boxSizing: 'border-box',
-          minHeight: 0,
-        }}
-      >
-        {/* ── 3-column layout: Left controls | Prompt | Right controls ── */}
-        <div style={{
-          display: 'flex',
-          gap: '16px',
-          flex: '1 1 auto',
-          minHeight: 0,
-        }}>
+      <div className="jam-app-shell">
+        <div className="jam-topbar">
+          <div className="jam-topbar-left">
+            <ModelSelector
+              modelName={modelName}
+              localModels={localModels}
+              remoteModels={remoteModels}
+              downloadProgress={downloadProgress}
+              onSelectModel={(m) => post({ type: 'selectModel', name: m })}
+              onDownloadModel={(m) => post({ type: 'downloadModel', name: m })}
+              onDeleteModel={(m) => post({ type: 'deleteModel', name: m })}
+              onSelectFolder={() => post({ type: 'selectDownloadFolder' })}
+              buttonSx={{
+                color: '#FFF',
+                border: '1px solid rgba(255, 255, 255, 0.12)',
+                background: 'rgba(255, 255, 255, 0.035)',
+                '&:hover': { background: 'rgba(255, 255, 255, 0.12)' },
+              }}
+            />
+          </div>
+          <div className="jam-memory-indicator">MEMORY <span /></div>
+          <div className="jam-topbar-right">
+            <TimingIndicator
+              frameMs={metrics.frameMs}
+              droppedFrames={metrics.droppedFrames}
+              buffersize={paramsState.buffersize}
+              onBufferChange={(v) => sendParamChange(8, v)}
+              buttonSx={{
+                color: '#FFF',
+                '&:hover': { background: 'rgba(255, 255, 255, 0.12)' },
+              }}
+              isPlaying={isPlaying}
+            />
+            <button className="jam-chat-button">Chat</button>
+          </div>
+        </div>
 
-          {/* LEFT COLUMN — Tabs on top, sliders centered below */}
-          <div style={{
-            flex: '1 1 0px',
-            minWidth: 0,
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '16px',
-          }}>
-            {/* Solo / Jam Tab Switcher */}
-            <div style={{ display: 'flex' }}>
-              <div
-                className="jam-box"
-                style={{
-                  display: 'inline-flex',
-                  height: '44px',
-                  boxSizing: 'border-box',
-                  padding: '2px',
-                  alignItems: 'center',
-                }}
-              >
-                <button
-                  onClick={() => handleModeChange(false)}
-                  style={modeTabStyle(!isSoloMode)}
-                >
-                  Jam
-                </button>
-                <button
-                  onClick={() => handleModeChange(true)}
-                  style={modeTabStyle(isSoloMode)}
-                >
-                  Solo
-                </button>
+        <div className="jam-main-grid">
+          <section className="jam-prompt-panel">
+            <div className="jam-prompt-head">
+              <div className="jam-prompt-titlebar">
+                <div className="jam-section-label">Text Prompt</div>
+                <div className="jam-prompt-status">
+                  <span className="jam-active-dot" />
+                  Active
+                </div>
+                <div className="jam-head-actions">
+                  {isProgressActive && <CircularProgress size={15} sx={{ color: 'rgba(255, 255, 255, 0.64)' }} />}
+                  {isAudioPrompt ? (
+                    <Tooltip title="Remove audio prompt" placement="top">
+                      <IconButton variant="jam" onClick={clearAudioPrompt} sx={{ width: 32, height: 32 }}>
+                        <Close sx={{ fontSize: 16 }} />
+                      </IconButton>
+                    </Tooltip>
+                  ) : (
+                    <Tooltip title="Upload audio prompt" placement="top">
+                      <IconButton variant="jam" onClick={loadAudioPrompt} sx={{ width: 32, height: 32 }}>
+                        <UploadFile sx={{ fontSize: 16 }} />
+                      </IconButton>
+                    </Tooltip>
+                  )}
+                  <IconButton variant="jam" onClick={() => setIsSettingsOpen(true)} sx={{ width: 32, height: 32 }}>
+                    <TuneIcon sx={{ fontSize: 16 }} />
+                  </IconButton>
+                </div>
+              </div>
+              <div className="jam-prompt-toolbar">
+                <div className="jam-prompt-toolset">
+                  <button className="jam-mini-button" onClick={resetModel}>Reset</button>
+                  {promptMode === 'mix' && (
+                    <>
+                      {(['standard', 'circle', 'surface'] as MixLayoutMode[]).map(layout => (
+                        <button
+                          key={layout}
+                          className={`jam-mini-button ${mixLayout === layout ? 'is-active' : ''}`}
+                          onClick={() => setMixLayout(layout)}
+                        >
+                          {layout}
+                        </button>
+                      ))}
+                    </>
+                  )}
+                </div>
+                <div className="jam-mode-switch" aria-label="Prompt mode">
+                  {(['single', 'mix', 'solo'] as PromptMode[]).map(mode => (
+                    <button
+                      key={mode}
+                      className={promptMode === mode ? 'is-active' : ''}
+                      onClick={() => handleModeChange(mode)}
+                    >
+                      {mode}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
 
-            {/* Sliders */}
-            <div style={{
-              flex: '1 1 auto',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '20px',
-              paddingRight: '24px',
-            }}>
-              <JamSliderElastic
-                label="Chaos"
-                minA={0.5} midA={1.0} maxA={2.0}
-                minB={10}  midB={100} maxB={500}
-                accentColor={activeColor}
-                onChange={(temperature, topk) => {
-                  setParamsState(p => ({ ...p, temperature, topk }));
-                  sendParamChange(0, temperature);
-                  sendParamChange(1, topk);
-                }}
-              />
-              <JamSlider
-                label="Volume"
-                value={Math.min(1, Math.max(0, (paramsState.volume + 60) / 60))}
-                min={0}
-                max={1}
-                step={0.01}
-                onChange={(v) => {
-                  const db = parseFloat(((v * 60) - 60).toFixed(1));
-                  setParamsState(p => ({ ...p, volume: db }));
-                  sendParamChange(5, db);
-                }}
-              />
-            </div>
-          </div>
-
-          {/* CENTER COLUMN — Prompt Box with semicircle rockers on each side */}
-          <div style={{
-            width: CENTER_COL_WIDTH,
-            flexShrink: 0,
-            position: 'relative',
-            minWidth: 0,
-          }}>
-            {/* Rocker Left — semicircle, vertically centered */}
-            <IconButton
-              variant="jam"
-              onClick={handleRockerLeft}
-              sx={{
-                position: 'absolute',
-                left: 0,
-                top: '50%',
-                transform: 'translateY(-50%)',
-                width: 40,
-                height: 56,
-                borderRadius: '0 28px 28px 0',
-                zIndex: 5,
-              }}
-              title="Previous preset"
-            >
-              <ArrowBack sx={{ fontSize: 20, color: '#FFF', transform: 'translateX(-3px)' }} />
-            </IconButton>
-
-            {/* Prompt Box */}
             <div
-              className="jam-box"
-              onClick={(e) => {
-                if (e.target instanceof Element && e.target.closest('.upload-btn-container')) {
-                  return;
+              ref={promptSurfaceRef}
+              className={`jam-prompt-canvas is-${promptMode} is-mix-layout-${mixLayout} ${isPromptEditing ? 'is-editing' : ''}`}
+              tabIndex={promptMode === 'mix' || isPromptEditing ? 0 : -1}
+              role="textbox"
+              aria-label={`${activeModeLabel} prompt surface`}
+              onKeyDown={handlePromptSurfaceKeyDown}
+              onPaste={handlePromptSurfacePaste}
+              onBlur={() => {
+                if (promptMode === 'single' || promptMode === 'solo') {
+                  setIsPromptEditing(false);
                 }
-                if (promptInputRef.current) {
-                  promptInputRef.current.focus();
-                }
-              }}
-              style={{
-                position: 'absolute',
-                inset: 0,
-                display: 'flex',
-                flexDirection: 'column',
-                justifyContent: 'flex-start',
-                minWidth: 0,
-                padding: '12px 64px',
-                cursor: 'text',
               }}
             >
-              {/* Loading Spinner */}
-              {isProgressActive && (
-                <CircularProgress
-                  size={16}
-                  sx={{
-                    color: 'rgba(255, 255, 255, 0.6)',
-                    position: 'absolute',
-                    right: '12px',
-                    top: '12px',
-                    zIndex: 10,
-                  }}
-                />
+              {(promptMode === 'single' || promptMode === 'solo') && (
+                <div className="jam-single-prompt">
+                  <div className="jam-single-kicker">{activeModeLabel}</div>
+                  <button
+                    className="jam-single-text"
+                    style={{ color: activeColor }}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      setIsPromptEditing(true);
+                      window.setTimeout(() => promptSurfaceRef.current?.focus(), 0);
+                    }}
+                  >
+                    {draftText ? (
+                      <span className="jam-draft-text">{draftText}<span className="jam-caret" /></span>
+                    ) : (
+                      committedPromptLabel
+                    )}
+                  </button>
+                  <div className="jam-prompt-hint">{isPromptEditing ? (draftText ? 'Enter to apply' : 'type prompt') : 'keyboard plays'}</div>
+                  <div className="jam-corner jam-corner-tl" />
+                  <div className="jam-corner jam-corner-br" />
+                </div>
               )}
 
-              <TextField
-                value={promptText}
-                onChange={e => {
-                  const val = e.target.value;
-                  const oldVal = promptText;
-                  setPromptText(val);
-                  sendPrompt(val);
-                  setIsPromptEdited(true);
-
-                  const oldFirstChar = oldVal.charAt(0);
-                  const newFirstChar = val.charAt(0);
-                  const isBlank = val.trim() === "";
-
-                  if (!isBlank && newFirstChar !== oldFirstChar) {
-                    setActiveColor(getPromptColor(val));
-                  }
-                }}
-                onKeyDown={e => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    sendPrompt(promptText, true);
-                    promptInputRef.current?.blur();
-                  }
-                }}
-                onBlur={() => {
-                  sendPrompt(promptText, true);
-                }}
-                placeholder="Type a prompt or upload an audio file."
-                disabled={isAudioPrompt}
-                variant="standard"
-                fullWidth
-                multiline
-                maxRows={6}
-                inputRef={promptInputRef}
-                inputProps={{
-                  autoComplete: 'off',
-                  autoCorrect: 'off',
-                  autoCapitalize: 'off',
-                  spellCheck: 'false',
-                }}
-                InputProps={{
-                  disableUnderline: true,
-                  sx: {
-                    textWrap: 'pretty',
-                    color: activeColor,
-                    fontSize: '36px',
-                    fontWeight: 400,
-                    fontFamily: "'Google Sans', system-ui, sans-serif",
-                    lineHeight: 1.25,
-                    caretColor: activeColor,
-                    '&::placeholder': {
-                      color: 'rgba(255, 255, 255, 0.25)',
-                      opacity: 1,
-                    }
-                  }
-                }}
-                sx={{
-                  flex: '1 1 auto',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  justifyContent: 'center',
-                  '& .MuiInputBase-input': {
-                    padding: '0',
-                  },
-                  '& .MuiInputBase-input.Mui-disabled': {
-                    WebkitTextFillColor: activeColor,
-                  },
-                  '& .MuiInputBase-root': {
-                    alignItems: 'center',
-                    flex: '1 1 auto',
-                    display: 'flex',
-                  }
-                }}
-              />
-
-              <div
-                className="upload-btn-container"
-                style={{
-                  position: 'absolute',
-                  right: '12px',
-                  bottom: '12px',
-                  zIndex: 10,
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '4px',
-                }}>
-                {/* Save preset button — visible only when text prompt is modified (dirty) */}
-                {!isAudioPrompt && promptIsDirty && (
-                  <Tooltip title="Save preset" placement="top">
-                    <span>
-                      <IconButton
-                        variant="jam"
-                        onClick={handleSavePreset}
-                        sx={{
-                          width: 36,
-                          height: 36,
+              {promptMode === 'mix' && (
+                <div
+                  className="jam-mix-map"
+                  onPointerDown={(e) => {
+                    e.currentTarget.setPointerCapture(e.pointerId);
+                    updateMixWeightsFromPointer(e);
+                  }}
+                  onPointerMove={(e) => {
+                    if (e.buttons !== 1) return;
+                    updateMixWeightsFromPointer(e);
+                  }}
+                >
+                  <svg className="jam-mix-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                    {normalizedMixPrompts.map((item, index) => {
+                      const pos = mixPositions[index];
+                      return (
+                        <line
+                          key={item.id}
+                          x1={pos.x}
+                          y1={pos.y}
+                          x2={weightedCenter.x}
+                          y2={weightedCenter.y}
+                          stroke={item.color}
+                        />
+                      );
+                    })}
+                  </svg>
+                  <div
+                    className="jam-mix-node"
+                    style={{
+                      left: `${weightedCenter.x}%`,
+                      top: `${weightedCenter.y}%`,
+                    }}
+                  />
+                  {normalizedMixPrompts.map((item, index) => {
+                    const pos = mixPositions[index];
+                    const focused = index === focusedMixIndex;
+                    const label = focused && draftText ? draftText : item.text;
+                    return (
+                      <button
+                        key={item.id}
+                        className={`jam-prompt-chip ${focused ? 'is-focused' : ''} ${focused && draftText ? 'is-pending' : ''}`}
+                        style={{
+                          left: `${pos.x}%`,
+                          top: `${pos.y}%`,
+                          '--chip-color': item.color,
+                          '--line-x': `${weightedCenter.x - pos.x}%`,
+                          '--line-y': `${weightedCenter.y - pos.y}%`,
+                        } as React.CSSProperties}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setFocusedMixIndex(index);
+                          setDraftText('');
+                          setIsPromptEditing(true);
+                          promptSurfaceRef.current?.focus();
                         }}
                       >
-                        <Save sx={{ fontSize: 18, color: activeColor }} />
-                      </IconButton>
-                    </span>
-                  </Tooltip>
-                )}
-                {isAudioPrompt ? (
-                  <IconButton
-                    variant="jam"
-                    onClick={clearAudioPrompt}
-                    sx={{ width: 36, height: 36 }}
-                    title="Remove audio file"
-                  >
-                    <Close sx={{ fontSize: 18 }} />
-                  </IconButton>
-                ) : (
-                  <Tooltip title="Upload audio prompt" placement="top">
-                    <IconButton
-                      variant="jam"
-                      onClick={loadAudioPrompt}
-                      sx={{ width: 36, height: 36 }}
-                      title="Choose audio file"
-                    >
-                      <UploadFile sx={{ fontSize: 18 }} />
-                    </IconButton>
-                  </Tooltip>
-                )}
-              </div>
+                        <span className="jam-chip-index">{item.id}</span>
+                        <span className="jam-chip-text">{label}{focused && draftText && <span className="jam-caret" />}</span>
+                        <span className="jam-chip-weight">{item.displayWeight}%</span>
+                      </button>
+                    );
+                  })}
+                  <button className="jam-trash-button" title="Clear draft" onClick={(e) => { e.stopPropagation(); setDraftText(''); }}>x</button>
+                  <div className="jam-expand-glyph">open</div>
+                  <div className="jam-prompt-hint">{draftText ? 'Enter to apply' : `typing edits slot ${focusedMixIndex + 1}`}</div>
+                </div>
+              )}
             </div>
 
-            {/* Rocker Right — semicircle, vertically centered */}
-            <IconButton
-              variant="jam"
-              onClick={handleRockerRight}
-              sx={{
-                position: 'absolute',
-                right: 0,
-                top: '50%',
-                transform: 'translateY(-50%)',
-                width: 40,
-                height: 56,
-                borderRadius: '28px 0 0 28px',
-                zIndex: 5,
-              }}
-              title="Next preset"
-            >
-              <ArrowForward sx={{ fontSize: 20, color: '#FFF', transform: 'translateX(3px)' }} />
-            </IconButton>
-          </div>
+            {promptMode === 'mix' && (
+              <div className="jam-slot-row">
+                {normalizedMixPrompts.map((item, index) => (
+                  <button
+                    key={item.id}
+                    className={`jam-slot-pill ${index === focusedMixIndex ? 'is-focused' : ''}`}
+                    style={{ '--chip-color': item.color } as React.CSSProperties}
+                    onClick={() => {
+                    setFocusedMixIndex(index);
+                    setDraftText('');
+                    setPromptMode('mix');
+                    setIsPromptEditing(true);
+                    promptSurfaceRef.current?.focus();
+                  }}
+                >
+                    <span />
+                    <b>{item.text}</b>
+                    <em>{item.displayWeight}%</em>
+                    {index === focusedMixIndex && draftText && <i>pending</i>}
+                  </button>
+                ))}
+              </div>
+            )}
+          </section>
 
-          {/* RIGHT COLUMN — Buttons on top, sliders centered below */}
-          <div style={{
-            flex: '1 1 0px',
-            minWidth: 0,
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '16px',
-          }}>
-            {/* Reset / Play / Settings */}
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'flex-end',
-              gap: '8px',
-            }}>
-              <IconButton
-                variant="jam"
-                onClick={resetModel}
-                sx={{ width: 44, height: 44 }}
-                title="Reset model state"
-              >
-                <Refresh sx={{ fontSize: 20 }} />
+          <aside className="jam-side-controls">
+            <div className="jam-transport-row">
+              <IconButton variant="jam" onClick={handleRockerLeft} sx={{ width: 40, height: 40 }} title="Previous preset">
+                <ArrowBack sx={{ fontSize: 18, color: '#FFF' }} />
               </IconButton>
-
               {noModel ? (
                 <Tooltip title="No model selected" placement="top">
                   <span>{playButton}</span>
@@ -1064,67 +1261,94 @@ function App() {
               ) : (
                 playButton
               )}
-
-              <IconButton
-                variant="jam"
-                onClick={() => setIsSettingsOpen(true)}
-                sx={{ width: 44, height: 44 }}
-                title="Settings (Cmd+,)"
-              >
-                <TuneIcon sx={{ fontSize: 20 }} />
+              <IconButton variant="jam" onClick={handleRockerRight} sx={{ width: 40, height: 40 }} title="Next preset">
+                <ArrowForward sx={{ fontSize: 18, color: '#FFF' }} />
               </IconButton>
             </div>
 
-            {/* Sliders */}
-            <div style={{
-              flex: '1 1 auto',
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}>
-              <span style={{
-                fontFamily: "'Google Sans Text', system-ui, sans-serif",
-                fontSize: '11px',
-                fontWeight: 500,
-                color: '#1B1C17',
-                marginBottom: '8px',
-                letterSpacing: '0.3px',
-              }}>Strength</span>
-              <div style={{
-                flex: '1 1 auto',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                width: '100%',
-              }}>
-              <JamSlider
-                label="Notes"
-                value={paramsState.cfgnotesuser}
-                min={CFG_MIN}
-                max={CFG_MAX}
-                showValueOnThumb={true}
-                valueFormatter={v => (v === 0 || v === 5 ? v.toString() : v.toFixed(1))}
-                onChange={(v) => {
-                  setParamsState(p => ({ ...p, cfgnotesuser: v }));
-                  sendParamChange(4, v);
+            <div className="jam-performance-panel">
+              <div className="jam-performance-head">
+                <span>Probability Space</span>
+                <span>T: {paramsState.temperature.toFixed(2)} | K: {Math.round(paramsState.topk)}</span>
+              </div>
+              <div
+                ref={xyPadRef}
+                className="jam-xy-pad"
+                style={{
+                  '--xy-x': `${performance.filterX * 100}%`,
+                  '--xy-y': `${(1 - performance.filterY) * 100}%`,
+                } as React.CSSProperties}
+                onPointerDown={(e) => {
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                  handleXYPointer(e);
                 }}
-              />
-              <JamSlider
-                label="Style"
-                value={paramsState.cfgmusiccoca}
-                min={CFG_MIN}
-                max={CFG_MAX}
-                showValueOnThumb={true}
-                valueFormatter={v => (v === 0 || v === 5 ? v.toString() : v.toFixed(1))}
-                onChange={(v) => {
-                  setParamsState(p => ({ ...p, cfgmusiccoca: v }));
-                  sendParamChange(3, v);
+                onPointerMove={(e) => {
+                  if (e.buttons !== 1) return;
+                  handleXYPointer(e);
                 }}
-              />
+              >
+                <div className="jam-probability-crosshair-x" />
+                <div className="jam-probability-crosshair-y" />
+                <div
+                  className="jam-xy-dot"
+                  style={{
+                    left: `${performance.filterX * 100}%`,
+                    top: `${(1 - performance.filterY) * 100}%`,
+                  }}
+                />
+              </div>
+              <label className="jam-latch-row">
+                <input type="checkbox" checked readOnly />
+                latch
+              </label>
+            </div>
+
+            <div className="jam-performance-panel jam-fx-panel">
+              <div className="jam-performance-head">
+                <span>FX</span>
+                <span>Active</span>
+              </div>
+              <div className="jam-live-knobs">
+                {liveFxSliders.map(item => (
+                  <div
+                    className="jam-effect-knob"
+                    key={item.key}
+                    role="slider"
+                    tabIndex={0}
+                    aria-label={item.label}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={Math.round(item.value * 100)}
+                    title={`${item.label}: ${Math.round(item.value * 100)}`}
+                    onWheel={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      const rawDelta = -e.deltaY * 0.001;
+                      const cappedDelta = Math.max(-0.04, Math.min(0.04, rawDelta));
+                      nudgePerformance(item.key, item.value, e.shiftKey ? cappedDelta * 2.5 : cappedDelta);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+                      e.preventDefault();
+                      nudgePerformance(item.key, item.value, (e.key === 'ArrowUp' ? 1 : -1) * (e.shiftKey ? 0.05 : 0.01));
+                    }}
+                  >
+                    <div
+                      className="jam-knob-dial"
+                      style={{
+                        '--knob-pct': `${item.value * 75}%`,
+                        '--knob-rotation': `${-135 + item.value * 270}deg`,
+                      } as React.CSSProperties}
+                    >
+                      <span className="jam-knob-pointer" />
+                    </div>
+                    <span className="jam-effect-label">{item.label}</span>
+                    <span className="jam-effect-value">{Math.round(item.value * 100)}</span>
+                  </div>
+                ))}
               </div>
             </div>
-          </div>
+          </aside>
         </div>
       </div>
 
@@ -1134,17 +1358,27 @@ function App() {
       <div
         style={{
           flexShrink: 0,
-          height: '240px',
-          backgroundColor: '#000',
-          paddingTop: '10px',
+          height: '158px',
+          backgroundColor: '#070708',
+          paddingTop: '26px',
+          paddingLeft: '18px',
+          paddingRight: '18px',
+          paddingBottom: '10px',
+          boxSizing: 'border-box',
           position: 'relative',
         }}
       >
+        <div className="jam-keyboard-head">
+          <span>Instrument Prompt</span>
+          <span><span className="jam-active-dot" /> Active <b>Off</b></span>
+        </div>
+        <div className="jam-gate-toggle is-left">Gate Off</div>
+        <div className="jam-gate-toggle is-right">Full</div>
         {/* Octave Rocker — floats top-right over the keyboard */}
         <div style={{
           position: 'absolute',
-          top: '0',
-          right: '0',
+          top: '18px',
+          right: '18px',
           zIndex: 10,
           display: 'flex',
           alignItems: 'center',
@@ -1205,6 +1439,8 @@ function App() {
           startNote={keyboardStartNote}
           endNote={keyboardEndNote}
           keyboardMidiEnabled={keyboardMidiEnabled}
+          whiteKeyColor="#111214"
+          blackKeyColor="#030405"
           onNoteOn={(visualNote) => {
             // Remap visual piano note to actual MIDI note
             const note = keyboardMidiEnabled
@@ -1222,39 +1458,23 @@ function App() {
       </div>
 
       {/* ══════════════════════════════════════════════════════════════════
-          BLACK FOOTER — ModelSelector, MIDI, spacing, TimingIndicator, AudioMeter
+          BLACK FOOTER — MIDI, spacing, AudioMeter
           ══════════════════════════════════════════════════════════════════ */}
       <div
         style={{
           flexShrink: 0,
-          height: '76px',
+          height: '48px',
           background: '#000',
           color: '#FFF',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          padding: '8px 16px',
+          padding: '6px 16px',
           boxSizing: 'border-box',
         }}
       >
-        {/* Left cluster: ModelSelector + MIDI Input */}
+        {/* Left cluster: MIDI Input */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <ModelSelector
-            modelName={modelName}
-            localModels={localModels}
-            remoteModels={remoteModels}
-            downloadProgress={downloadProgress}
-
-            onSelectModel={(m) => post({ type: 'selectModel', name: m })}
-            onDownloadModel={(m) => post({ type: 'downloadModel', name: m })}
-            onDeleteModel={(m) => post({ type: 'deleteModel', name: m })}
-            onSelectFolder={() => post({ type: 'selectDownloadFolder' })}
-            buttonSx={{
-              color: '#FFF',
-              '&:hover': { background: 'rgba(255, 255, 255, 0.12)' },
-            }}
-          />
-
           <MidiSelector
             midiSources={midiSources}
             keyboardMidiEnabled={keyboardMidiEnabled}
@@ -1266,20 +1486,8 @@ function App() {
         {/* Spacer */}
         <div style={{ flex: '1 1 auto' }} />
 
-        {/* Right cluster: TimingIndicator + AudioMeter */}
+        {/* Right cluster: AudioMeter */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-          <TimingIndicator
-            frameMs={metrics.frameMs}
-            droppedFrames={metrics.droppedFrames}
-            buffersize={paramsState.buffersize}
-            onBufferChange={(v) => sendParamChange(8, v)}
-            buttonSx={{
-              color: '#FFF',
-              '&:hover': { background: 'rgba(255, 255, 255, 0.12)' },
-            }}
-            isPlaying={isPlaying}
-          />
-
           <AudioMeter leftLevel={audioLevels.left} rightLevel={audioLevels.right} width="45px" height="14px" />
         </div>
       </div>

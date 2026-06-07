@@ -131,7 +131,7 @@ static BOOL isDevServerRunning(void) {
     AUParameter* unmaskWidthParam = makeParam(@"unmaskwidth", @"Unmask width", 7, 0, 127, 0);
 
     NSUserDefaults* defaults = [NSUserDefaults standardUserDefaults];
-    float savedBufSize = [defaults objectForKey:@"MagentaRT_AU_BufferSize"] ? [defaults floatForKey:@"MagentaRT_AU_BufferSize"] : 0.0f;
+    float savedBufSize = [defaults objectForKey:@"MagentaRT_AU_BufferSize"] ? [defaults floatForKey:@"MagentaRT_AU_BufferSize"] : 1.0f;
 
     AUParameter* bufSizeParam = [AUParameterTree
         createParameterWithIdentifier:@"buffersize" name:@"Buffer Size" address:8 min:0.0 max:2.0
