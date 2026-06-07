@@ -594,6 +594,38 @@ input[type="range"]::-webkit-slider-thumb {
   font-size: 10px;
 }
 
+/* BPM lock row */
+.jam-bpm-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: rgba(255, 255, 255, 0.54);
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 10px;
+  text-transform: lowercase;
+}
+
+.jam-bpm-row input {
+  width: 56px;
+  padding: 4px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font-family: inherit;
+  font-size: 11px;
+  text-align: center;
+  outline: none;
+}
+
+.jam-bpm-row input:disabled {
+  opacity: 0.4;
+}
+
+.jam-bpm-row input:focus {
+  border-color: rgba(255, 255, 255, 0.4);
+}
+
 /* Collider-style surface layout */
 .jam-surface-host {
   position: absolute;

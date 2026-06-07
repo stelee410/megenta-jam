@@ -292,6 +292,38 @@ function App() {
   const [isSoloMode, setIsSoloMode] = useState(false);
   const lastSentSoloMode = useRef(false);
 
+  // ─── BPM lock ─────────────────────────────────────────────────────────────
+  // The model has no tempo conditioning input, so "locking" BPM is done by
+  // (a) injecting a metronome MIDI pulse each beat (note conditioning is a
+  // hard, frame-accurate signal the model entrains to) and (b) appending
+  // "<bpm> bpm" to every prompt sent to the engine as a soft style hint.
+  const [bpmLock, setBpmLock] = useState(false);
+  const [bpmValue, setBpmValue] = useState(120);
+  // Free-typing text buffer for the BPM box; parsed/applied on blur or Enter.
+  const [bpmText, setBpmText] = useState('120');
+  const bpmRef = useRef({ lock: false, value: 120 });
+  bpmRef.current = { lock: bpmLock, value: bpmValue };
+
+  /** Parse the typed BPM and apply it (clamped); reset the box if invalid. */
+  const commitBpmText = () => {
+    const v = parseInt(bpmText.trim(), 10);
+    if (Number.isNaN(v)) {
+      setBpmText(String(bpmValue));
+      return;
+    }
+    const clamped = Math.max(40, Math.min(220, v));
+    setBpmValue(clamped);
+    setBpmText(String(clamped));
+  };
+
+  /** Append the locked BPM to a prompt text. Reads refs only, so it stays
+   *  correct inside stale closures (e.g. memoized senders). */
+  const withBpm = (text: string) => {
+    const t = text.trim();
+    if (!bpmRef.current.lock || !t) return t;
+    return `${t} ${Math.round(bpmRef.current.value)} bpm`;
+  };
+
   // ─── User preset overrides ───────────────────────────────────────────────
   // Sparse overlay: only indices the user has explicitly saved get entries.
   // `null` means "use factory default" (reserved for future reset support).
@@ -467,11 +499,12 @@ function App() {
   };
 
   const sendPrompt = (
-    text: string,
+    rawText: string,
     immediate = false,
     soloOverride?: boolean,
   ) => {
     const soloActive = soloOverride !== undefined ? soloOverride : isSoloMode;
+    const text = withBpm(rawText);
     const textWithPrefix = soloActive ? `SOLO ${text}` : text;
     const signature = `${soloActive ? 'solo' : 'single'}\u0000${text}`;
 
@@ -512,7 +545,7 @@ function App() {
     const activeItems = items.filter(item => item.enabled && item.text.trim() && item.weight > 0);
     const total = activeItems.reduce((sum, item) => sum + item.weight, 0) || 1;
     const prompts = activeItems.map(item => ({
-      text: item.text,
+      text: withBpm(item.text),
       weight: item.weight / total,
     }));
     const signature = `mix\u0000${prompts.map(p => `${p.text}:${p.weight.toFixed(3)}`).join('\u0000')}`;
@@ -731,10 +764,10 @@ function App() {
     const data: { text: string; weight: number }[] =
       Array.from({ length: MAX_SURFACE_PROMPTS }, () => ({ text: '', weight: 0 }));
     nodes.forEach((p, i) => {
-      if (i < MAX_SURFACE_PROMPTS) data[i] = { text: p.label, weight: weights[i] ?? 0 };
+      if (i < MAX_SURFACE_PROMPTS) data[i] = { text: withBpm(p.label), weight: weights[i] ?? 0 };
     });
     // Mark the dedup signature so switching back to other modes re-sends.
-    lastSentText.current = `surface ${data.map(d => `${d.text}:${d.weight.toFixed(3)}`).join(' ')}`;
+    lastSentText.current = `surface\u0000${data.map(d => `${d.text}:${d.weight.toFixed(3)}`).join('\u0000')}`;
     lastSentSoloMode.current = false;
     post({ type: 'textPrompts', value: data });
   }, []);
@@ -1110,6 +1143,55 @@ function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isPlaying, deckFader]);
+
+  // ─── BPM lock: metronome pulse + prompt re-send ───────────────────────────
+
+  // Inject a short MIDI pulse on every beat while playing. Note conditioning
+  // is a hard, frame-accurate signal, so the model entrains to the pulse.
+  // Disabled in solo mode (pulses would fight the note-gated solo envelope).
+  useEffect(() => {
+    if (!bpmLock || !isPlaying || isSoloMode) return;
+    const METRONOME_NOTE = 36; // C2 — kick register
+    const intervalMs = 60000 / Math.max(40, Math.min(220, bpmValue));
+    const gateMs = Math.min(110, intervalMs * 0.45);
+    let cancelled = false;
+    let timer = 0;
+    let gateTimer = 0;
+    let nextBeat = Date.now();
+    const tick = () => {
+      if (cancelled) return;
+      post({ type: 'kbdNote', note: METRONOME_NOTE, on: true });
+      gateTimer = window.setTimeout(() => {
+        post({ type: 'kbdNote', note: METRONOME_NOTE, on: false });
+      }, gateMs);
+      // Self-correcting schedule: accumulate the ideal beat time so timer
+      // jitter never drifts the average tempo.
+      nextBeat += intervalMs;
+      timer = window.setTimeout(tick, Math.max(0, nextBeat - Date.now()));
+    };
+    tick();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+      clearTimeout(gateTimer);
+      post({ type: 'kbdNote', note: METRONOME_NOTE, on: false });
+    };
+  }, [bpmLock, bpmValue, isPlaying, isSoloMode]);
+
+  // Re-push the current prompts whenever the BPM lock/value changes so the
+  // "<bpm> bpm" suffix reaches the engine without requiring a manual edit.
+  useEffect(() => {
+    if (promptMode === 'mix') {
+      if (mixLayout === 'surface') {
+        if (surfaceInitialized.current) sendSurfacePrompts();
+      } else {
+        sendMixPrompts(layoutSendList(mixPrompts, mixLayout), false);
+      }
+    } else if (promptText.trim()) {
+      sendPrompt(promptText, false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bpmLock, bpmValue]);
 
   // Solo mode: auto-stop after timeout of no incoming notes
   useEffect(() => {
@@ -1692,6 +1774,32 @@ function App() {
               <IconButton variant="jam" onClick={handleRockerRight} sx={{ width: 40, height: 40 }} title="Next preset">
                 <ArrowForward sx={{ fontSize: 18, color: '#FFF' }} />
               </IconButton>
+            </div>
+
+            <div className="jam-bpm-row">
+              <button
+                className={`jam-mini-button ${bpmLock ? 'is-active' : ''}`}
+                title="Lock tempo: metronome pulse + bpm appended to prompts"
+                onClick={() => setBpmLock(v => !v)}
+              >
+                bpm lock
+              </button>
+              <input
+                type="text"
+                inputMode="numeric"
+                value={bpmText}
+                disabled={!bpmLock}
+                onChange={(e) => setBpmText(e.target.value)}
+                onBlur={commitBpmText}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === 'Enter') {
+                    commitBpmText();
+                    (e.target as HTMLInputElement).blur();
+                  }
+                }}
+              />
+              <span>bpm</span>
             </div>
 
             <div className="jam-performance-panel">
