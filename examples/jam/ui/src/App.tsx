@@ -256,11 +256,14 @@ function App() {
   const applyPresetAtIndex = useCallback((list: string[], index: number) => {
     const preset = list[index];
     if (preset) {
-      setComposerText(preset);
+      if (isAudioPrompt) post({ type: 'clearAudioPrompt' });
+      setIsAudioPrompt(false);
+      setPromptText(preset);
       setActiveColor(getPromptColor(preset));
+      sendPrompt(preset, true, isSoloMode);
       setIsPromptEdited(false);
     }
-  }, []);
+  }, [isAudioPrompt, isSoloMode]);
 
   /** Navigate to the next/previous preset sequentially. */
   const navigatePreset = useCallback((direction: 1 | -1) => {

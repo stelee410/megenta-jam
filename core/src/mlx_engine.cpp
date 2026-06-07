@@ -142,7 +142,10 @@ struct MLXEngine::Impl {
   // if the mapper isn't loaded. Mirrors musiccoca.py's mapper path.
   bool apply_mapper(float *embedding);
   bool quantize_embedding(const float *embedding, std::vector<int> &out_tokens);
-  void fetch_musiccoca_tokens(const std::vector<std::string> &texts,
+  // Returns false on a (typically transient) failure — e.g. a TFLite invoke
+  // failing while the main model is loading/compiling — so the caller can
+  // retry. Returns true on success.
+  bool fetch_musiccoca_tokens(const std::vector<std::string> &texts,
                               const std::vector<float> &weights);
   void start_inference_thread_if_needed();
 
@@ -1317,7 +1320,14 @@ void MLXEngine::Impl::reset_state() {
       add_log(err);
     }
   }
-  is_musiccoca_fetching_ = false;
+  // NOTE: do NOT touch `is_musiccoca_fetching_` here. That flag guards the
+  // single text-encode thread (TFLite interpreters are not thread-safe) and
+  // is owned by start_inference_thread_if_needed()'s Guard. reset_state()
+  // runs when a model finishes loading (via start_locked) — clearing the
+  // flag here while a startup prompt encode is in flight let a second
+  // encode thread spawn, and the two threads' concurrent TFLite invokes
+  // failed each other in lockstep, leaving the engine stuck on default
+  // conditioning.
 
   // Check if we have active prompts still loaded
   bool has_active_prompts = false;
@@ -1697,21 +1707,49 @@ void MLXEngine::Impl::start_inference_thread_if_needed() {
     } guard{is_musiccoca_fetching_, this};
 
     try {
-      while (true) {
-        std::vector<std::string> texts_copy;
-        std::vector<float> weights_copy;
+      std::vector<std::string> texts_copy;
+      std::vector<float> weights_copy;
+      bool have_work = false;
+      int retries = 0;
+      // A fetch can fail transiently (e.g. a TFLite invoke failing while the
+      // main model is loading/compiling on another thread). Retry with a
+      // linear backoff instead of silently dropping the prompt — otherwise
+      // the engine keeps generating with stale/default conditioning until
+      // the user happens to re-enter a prompt.
+      constexpr int kMaxFetchRetries = 12;
 
+      while (true) {
         {
           std::lock_guard<std::mutex> lock(musiccoca_mutex_);
-          if (!has_pending_musiccoca_) {
-            break;
+          if (has_pending_musiccoca_) {
+            // A newer request supersedes any in-flight retry.
+            texts_copy = pending_texts_;
+            weights_copy = pending_weights_;
+            has_pending_musiccoca_ = false;
+            have_work = true;
+            retries = 0;
           }
-          texts_copy = pending_texts_;
-          weights_copy = pending_weights_;
-          has_pending_musiccoca_ = false;
+        }
+        if (!have_work) {
+          break;
         }
 
-        fetch_musiccoca_tokens(texts_copy, weights_copy);
+        if (fetch_musiccoca_tokens(texts_copy, weights_copy)) {
+          have_work = false; // success — loop once more for newer pendings
+          continue;
+        }
+
+        if (++retries > kMaxFetchRetries) {
+          add_log("[MagentaRT] fetch_musiccoca_tokens: giving up after " +
+                  std::to_string(kMaxFetchRetries) + " retries.");
+          have_work = false;
+          continue;
+        }
+        add_log("[MagentaRT] fetch_musiccoca_tokens failed; retrying (" +
+                std::to_string(retries) + "/" +
+                std::to_string(kMaxFetchRetries) + ")");
+        text_encoder_status_ = 1; // keep "fetching" visible during retries
+        std::this_thread::sleep_for(std::chrono::milliseconds(250 * retries));
       }
     } catch (const std::exception &e) {
       add_log(
@@ -1990,7 +2028,7 @@ bool MLXEngine::Impl::quantize_embedding(const float *embedding,
   return true;
 }
 
-void MLXEngine::Impl::fetch_musiccoca_tokens(
+bool MLXEngine::Impl::fetch_musiccoca_tokens(
     const std::vector<std::string> &texts, const std::vector<float> &weights) {
   add_log("[MagentaRT] fetch_musiccoca_tokens started.");
   bool has_audio = false;
@@ -2010,7 +2048,7 @@ void MLXEngine::Impl::fetch_musiccoca_tokens(
             "interpreters missing.");
     text_encoder_status_ = 3;
     quantizer_status_ = 3;
-    return;
+    return false;
   }
 
   // Check for special "musiccoca:" override (only if there is exactly 1
@@ -2064,7 +2102,7 @@ void MLXEngine::Impl::fetch_musiccoca_tokens(
       }
       text_encoder_status_ = 2; // success
       quantizer_status_ = 2;    // success
-      return;                   // Skip standard pipeline
+      return true;              // Skip standard pipeline
     }
     std::cout << "[MagentaRT] Failed to parse musiccoca override (found "
               << tokens.size() << " tokens), falling back to text."
@@ -2172,7 +2210,7 @@ void MLXEngine::Impl::fetch_musiccoca_tokens(
           text_encoder_status_ = 3;
           prompt_statuses_[i] = 3; // error
           quantizer_status_ = 3;
-          return;
+          return false;
         }
         // Store in global cache
         std::vector<float> emb_vec(
@@ -2254,7 +2292,7 @@ void MLXEngine::Impl::fetch_musiccoca_tokens(
   if (!quantize_embedding(acc_embedding, tokens_result)) {
     add_log("[MagentaRT] fetch_musiccoca_tokens failed quantization.");
     quantizer_status_ = 3;
-    return;
+    return false;
   }
 
   std::cout << "[MagentaRT] Combined Prompt (" << texts.size() << ") tokens: ";
@@ -2277,6 +2315,7 @@ void MLXEngine::Impl::fetch_musiccoca_tokens(
   }
   quantizer_status_ = 2; // success
   add_log("[MagentaRT] fetch_musiccoca_tokens success.");
+  return true;
 }
 
 bool MLXEngine::Impl::load_pca_data(const float *mean, const float *components,
