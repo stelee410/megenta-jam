@@ -548,6 +548,26 @@ input[type="range"]::-webkit-slider-thumb {
   background: var(--chip-color);
   color: #050607;
   font-size: 11px;
+  cursor: pointer;
+  transition: box-shadow 0.12s ease, transform 0.12s ease;
+}
+
+.jam-chip-index:hover {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--chip-color), transparent 55%);
+  transform: scale(1.08);
+}
+
+/* Disabled mix chips: dimmed, weight shows "off", excluded from the blend */
+.jam-prompt-chip.is-disabled {
+  opacity: 0.38;
+  filter: grayscale(0.55);
+  border-style: dashed;
+}
+
+.jam-prompt-chip.is-disabled .jam-chip-index {
+  background: transparent;
+  color: var(--chip-color);
+  box-shadow: inset 0 0 0 1.5px var(--chip-color);
 }
 
 .jam-chip-text {
@@ -563,7 +583,6 @@ input[type="range"]::-webkit-slider-thumb {
   font-size: 10px;
 }
 
-.jam-trash-button,
 .jam-expand-glyph {
   position: absolute;
   z-index: 6;
@@ -575,13 +594,60 @@ input[type="range"]::-webkit-slider-thumb {
   font-size: 10px;
 }
 
-.jam-trash-button {
+/* DJ crossfader (standard mix layout) */
+.jam-prompt-chip.is-deck {
+  max-width: 26%;
+}
+
+.jam-xfader {
+  position: absolute;
+  left: 29%;
+  right: 29%;
+  top: 42%;
+  height: 40px;
+  transform: translateY(-50%);
+  z-index: 4;
+  pointer-events: none;
+}
+
+.jam-xfader-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 5px;
+  transform: translateY(-50%);
+  border-radius: 3px;
+  opacity: 0.75;
+}
+
+.jam-xfader-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 16px;
+  transform: translateX(-50%);
+  border-radius: 5px;
+  background: #f4f4f5;
+  border: 1px solid rgba(0, 0, 0, 0.55);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.18), 0 8px 18px rgba(0, 0, 0, 0.45);
+  transition: left 0.06s linear;
+}
+
+.jam-xfader-handle::after {
+  content: "";
+  position: absolute;
   left: 50%;
-  top: 65%;
-  width: 30px;
-  height: 30px;
-  transform: translate(-50%, -50%);
-  cursor: pointer;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  transform: translateX(-50%);
+  border-radius: 1px;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.jam-slot-row.is-dj {
+  grid-template-columns: 1fr 1fr;
 }
 
 .jam-expand-glyph {
@@ -617,11 +683,32 @@ input[type="range"]::-webkit-slider-thumb {
 
 .jam-slot-pill span {
   flex: 0 0 auto;
-  width: 9px;
-  height: 9px;
+  width: 11px;
+  height: 11px;
   margin-left: 2px;
   border-radius: 50%;
   background: var(--chip-color);
+  cursor: pointer;
+  transition: box-shadow 0.12s ease, transform 0.12s ease;
+}
+
+.jam-slot-pill span:hover {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--chip-color), transparent 55%);
+  transform: scale(1.15);
+}
+
+.jam-slot-pill.is-disabled {
+  opacity: 0.45;
+}
+
+.jam-slot-pill.is-disabled span {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--chip-color);
+}
+
+.jam-slot-pill.is-disabled span:hover {
+  box-shadow: inset 0 0 0 1.5px var(--chip-color),
+    0 0 0 3px color-mix(in srgb, var(--chip-color), transparent 55%);
 }
 
 .jam-slot-pill b {
@@ -1101,6 +1188,43 @@ body.cursor-grabbing * {
 .jam-probability-crosshair-x,
 .jam-probability-crosshair-y {
   display: none;
+}
+
+/* XY pad mode switch (Prob / Filter) */
+.jam-pad-mode-switch {
+  display: inline-flex;
+  gap: 3px;
+}
+
+.jam-pad-mode-switch button {
+  padding: 2px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 5px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.5);
+  font-family: inherit;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.9px;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.jam-pad-mode-switch button:hover {
+  color: rgba(255, 255, 255, 0.82);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.jam-pad-mode-switch button.is-active {
+  background: #36373a;
+  border-color: transparent;
+  color: #fff;
+}
+
+/* Spring-back animation when not dragging (unlatched release) */
+.jam-side-controls .jam-xy-dot.is-anim {
+  transition: left 0.18s ease, top 0.18s ease;
 }
 
 .jam-latch-row {

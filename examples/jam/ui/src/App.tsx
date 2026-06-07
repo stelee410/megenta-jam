@@ -104,15 +104,16 @@ type MixPrompt = {
   text: string;
   weight: number;
   color: string;
+  enabled: boolean;
 };
 
 const DEFAULT_MIX_PROMPTS: MixPrompt[] = [
-  { id: 1, text: 'techno', weight: 0.34, color: '#ff4f7b' },
-  { id: 2, text: 'glitch', weight: 0.08, color: '#6aa6ff' },
-  { id: 3, text: 'hard bop', weight: 0.12, color: '#f0aa26' },
-  { id: 4, text: 'piano arp', weight: 0.26, color: '#49d7a6' },
-  { id: 5, text: 'vinyl hiss', weight: 0.06, color: '#9f8cff' },
-  { id: 6, text: 'deep bass', weight: 0.14, color: '#f06a44' },
+  { id: 1, text: 'techno', weight: 0.34, color: '#ff4f7b', enabled: true },
+  { id: 2, text: 'glitch', weight: 0.08, color: '#6aa6ff', enabled: true },
+  { id: 3, text: 'hard bop', weight: 0.12, color: '#f0aa26', enabled: true },
+  { id: 4, text: 'piano arp', weight: 0.26, color: '#49d7a6', enabled: true },
+  { id: 5, text: 'vinyl hiss', weight: 0.06, color: '#9f8cff', enabled: true },
+  { id: 6, text: 'deep bass', weight: 0.14, color: '#f06a44', enabled: true },
 ];
 
 const STANDARD_MIX_POSITIONS = [
@@ -143,6 +144,42 @@ const SURFACE_MIX_POSITIONS = [
 ];
 
 const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
+
+// ─── XY pad (Probability Space / Res-Filter) ────────────────────────────────
+
+type XYPadMode = 'prob' | 'filter';
+
+const PAD_TEMP_MAX = 3;
+const PAD_TOPK_MAX = 1024;
+
+// Piecewise-linear mappings chosen so the pad CENTER corresponds exactly to
+// the default values (T=DEFAULT_TEMPERATURE, K=DEFAULT_TOPK) — unlatched
+// gestures spring back to center = back to the default sound.
+const tempFromPadX = (x: number) =>
+  x <= 0.5
+    ? (x / 0.5) * DEFAULT_TEMPERATURE
+    : DEFAULT_TEMPERATURE + ((x - 0.5) / 0.5) * (PAD_TEMP_MAX - DEFAULT_TEMPERATURE);
+
+const padXFromTemp = (t: number) =>
+  clamp01(t <= DEFAULT_TEMPERATURE
+    ? (t / DEFAULT_TEMPERATURE) * 0.5
+    : 0.5 + ((t - DEFAULT_TEMPERATURE) / (PAD_TEMP_MAX - DEFAULT_TEMPERATURE)) * 0.5);
+
+const topkFromPadY = (y: number) =>
+  Math.round(y <= 0.5
+    ? 1 + (y / 0.5) * (DEFAULT_TOPK - 1)
+    : DEFAULT_TOPK + ((y - 0.5) / 0.5) * (PAD_TOPK_MAX - DEFAULT_TOPK));
+
+const padYFromTopk = (k: number) =>
+  clamp01(k <= DEFAULT_TOPK
+    ? ((k - 1) / (DEFAULT_TOPK - 1)) * 0.5
+    : 0.5 + ((k - DEFAULT_TOPK) / (PAD_TOPK_MAX - DEFAULT_TOPK)) * 0.5);
+
+// DJ-style filter mapping: pad center = no effect. Left half sweeps the
+// lowpass cutoff down (darker), center and right stay fully open; the top
+// half adds resonance, center and below stay neutral.
+const filterXFromPad = (x: number) => clamp01(2 * x);
+const filterYFromPad = (y: number) => clamp01(2 * y - 1);
 
 const getMixPositions = (layout: MixLayoutMode) => {
   if (layout === 'circle') return CIRCLE_MIX_POSITIONS;
@@ -211,6 +248,12 @@ function App() {
     reverbMix: 0.0,
     limiter: 0.35,
   });
+
+  // XY pad: 'prob' drives temperature/topK, 'filter' drives cutoff/resonance
+  const [padMode, setPadMode] = useState<XYPadMode>('prob');
+  const [padLatch, setPadLatch] = useState(true);
+  const [isPadDragging, setIsPadDragging] = useState(false);
+  const [filterPadPos, setFilterPadPos] = useState({ x: 0.5, y: 0.5 });
 
   // Color state
   const [activeColor, setActiveColor] = useState(() => ALL_COLORS[Math.floor(Math.random() * ALL_COLORS.length)]);
@@ -319,7 +362,7 @@ function App() {
     setParamsState(p => ({ ...p, unmaskwidth: solo ? 127 : 0 }));
 
     if (mode === 'mix') {
-      sendMixPrompts(mixPrompts, false);
+      sendMixPrompts(layoutSendList(mixPrompts, mixLayout), false);
       return;
     }
 
@@ -425,8 +468,14 @@ function App() {
     }
   };
 
+  /** In the DJ 'standard' layout only the two deck chips (slots 1+2) are audible. */
+  const layoutSendList = (items: MixPrompt[], layout: MixLayoutMode) =>
+    layout === 'standard'
+      ? items.map((item, i) => (i < 2 ? item : { ...item, weight: 0 }))
+      : items;
+
   const sendMixPrompts = (items: MixPrompt[], immediate = true) => {
-    const activeItems = items.filter(item => item.text.trim() && item.weight > 0);
+    const activeItems = items.filter(item => item.enabled && item.text.trim() && item.weight > 0);
     const total = activeItems.reduce((sum, item) => sum + item.weight, 0) || 1;
     const prompts = activeItems.map(item => ({
       text: item.text,
@@ -490,10 +539,11 @@ function App() {
       setMixPrompts(prev => {
         const next = prev.map((item, index) => (
           index === focusedMixIndex
-            ? { ...item, text, color: getPromptColor(text) }
+            // Typing into a disabled chip re-enables it.
+            ? { ...item, text, color: getPromptColor(text), enabled: true }
             : item
         ));
-        sendMixPrompts(next, true);
+        sendMixPrompts(layoutSendList(next, mixLayout), true);
         return next;
       });
       setDraftText('');
@@ -510,7 +560,7 @@ function App() {
     setDraftText('');
     setIsPromptEditing(false);
     promptSurfaceRef.current?.blur();
-  }, [draftText, focusedMixIndex, isAudioPrompt, promptMode]);
+  }, [draftText, focusedMixIndex, isAudioPrompt, promptMode, mixLayout]);
 
   const handlePromptSurfaceKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
     if ((promptMode === 'single' || promptMode === 'solo') && !isPromptEditing) return;
@@ -540,7 +590,9 @@ function App() {
     if (e.key === 'Tab') {
       if (promptMode !== 'mix') return;
       e.preventDefault();
-      setFocusedMixIndex(index => (index + (e.shiftKey ? 5 : 1)) % 6);
+      // The DJ 'standard' layout only exposes the two deck slots.
+      const slotCount = mixLayout === 'standard' ? 2 : 6;
+      setFocusedMixIndex(index => (index + (e.shiftKey ? slotCount - 1 : 1)) % slotCount);
       setDraftText('');
       return;
     }
@@ -550,7 +602,7 @@ function App() {
       setDraftText(prev => prev + e.key);
       setIsPromptEdited(true);
     }
-  }, [commitDraftText, isPromptEditing, promptMode]);
+  }, [commitDraftText, isPromptEditing, promptMode, mixLayout]);
 
   const handlePromptSurfacePaste = useCallback((e: React.ClipboardEvent<HTMLDivElement>) => {
     const text = e.clipboardData.getData('text/plain');
@@ -564,6 +616,22 @@ function App() {
     const rect = e.currentTarget.getBoundingClientRect();
     const x = clamp01((e.clientX - rect.left) / rect.width) * 100;
     const y = clamp01((e.clientY - rect.top) / rect.height) * 100;
+
+    if (mixLayout === 'standard') {
+      // DJ crossfader: horizontal position blends deck A (slot 1) ↔ deck B (slot 2).
+      const f = clamp01((x - 25) / 50); // full sweep across the middle half
+      setMixPrompts(prev => {
+        const next = prev.map((item, index) => (
+          index === 0 ? { ...item, weight: 1 - f }
+            : index === 1 ? { ...item, weight: f }
+              : item
+        ));
+        sendMixPrompts(layoutSendList(next, 'standard'), false);
+        return next;
+      });
+      return;
+    }
+
     const positions = getMixPositions(mixLayout);
     const raw = positions.map(pos => {
       const dx = pos.x - x;
@@ -574,13 +642,28 @@ function App() {
       }
       return 1 / Math.max(mixLayout === 'circle' ? 8 : 12, distance);
     });
-    const total = raw.reduce((sum, value) => sum + value, 0) || 1;
     setMixPrompts(prev => {
-      const next = prev.map((item, index) => ({
-        ...item,
-        weight: raw[index] / total,
-      }));
+      // Disabled chips don't attract weight and don't dilute the others.
+      const total = raw.reduce((sum, value, index) => sum + (prev[index].enabled ? value : 0), 0) || 1;
+      const next = prev.map((item, index) => (
+        item.enabled ? { ...item, weight: raw[index] / total } : item
+      ));
       sendMixPrompts(next, false);
+      return next;
+    });
+  }, [mixLayout]);
+
+  /** Enable/disable a mix chip. Keeps at least one chip enabled. */
+  const toggleMixPrompt = useCallback((index: number) => {
+    setMixPrompts(prev => {
+      const target = prev[index];
+      if (!target) return prev;
+      const enabledCount = prev.filter(item => item.enabled).length;
+      if (target.enabled && enabledCount <= 1) return prev; // never disable the last one
+      const next = prev.map((item, i) => (
+        i === index ? { ...item, enabled: !item.enabled } : item
+      ));
+      sendMixPrompts(layoutSendList(next, mixLayout), true);
       return next;
     });
   }, [mixLayout]);
@@ -605,8 +688,35 @@ function App() {
     const rect = el.getBoundingClientRect();
     const x = clamp01((e.clientX - rect.left) / rect.width);
     const y = clamp01(1 - ((e.clientY - rect.top) / rect.height));
-    sendPerformanceChange('filterX', x);
-    sendPerformanceChange('filterY', y);
+    if (padMode === 'filter') {
+      setFilterPadPos({ x, y });
+      sendPerformanceChange('filterX', filterXFromPad(x));
+      sendPerformanceChange('filterY', filterYFromPad(y));
+    } else {
+      const t = tempFromPadX(x);
+      const k = topkFromPadY(y);
+      sendParamChange(0, t);
+      sendParamChange(1, k);
+      setParamsState(p => ({ ...p, temperature: t, topk: k }));
+    }
+  };
+
+  /** Unlatched release: spring back to center = the mode's default values. */
+  const springPadToDefault = () => {
+    if (padMode === 'filter') {
+      setFilterPadPos({ x: 0.5, y: 0.5 });
+      sendPerformanceChange('filterX', 1.0);
+      sendPerformanceChange('filterY', 0.0);
+    } else {
+      sendParamChange(0, DEFAULT_TEMPERATURE);
+      sendParamChange(1, DEFAULT_TOPK);
+      setParamsState(p => ({ ...p, temperature: DEFAULT_TEMPERATURE, topk: DEFAULT_TOPK }));
+    }
+  };
+
+  const handlePadRelease = () => {
+    setIsPadDragging(false);
+    if (!padLatch) springPadToDefault();
   };
 
   const handleResetDefaults = () => {
@@ -620,6 +730,7 @@ function App() {
     sendParamChange(39, 0);   // drumless
     sendParamChange(46, 0);   // onsetmode = false (Auto-Strum = true)
     setParamsState(p => ({ ...p, cfgnotesuser: DEFAULT_CFG_NOTES, cfgmusiccoca: DEFAULT_CFG_MUSICCOCA }));
+    setFilterPadPos({ x: 0.5, y: 0.5 });
     ([
       ['filterX', 1.0],
       ['filterY', 0.02],
@@ -935,6 +1046,19 @@ function App() {
     { key: 'limiter', label: 'Limiter', value: performance.limiter },
   ];
 
+  // XY pad dot position + readout for the active mode
+  const padPos = padMode === 'filter'
+    ? filterPadPos
+    : { x: padXFromTemp(paramsState.temperature), y: padYFromTopk(paramsState.topk) };
+  const padCutoffHz = 80 * Math.pow(18000 / 80, filterXFromPad(filterPadPos.x));
+  const padCutoffLabel = padCutoffHz >= 1000
+    ? `${(padCutoffHz / 1000).toFixed(1)}k`
+    : `${Math.round(padCutoffHz)}`;
+  const padResPct = Math.round(filterYFromPad(filterPadPos.y) * 100);
+  const padReadout = padMode === 'prob'
+    ? `T: ${paramsState.temperature.toFixed(2)} | K: ${Math.round(paramsState.topk)}`
+    : `${padCutoffLabel}Hz | Q: ${padResPct}%`;
+
   // Current preset list for the rocker display
   const currentPresetList = getActivePresetList(isSoloMode);
 
@@ -943,13 +1067,14 @@ function App() {
   const promptIsDirty = isPromptEdited && promptText.trim() !== '' && promptText !== savedPresetText;
   const committedPromptLabel = isAudioPrompt ? 'Audio prompt loaded' : (promptText || 'just type');
   const activeModeLabel = promptMode.toUpperCase();
-  const totalMixWeight = mixPrompts.reduce((sum, item) => sum + item.weight, 0) || 1;
+  const totalMixWeight = mixPrompts.reduce((sum, item) => sum + (item.enabled ? item.weight : 0), 0) || 1;
   const mixPositions = getMixPositions(mixLayout);
   const normalizedMixPrompts = mixPrompts.map(item => ({
     ...item,
-    displayWeight: Math.round((item.weight / totalMixWeight) * 100),
+    displayWeight: item.enabled ? Math.round((item.weight / totalMixWeight) * 100) : 0,
   }));
   const weightedCenter = normalizedMixPrompts.reduce((acc, item, index) => {
+    if (!item.enabled) return acc;
     const pos = mixPositions[index];
     const weight = item.weight / totalMixWeight;
     return {
@@ -957,6 +1082,12 @@ function App() {
       y: acc.y + pos.y * weight,
     };
   }, { x: 0, y: 0 });
+
+  // DJ 'standard' layout: crossfade position between deck A (slot 1) and deck B (slot 2)
+  const deckA = mixPrompts[0];
+  const deckB = mixPrompts[1];
+  const xfadeTotal = (deckA.enabled ? deckA.weight : 0) + (deckB.enabled ? deckB.weight : 0);
+  const xfade = xfadeTotal > 0 ? (deckB.enabled ? deckB.weight : 0) / xfadeTotal : 0.5;
 
   // Tab style helper for the Solo/Jam switcher
   const modeTabStyle = (active: boolean): React.CSSProperties => ({
@@ -1097,9 +1228,13 @@ function App() {
                         <button
                           key={layout}
                           className={`jam-mini-button ${mixLayout === layout ? 'is-active' : ''}`}
-                          onClick={() => setMixLayout(layout)}
+                          onClick={() => {
+                            setMixLayout(layout);
+                            if (layout === 'standard') setFocusedMixIndex(i => (i > 1 ? 0 : i));
+                            sendMixPrompts(layoutSendList(mixPrompts, layout), true);
+                          }}
                         >
-                          {layout}
+                          {layout === 'standard' ? 'dj' : layout}
                         </button>
                       ))}
                     </>
@@ -1169,70 +1304,143 @@ function App() {
                     updateMixWeightsFromPointer(e);
                   }}
                 >
-                  <svg className="jam-mix-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-                    {normalizedMixPrompts.map((item, index) => {
-                      const pos = mixPositions[index];
-                      return (
-                        <line
-                          key={item.id}
-                          x1={pos.x}
-                          y1={pos.y}
-                          x2={weightedCenter.x}
-                          y2={weightedCenter.y}
-                          stroke={item.color}
-                        />
-                      );
-                    })}
-                  </svg>
-                  <div
-                    className="jam-mix-node"
-                    style={{
-                      left: `${weightedCenter.x}%`,
-                      top: `${weightedCenter.y}%`,
-                    }}
-                  />
-                  {normalizedMixPrompts.map((item, index) => {
-                    const pos = mixPositions[index];
-                    const focused = index === focusedMixIndex;
-                    const label = focused && draftText ? draftText : item.text;
-                    return (
-                      <button
-                        key={item.id}
-                        className={`jam-prompt-chip ${focused ? 'is-focused' : ''} ${focused && draftText ? 'is-pending' : ''}`}
+                  {mixLayout !== 'standard' && (
+                    <>
+                      <svg className="jam-mix-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                        {normalizedMixPrompts.map((item, index) => {
+                          if (!item.enabled) return null;
+                          const pos = mixPositions[index];
+                          return (
+                            <line
+                              key={item.id}
+                              x1={pos.x}
+                              y1={pos.y}
+                              x2={weightedCenter.x}
+                              y2={weightedCenter.y}
+                              stroke={item.color}
+                            />
+                          );
+                        })}
+                      </svg>
+                      <div
+                        className="jam-mix-node"
                         style={{
-                          left: `${pos.x}%`,
-                          top: `${pos.y}%`,
-                          '--chip-color': item.color,
-                          '--line-x': `${weightedCenter.x - pos.x}%`,
-                          '--line-y': `${weightedCenter.y - pos.y}%`,
-                        } as React.CSSProperties}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setFocusedMixIndex(index);
-                          setDraftText('');
-                          setIsPromptEditing(true);
-                          promptSurfaceRef.current?.focus();
+                          left: `${weightedCenter.x}%`,
+                          top: `${weightedCenter.y}%`,
                         }}
-                      >
-                        <span className="jam-chip-index">{item.id}</span>
-                        <span className="jam-chip-text">{label}{focused && draftText && <span className="jam-caret" />}</span>
-                        <span className="jam-chip-weight">{item.displayWeight}%</span>
-                      </button>
-                    );
-                  })}
-                  <button className="jam-trash-button" title="Clear draft" onClick={(e) => { e.stopPropagation(); setDraftText(''); }}>x</button>
+                      />
+                      {normalizedMixPrompts.map((item, index) => {
+                        const pos = mixPositions[index];
+                        const focused = index === focusedMixIndex;
+                        const label = focused && draftText ? draftText : item.text;
+                        return (
+                          <button
+                            key={item.id}
+                            className={`jam-prompt-chip ${focused ? 'is-focused' : ''} ${focused && draftText ? 'is-pending' : ''} ${item.enabled ? '' : 'is-disabled'}`}
+                            style={{
+                              left: `${pos.x}%`,
+                              top: `${pos.y}%`,
+                              '--chip-color': item.color,
+                              '--line-x': `${weightedCenter.x - pos.x}%`,
+                              '--line-y': `${weightedCenter.y - pos.y}%`,
+                            } as React.CSSProperties}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setFocusedMixIndex(index);
+                              setDraftText('');
+                              setIsPromptEditing(true);
+                              promptSurfaceRef.current?.focus();
+                            }}
+                          >
+                            <span
+                              className="jam-chip-index"
+                              title={item.enabled ? 'Disable prompt' : 'Enable prompt'}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleMixPrompt(index);
+                              }}
+                            >
+                              {item.id}
+                            </span>
+                            <span className="jam-chip-text">{label}{focused && draftText && <span className="jam-caret" />}</span>
+                            <span className="jam-chip-weight">{item.enabled ? `${item.displayWeight}%` : 'off'}</span>
+                          </button>
+                        );
+                      })}
+                    </>
+                  )}
+
+                  {mixLayout === 'standard' && (
+                    <>
+                      {/* DJ deck view: two chips, crossfader in the middle */}
+                      {[0, 1].map(index => {
+                        const item = mixPrompts[index];
+                        const focused = index === focusedMixIndex;
+                        const label = focused && draftText ? draftText : item.text;
+                        const pct = Math.round((index === 0 ? 1 - xfade : xfade) * 100);
+                        return (
+                          <button
+                            key={item.id}
+                            className={`jam-prompt-chip is-deck ${focused ? 'is-focused' : ''} ${focused && draftText ? 'is-pending' : ''} ${item.enabled ? '' : 'is-disabled'}`}
+                            style={{
+                              left: index === 0 ? '14%' : '86%',
+                              top: '42%',
+                              '--chip-color': item.color,
+                            } as React.CSSProperties}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setFocusedMixIndex(index);
+                              setDraftText('');
+                              setIsPromptEditing(true);
+                              promptSurfaceRef.current?.focus();
+                            }}
+                            onPointerDown={(e) => e.stopPropagation()}
+                          >
+                            <span
+                              className="jam-chip-index"
+                              title={item.enabled ? 'Disable prompt' : 'Enable prompt'}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleMixPrompt(index);
+                              }}
+                            >
+                              {item.id}
+                            </span>
+                            <span className="jam-chip-text">{label}{focused && draftText && <span className="jam-caret" />}</span>
+                            <span className="jam-chip-weight">{item.enabled ? `${pct}%` : 'off'}</span>
+                          </button>
+                        );
+                      })}
+                      <div className="jam-xfader" aria-hidden="true">
+                        <div
+                          className="jam-xfader-track"
+                          style={{
+                            background: `linear-gradient(90deg, ${deckA.color}, ${deckB.color})`,
+                          }}
+                        />
+                        <div className="jam-xfader-handle" style={{ left: `${xfade * 100}%` }} />
+                      </div>
+                    </>
+                  )}
+
                   <div className="jam-expand-glyph">open</div>
-                  <div className="jam-prompt-hint">{draftText ? 'Enter to apply' : `typing edits slot ${focusedMixIndex + 1}`}</div>
+                  <div className="jam-prompt-hint">
+                    {draftText
+                      ? 'Enter to apply'
+                      : mixLayout === 'standard'
+                        ? 'drag to crossfade A / B'
+                        : `typing edits slot ${focusedMixIndex + 1}`}
+                  </div>
                 </div>
               )}
             </div>
 
             {promptMode === 'mix' && (
-              <div className="jam-slot-row">
-                {normalizedMixPrompts.map((item, index) => (
+              <div className={`jam-slot-row ${mixLayout === 'standard' ? 'is-dj' : ''}`}>
+                {(mixLayout === 'standard' ? normalizedMixPrompts.slice(0, 2) : normalizedMixPrompts).map((item, index) => (
                   <button
                     key={item.id}
-                    className={`jam-slot-pill ${index === focusedMixIndex ? 'is-focused' : ''}`}
+                    className={`jam-slot-pill ${index === focusedMixIndex ? 'is-focused' : ''} ${item.enabled ? '' : 'is-disabled'}`}
                     style={{ '--chip-color': item.color } as React.CSSProperties}
                     onClick={() => {
                     setFocusedMixIndex(index);
@@ -1242,9 +1450,21 @@ function App() {
                     promptSurfaceRef.current?.focus();
                   }}
                 >
-                    <span />
+                    <span
+                      title={item.enabled ? 'Disable prompt' : 'Enable prompt'}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleMixPrompt(index);
+                      }}
+                    />
                     <b>{item.text}</b>
-                    <em>{item.displayWeight}%</em>
+                    <em>
+                      {!item.enabled
+                        ? 'off'
+                        : mixLayout === 'standard'
+                          ? `${Math.round((index === 0 ? 1 - xfade : xfade) * 100)}%`
+                          : `${item.displayWeight}%`}
+                    </em>
                     {index === focusedMixIndex && draftText && <i>pending</i>}
                   </button>
                 ))}
@@ -1271,37 +1491,57 @@ function App() {
 
             <div className="jam-performance-panel">
               <div className="jam-performance-head">
-                <span>Probability Space</span>
-                <span>T: {paramsState.temperature.toFixed(2)} | K: {Math.round(paramsState.topk)}</span>
+                <div className="jam-pad-mode-switch" aria-label="XY pad mode">
+                  <button
+                    className={padMode === 'prob' ? 'is-active' : ''}
+                    onClick={() => setPadMode('prob')}
+                  >
+                    Prob
+                  </button>
+                  <button
+                    className={padMode === 'filter' ? 'is-active' : ''}
+                    onClick={() => setPadMode('filter')}
+                  >
+                    Filter
+                  </button>
+                </div>
+                <span>{padReadout}</span>
               </div>
               <div
                 ref={xyPadRef}
                 className="jam-xy-pad"
                 style={{
-                  '--xy-x': `${performance.filterX * 100}%`,
-                  '--xy-y': `${(1 - performance.filterY) * 100}%`,
+                  '--xy-x': `${padPos.x * 100}%`,
+                  '--xy-y': `${(1 - padPos.y) * 100}%`,
                 } as React.CSSProperties}
                 onPointerDown={(e) => {
                   e.currentTarget.setPointerCapture(e.pointerId);
+                  setIsPadDragging(true);
                   handleXYPointer(e);
                 }}
                 onPointerMove={(e) => {
                   if (e.buttons !== 1) return;
                   handleXYPointer(e);
                 }}
+                onPointerUp={handlePadRelease}
+                onPointerCancel={handlePadRelease}
               >
                 <div className="jam-probability-crosshair-x" />
                 <div className="jam-probability-crosshair-y" />
                 <div
-                  className="jam-xy-dot"
+                  className={`jam-xy-dot${isPadDragging ? '' : ' is-anim'}`}
                   style={{
-                    left: `${performance.filterX * 100}%`,
-                    top: `${(1 - performance.filterY) * 100}%`,
+                    left: `${padPos.x * 100}%`,
+                    top: `${(1 - padPos.y) * 100}%`,
                   }}
                 />
               </div>
               <label className="jam-latch-row">
-                <input type="checkbox" checked readOnly />
+                <input
+                  type="checkbox"
+                  checked={padLatch}
+                  onChange={(e) => setPadLatch(e.target.checked)}
+                />
                 latch
               </label>
             </div>
