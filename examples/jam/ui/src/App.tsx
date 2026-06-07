@@ -18,7 +18,9 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { PianoKeyboard } from './PianoKeyboard';
 import { JamSlider } from './JamSlider';
 import { JamSliderElastic } from './JamSliderElastic';
-import { MagentaDropdown, MidiSelector, ModelSelector, ResourceOnboardingModal, PROMPT_SUGGESTIONS, INSTRUMENT_SUGGESTIONS, AudioMeter, TimingIndicator, SettingsPanel, GREY_900, ALL_COLORS, DEFAULT_TEMPERATURE, DEFAULT_TOPK, DEFAULT_CFG_NOTES, DEFAULT_CFG_MUSICCOCA, DEFAULT_CFG_DRUMS, DEFAULT_UNMASK_WIDTH, DEFAULT_BUFFER_SIZE, DEFAULT_VOLUME } from '@magenta-rt/common';
+import { MagentaDropdown, MidiSelector, ModelSelector, ResourceOnboardingModal, PROMPT_SUGGESTIONS, INSTRUMENT_SUGGESTIONS, AudioMeter, TimingIndicator, SettingsPanel, GREY_900, ALL_COLORS, DEFAULT_TEMPERATURE, DEFAULT_TOPK, DEFAULT_CFG_NOTES, DEFAULT_CFG_MUSICCOCA, DEFAULT_CFG_DRUMS, DEFAULT_UNMASK_WIDTH, DEFAULT_BUFFER_SIZE, DEFAULT_VOLUME, PromptSurface, calculateWeights } from '@magenta-rt/common';
+import type { PromptNode, ListenerNode } from '@magenta-rt/common';
+import { Turtle, Rabbit } from 'lucide-react';
 import {
   IconButton,
   MenuItem,
@@ -180,6 +182,34 @@ const padYFromTopk = (k: number) =>
 // half adds resonance, center and below stay neutral.
 const filterXFromPad = (x: number) => clamp01(2 * x);
 const filterYFromPad = (y: number) => clamp01(2 * y - 1);
+
+// ─── Surface mix layout (Collider-style prompt surface) ─────────────────────
+// Free-floating prompt nodes + a draggable/throwable listener puck; weights
+// follow inverse-square distance from the listener (see calculateWeights).
+
+const MAX_SURFACE_PROMPTS = 6; // engine prompt slot limit
+const SURFACE_DEFAULT_PHYSICS_SPEED = 0.5;
+const SURFACE_SPEED_CURVE_EXP = 2; // most of the slider covers slow speeds
+const surfaceSliderToSpeed = (t: number) =>
+  Math.pow(t, SURFACE_SPEED_CURVE_EXP) * SURFACE_DEFAULT_PHYSICS_SPEED;
+
+/** Spread `labels` evenly on a circle centered in a w×h canvas. */
+function buildSurfaceLayout(labels: string[], w: number, h: number, pad = 56): { prompts: PromptNode[]; listener: ListenerNode } {
+  const cx = w / 2;
+  const cy = h / 2;
+  const r = Math.max(40, Math.min(w, h) / 2 - pad);
+  const prompts: PromptNode[] = labels.map((label, i) => {
+    const angle = -Math.PI / 2 + (i * 2 * Math.PI) / labels.length;
+    return {
+      id: i,
+      x: cx + r * Math.cos(angle),
+      y: cy + r * Math.sin(angle),
+      label,
+      colorIndex: i,
+    };
+  });
+  return { prompts, listener: { x: cx, y: cy } };
+}
 
 const getMixPositions = (layout: MixLayoutMode) => {
   if (layout === 'circle') return CIRCLE_MIX_POSITIONS;
@@ -362,7 +392,11 @@ function App() {
     setParamsState(p => ({ ...p, unmaskwidth: solo ? 127 : 0 }));
 
     if (mode === 'mix') {
-      sendMixPrompts(layoutSendList(mixPrompts, mixLayout), false);
+      if (mixLayout === 'surface') {
+        if (surfaceInitialized.current) sendSurfacePrompts();
+      } else {
+        sendMixPrompts(layoutSendList(mixPrompts, mixLayout), false);
+      }
       return;
     }
 
@@ -564,6 +598,8 @@ function App() {
 
   const handlePromptSurfaceKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
     if ((promptMode === 'single' || promptMode === 'solo') && !isPromptEditing) return;
+    // The Collider-style surface manages its own editing/keyboard handling.
+    if (promptMode === 'mix' && mixLayout === 'surface') return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
 
     if (e.key === 'Enter') {
@@ -652,6 +688,128 @@ function App() {
       return next;
     });
   }, [mixLayout]);
+
+  // ─── Surface layout state (Collider-style) ───────────────────────────────
+  const [surfacePrompts, setSurfacePrompts] = useState<PromptNode[]>([]);
+  const [surfaceListener, setSurfaceListener] = useState<ListenerNode>({ x: 0, y: 0 });
+  const [surfaceSelectedId, setSurfaceSelectedId] = useState<number | null>(null);
+  const [surfaceSliderPos, setSurfaceSliderPos] = useState(0.5);
+  const surfacePhysicsSpeed = surfaceSliderToSpeed(surfaceSliderPos);
+  const surfaceInitialized = useRef(false);
+  const surfaceHostRef = useRef<HTMLDivElement | null>(null);
+  const surfaceNextIdRef = useRef(0);
+  const surfaceNextColorRef = useRef(0);
+  const surfacePromptsRef = useRef(surfacePrompts);
+  surfacePromptsRef.current = surfacePrompts;
+  const surfaceListenerRef = useRef(surfaceListener);
+  surfaceListenerRef.current = surfaceListener;
+
+  // Build the initial node layout once, the first time the surface is shown
+  // and has a measured size. Seeds from the enabled mix chips.
+  useEffect(() => {
+    if (promptMode !== 'mix' || mixLayout !== 'surface' || surfaceInitialized.current) return;
+    requestAnimationFrame(() => {
+      const el = surfaceHostRef.current;
+      if (!el || surfaceInitialized.current) return;
+      const { width, height } = el.getBoundingClientRect();
+      if (width <= 0 || height <= 0) return;
+      const labels = mixPrompts.filter(p => p.enabled && p.text.trim()).map(p => p.text);
+      const layout = buildSurfaceLayout(labels.length > 0 ? labels : [PROMPT_SUGGESTIONS[0]], width, height);
+      setSurfacePrompts(layout.prompts);
+      setSurfaceListener(layout.listener);
+      surfaceNextIdRef.current = layout.prompts.length;
+      surfaceNextColorRef.current = layout.prompts.length;
+      surfaceInitialized.current = true;
+    });
+  }, [promptMode, mixLayout, mixPrompts]);
+
+  /** Push the surface nodes' distance-based weights to the engine. */
+  const sendSurfacePrompts = useCallback(() => {
+    const nodes = surfacePromptsRef.current;
+    if (nodes.length === 0) return;
+    const weights = calculateWeights(surfaceListenerRef.current, nodes);
+    const data: { text: string; weight: number }[] =
+      Array.from({ length: MAX_SURFACE_PROMPTS }, () => ({ text: '', weight: 0 }));
+    nodes.forEach((p, i) => {
+      if (i < MAX_SURFACE_PROMPTS) data[i] = { text: p.label, weight: weights[i] ?? 0 };
+    });
+    // Mark the dedup signature so switching back to other modes re-sends.
+    lastSentText.current = `surface ${data.map(d => `${d.text}:${d.weight.toFixed(3)}`).join(' ')}`;
+    lastSentSoloMode.current = false;
+    post({ type: 'textPrompts', value: data });
+  }, []);
+
+  // Throttle engine IPC to ~10Hz while nodes/listener move (physics runs at
+  // 60fps; the TFLite quantizer doesn't need every frame).
+  const surfaceSendThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const surfaceLastSendRef = useRef(0);
+  useEffect(() => {
+    if (promptMode !== 'mix' || mixLayout !== 'surface' || !surfaceInitialized.current) return;
+    const THROTTLE_MS = 100;
+    const now = Date.now();
+    const elapsed = now - surfaceLastSendRef.current;
+    if (surfaceSendThrottleRef.current) {
+      clearTimeout(surfaceSendThrottleRef.current);
+      surfaceSendThrottleRef.current = null;
+    }
+    if (elapsed >= THROTTLE_MS) {
+      sendSurfacePrompts();
+      surfaceLastSendRef.current = now;
+    } else {
+      // Trailing edge — guarantees the final position is always sent
+      surfaceSendThrottleRef.current = setTimeout(() => {
+        sendSurfacePrompts();
+        surfaceLastSendRef.current = Date.now();
+        surfaceSendThrottleRef.current = null;
+      }, THROTTLE_MS - elapsed);
+    }
+  }, [surfacePrompts, surfaceListener, promptMode, mixLayout, sendSurfacePrompts]);
+
+  useEffect(() => () => {
+    if (surfaceSendThrottleRef.current) clearTimeout(surfaceSendThrottleRef.current);
+  }, []);
+
+  const handleSurfacePromptMove = useCallback((id: number, x: number, y: number) => {
+    setSurfacePrompts(prev => prev.map(p => (p.id === id ? { ...p, x, y } : p)));
+  }, []);
+
+  const handleSurfaceListenerMove = useCallback((x: number, y: number) => {
+    setSurfaceListener({ x, y });
+  }, []);
+
+  const handleSurfaceAdd = useCallback((x: number, y: number) => {
+    setSurfacePrompts(prev => {
+      if (prev.length >= MAX_SURFACE_PROMPTS) return prev;
+      const label = PROMPT_SUGGESTIONS[Math.floor(Math.random() * PROMPT_SUGGESTIONS.length)];
+      return [...prev, {
+        id: surfaceNextIdRef.current++,
+        x,
+        y,
+        label,
+        colorIndex: surfaceNextColorRef.current++,
+      }];
+    });
+  }, []);
+
+  const handleSurfaceAddRandom = useCallback(() => {
+    const el = surfaceHostRef.current;
+    if (!el) return;
+    const { width, height } = el.getBoundingClientRect();
+    const pad = 56;
+    handleSurfaceAdd(
+      pad + Math.random() * (width - pad * 2),
+      pad + Math.random() * (height - pad * 2),
+    );
+  }, [handleSurfaceAdd]);
+
+  const handleSurfaceTextChange = useCallback((id: number, text: string) => {
+    setSurfacePrompts(prev => prev.map(p => (p.id === id ? { ...p, label: text } : p)));
+  }, []);
+
+  const handleSurfaceDelete = useCallback((id: number) => {
+    setSurfacePrompts(prev => (prev.length > 1 ? prev.filter(p => p.id !== id) : prev));
+    setSurfaceSelectedId(prev => (prev === id ? null : prev));
+  }, []);
 
   /** Enable/disable a mix chip. Keeps at least one chip enabled. */
   const toggleMixPrompt = useCallback((index: number) => {
@@ -1231,7 +1389,13 @@ function App() {
                           onClick={() => {
                             setMixLayout(layout);
                             if (layout === 'standard') setFocusedMixIndex(i => (i > 1 ? 0 : i));
-                            sendMixPrompts(layoutSendList(mixPrompts, layout), true);
+                            if (layout === 'surface') {
+                              // Initial layout (and its send) happens lazily on
+                              // first show; afterwards re-send the node weights.
+                              if (surfaceInitialized.current) sendSurfacePrompts();
+                            } else {
+                              sendMixPrompts(layoutSendList(mixPrompts, layout), true);
+                            }
                           }}
                         >
                           {layout === 'standard' ? 'dj' : layout}
@@ -1292,7 +1456,48 @@ function App() {
                 </div>
               )}
 
-              {promptMode === 'mix' && (
+              {promptMode === 'mix' && mixLayout === 'surface' && (
+                <div className="jam-surface-host" ref={surfaceHostRef}>
+                  <PromptSurface
+                    prompts={surfacePrompts}
+                    listener={surfaceListener}
+                    selectedBallId={surfaceSelectedId}
+                    onPromptMove={handleSurfacePromptMove}
+                    onListenerMove={handleSurfaceListenerMove}
+                    onBallSelect={setSurfaceSelectedId}
+                    onPromptAdd={handleSurfaceAdd}
+                    onPromptTextChange={handleSurfaceTextChange}
+                    onPromptDelete={handleSurfaceDelete}
+                    physicsSpeed={surfacePhysicsSpeed}
+                    onFirstThrow={() => {}}
+                    isPlaying={isPlaying}
+                    audioLevel={(audioLevels.left + audioLevels.right) / 2}
+                    collisions
+                  />
+                  <div className="jam-surface-controls">
+                    <Turtle style={{ width: 16, height: 16, flexShrink: 0 }} color="rgba(255,255,255,0.7)" strokeWidth={1.5} />
+                    <input
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.005"
+                      value={surfaceSliderPos}
+                      onChange={(e) => setSurfaceSliderPos(parseFloat(e.target.value))}
+                    />
+                    <Rabbit style={{ width: 16, height: 16, flexShrink: 0 }} color="rgba(255,255,255,0.7)" strokeWidth={1.5} />
+                    <button
+                      className="jam-mini-button"
+                      title="Add prompt (or double-click empty space)"
+                      onClick={handleSurfaceAddRandom}
+                      disabled={surfacePrompts.length >= MAX_SURFACE_PROMPTS}
+                    >
+                      + add
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {promptMode === 'mix' && mixLayout !== 'surface' && (
                 <div
                   className="jam-mix-map"
                   onPointerDown={(e) => {
@@ -1435,7 +1640,7 @@ function App() {
               )}
             </div>
 
-            {promptMode === 'mix' && (
+            {promptMode === 'mix' && mixLayout !== 'surface' && (
               <div className={`jam-slot-row ${mixLayout === 'standard' ? 'is-dj' : ''}`}>
                 {(mixLayout === 'standard' ? normalizedMixPrompts.slice(0, 2) : normalizedMixPrompts).map((item, index) => (
                   <button

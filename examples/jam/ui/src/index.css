@@ -594,6 +594,39 @@ input[type="range"]::-webkit-slider-thumb {
   font-size: 10px;
 }
 
+/* Collider-style surface layout */
+.jam-surface-host {
+  position: absolute;
+  inset: 0;
+  touch-action: none;
+}
+
+.jam-surface-controls {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 10px;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.jam-surface-controls input[type="range"] {
+  flex: 1 1 auto;
+  max-width: 200px;
+  accent-color: #6ff4d6;
+}
+
+.jam-surface-controls .jam-mini-button {
+  margin-left: auto;
+}
+
+.jam-surface-controls .jam-mini-button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
 /* DJ crossfader (standard mix layout) */
 .jam-prompt-chip.is-deck {
   max-width: 26%;
