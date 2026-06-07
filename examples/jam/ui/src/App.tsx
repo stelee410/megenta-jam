@@ -183,6 +183,41 @@ const padYFromTopk = (k: number) =>
 const filterXFromPad = (x: number) => clamp01(2 * x);
 const filterYFromPad = (y: number) => clamp01(2 * y - 1);
 
+// ─── Lyria scale selection ───────────────────────────────────────────────────
+// In Lyria mode the piano keyboard doubles as a key/scale selector: pressing
+// any key locks musicGenerationConfig.scale to that pitch class's
+// major / relative-minor pair (the Lyria Scale enum).
+
+const LYRIA_SCALES = [
+  'C_MAJOR_A_MINOR',
+  'D_FLAT_MAJOR_B_FLAT_MINOR',
+  'D_MAJOR_B_MINOR',
+  'E_FLAT_MAJOR_C_MINOR',
+  'E_MAJOR_D_FLAT_MINOR',
+  'F_MAJOR_D_MINOR',
+  'G_FLAT_MAJOR_E_FLAT_MINOR',
+  'G_MAJOR_E_MINOR',
+  'A_FLAT_MAJOR_F_MINOR',
+  'A_MAJOR_G_FLAT_MINOR',
+  'B_FLAT_MAJOR_G_MINOR',
+  'B_MAJOR_A_FLAT_MINOR',
+] as const;
+
+const LYRIA_SCALE_LABELS = [
+  'C major / A minor',
+  'D♭ major / B♭ minor',
+  'D major / B minor',
+  'E♭ major / C minor',
+  'E major / C♯ minor',
+  'F major / D minor',
+  'G♭ major / E♭ minor',
+  'G major / E minor',
+  'A♭ major / F minor',
+  'A major / F♯ minor',
+  'B♭ major / G minor',
+  'B major / G♯ minor',
+];
+
 // ─── Surface mix layout (Collider-style prompt surface) ─────────────────────
 // Free-floating prompt nodes + a draggable/throwable listener puck; weights
 // follow inverse-square distance from the listener (see calculateWeights).
@@ -292,6 +327,32 @@ function App() {
   const [isSoloMode, setIsSoloMode] = useState(false);
   const lastSentSoloMode = useRef(false);
 
+  // ─── Engine mode: local MLX model vs Lyria RealTime cloud ────────────────
+  // The native side hard-cuts the Lyria websocket on pause/stop/switch/quit,
+  // so no session is left open (and billing) while idle.
+  const [engineMode, setEngineMode] = useState<'local' | 'lyria'>('local');
+  const [lyriaStatus, setLyriaStatus] = useState('idle');
+  const engineModeRef = useRef<'local' | 'lyria'>('local');
+  engineModeRef.current = engineMode;
+
+  const switchEngine = (mode: 'local' | 'lyria') => {
+    if (mode === engineMode) return;
+    setEngineMode(mode);
+    post({ type: 'setEngineMode', value: mode }); // native stops playback first
+  };
+
+  // Scale lock (Lyria mode): index into LYRIA_SCALES, or null = unset.
+  const [lyriaScaleIdx, setLyriaScaleIdx] = useState<number | null>(null);
+
+  /** In Lyria mode a key press selects the scale of its pitch class. */
+  const selectLyriaScaleFromNote = useCallback((note: number) => {
+    const idx = ((note % 12) + 12) % 12;
+    setLyriaScaleIdx(idx);
+    post({ type: 'lyriaConfig', scale: LYRIA_SCALES[idx] });
+  }, []);
+  const selectLyriaScaleRef = useRef(selectLyriaScaleFromNote);
+  selectLyriaScaleRef.current = selectLyriaScaleFromNote;
+
   // ─── BPM lock ─────────────────────────────────────────────────────────────
   // The model has no tempo conditioning input, so "locking" BPM is done by
   // (a) injecting a metronome MIDI pulse each beat (note conditioning is a
@@ -317,10 +378,11 @@ function App() {
   };
 
   /** Append the locked BPM to a prompt text. Reads refs only, so it stays
-   *  correct inside stale closures (e.g. memoized senders). */
+   *  correct inside stale closures (e.g. memoized senders). Lyria has native
+   *  bpm support via musicGenerationConfig, so no suffix in cloud mode. */
   const withBpm = (text: string) => {
     const t = text.trim();
-    if (!bpmRef.current.lock || !t) return t;
+    if (!bpmRef.current.lock || !t || engineModeRef.current === 'lyria') return t;
     return `${t} ${Math.round(bpmRef.current.value)} bpm`;
   };
 
@@ -1082,6 +1144,9 @@ function App() {
         setIsAudioPrompt(state.isAudioPrompt);
       }
 
+      if (state.lyriaStatus !== undefined) {
+        setLyriaStatus(state.lyriaStatus);
+      }
       if (state.computerKeyboardMidi !== undefined) {
         setKeyboardMidiEnabled(!!state.computerKeyboardMidi);
       }
@@ -1150,7 +1215,8 @@ function App() {
   // is a hard, frame-accurate signal, so the model entrains to the pulse.
   // Disabled in solo mode (pulses would fight the note-gated solo envelope).
   useEffect(() => {
-    if (!bpmLock || !isPlaying || isSoloMode) return;
+    // Lyria locks tempo natively (musicGenerationConfig.bpm) — no pulses.
+    if (!bpmLock || !isPlaying || isSoloMode || engineMode !== 'local') return;
     const METRONOME_NOTE = 36; // C2 — kick register
     const intervalMs = 60000 / Math.max(40, Math.min(220, bpmValue));
     const gateMs = Math.min(110, intervalMs * 0.45);
@@ -1176,7 +1242,17 @@ function App() {
       clearTimeout(gateTimer);
       post({ type: 'kbdNote', note: METRONOME_NOTE, on: false });
     };
-  }, [bpmLock, bpmValue, isPlaying, isSoloMode]);
+  }, [bpmLock, bpmValue, isPlaying, isSoloMode, engineMode]);
+
+  // Lyria native tempo: forward the locked BPM (and live temperature) through
+  // musicGenerationConfig whenever they change in cloud mode.
+  useEffect(() => {
+    if (engineMode !== 'lyria') return;
+    const config: Record<string, number> = { temperature: paramsState.temperature };
+    if (bpmLock) config.bpm = Math.round(Math.max(60, Math.min(200, bpmValue)));
+    const timer = window.setTimeout(() => post({ type: 'lyriaConfig', ...config }), 150);
+    return () => clearTimeout(timer);
+  }, [engineMode, bpmLock, bpmValue, paramsState.temperature]);
 
   // Re-push the current prompts whenever the BPM lock/value changes so the
   // "<bpm> bpm" suffix reaches the engine without requiring a manual edit.
@@ -1244,6 +1320,7 @@ function App() {
       if (note < 0 || note > 127) return;
       pressedKeys.current.set(key, note);
       post({ type: 'kbdNote', note, on: true });
+      if (engineModeRef.current === 'lyria') selectLyriaScaleRef.current(note);
     };
 
     const handleUp = (e: KeyboardEvent) => {
@@ -1348,10 +1425,13 @@ function App() {
     whiteSpace: 'nowrap',
   });
 
+  // Lyria mode streams from the cloud — no local model required to play.
+  const playDisabled = engineMode === 'local' && noModel;
+
   const playButton = (
     <IconButton
-      onClick={noModel ? undefined : togglePlay}
-      disabled={noModel}
+      onClick={playDisabled ? undefined : togglePlay}
+      disabled={playDisabled}
       sx={{
         width: 63,
         height: 44,
@@ -1413,7 +1493,27 @@ function App() {
               }}
             />
           </div>
-          <div className="jam-memory-indicator">MEMORY <span /></div>
+          <div className="jam-engine-switch">
+            <div className="jam-mode-switch" aria-label="Engine">
+              <button
+                className={engineMode === 'local' ? 'is-active' : ''}
+                onClick={() => switchEngine('local')}
+              >
+                local
+              </button>
+              <button
+                className={engineMode === 'lyria' ? 'is-active' : ''}
+                onClick={() => switchEngine('lyria')}
+              >
+                lyria
+              </button>
+            </div>
+            {engineMode === 'lyria' && (
+              <span className={`jam-lyria-status ${lyriaStatus.startsWith('error') ? 'is-error' : ''}`}>
+                {lyriaStatus}
+              </span>
+            )}
+          </div>
           <div className="jam-topbar-right">
             <TimingIndicator
               frameMs={metrics.frameMs}
@@ -1764,7 +1864,7 @@ function App() {
               <IconButton variant="jam" onClick={handleRockerLeft} sx={{ width: 40, height: 40 }} title="Previous preset">
                 <ArrowBack sx={{ fontSize: 18, color: '#FFF' }} />
               </IconButton>
-              {noModel ? (
+              {playDisabled ? (
                 <Tooltip title="No model selected" placement="top">
                   <span>{playButton}</span>
                 </Tooltip>
@@ -1925,8 +2025,22 @@ function App() {
         }}
       >
         <div className="jam-keyboard-head">
-          <span>Instrument Prompt</span>
-          <span><span className="jam-active-dot" /> Active <b>Off</b></span>
+          {engineMode === 'lyria' ? (
+            <>
+              <span>Scale Selector</span>
+              <span>
+                <span className="jam-active-dot" />{' '}
+                {lyriaScaleIdx !== null
+                  ? LYRIA_SCALE_LABELS[lyriaScaleIdx]
+                  : 'press a key to lock the scale'}
+              </span>
+            </>
+          ) : (
+            <>
+              <span>Instrument Prompt</span>
+              <span><span className="jam-active-dot" /> Active <b>Off</b></span>
+            </>
+          )}
         </div>
         <div className="jam-gate-toggle is-left">Gate Off</div>
         <div className="jam-gate-toggle is-right">Full</div>
@@ -2002,7 +2116,10 @@ function App() {
             const note = keyboardMidiEnabled
               ? keyboardBaseNote.current + (visualNote - 60)
               : visualNote;
-            if (note >= 0 && note <= 127) post({ type: 'kbdNote', note, on: true });
+            if (note >= 0 && note <= 127) {
+              post({ type: 'kbdNote', note, on: true });
+              if (engineModeRef.current === 'lyria') selectLyriaScaleFromNote(note);
+            }
           }}
           onNoteOff={(visualNote) => {
             const note = keyboardMidiEnabled

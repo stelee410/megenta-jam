@@ -146,9 +146,14 @@ struct JamSharedState {
     void noteOff(uint8_t note) { if (note < 128) midiNotes[note].store(false, std::memory_order_relaxed); }
 };
 
+@class LyriaClient;
+
 @interface JamAppController : NSViewController
 @property (nonatomic, assign) RealtimeRunner* engine;
 @property (nonatomic, assign) JamSharedState* sharedState;
+// Lyria cloud engine bridge (owned by the app delegate)
+@property (nonatomic, strong) LyriaClient* lyriaClient;
+@property (nonatomic, assign) std::atomic<bool>* useLyria;
 @property (nonatomic, assign) MIDIPortRef midiInputPort;
 @property (nonatomic, strong) NSMutableSet<NSNumber*>* connectedSources;
 @property (nonatomic, assign) std::atomic<bool>* soloMode;

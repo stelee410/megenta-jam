@@ -594,6 +594,31 @@ input[type="range"]::-webkit-slider-thumb {
   font-size: 10px;
 }
 
+/* Engine switch (topbar center) */
+.jam-engine-switch {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.jam-lyria-status {
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 9px;
+  letter-spacing: 0.8px;
+  text-transform: lowercase;
+  color: rgba(111, 244, 214, 0.85);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+}
+
+.jam-lyria-status.is-error {
+  color: #ff7a7a;
+}
+
 /* BPM lock row */
 .jam-bpm-row {
   display: flex;

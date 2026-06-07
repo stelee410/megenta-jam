@@ -22,6 +22,7 @@ set_source_files_properties(${APP_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION "Reso
 add_executable(mrt2_jam MACOSX_BUNDLE
     JamApp.mm
     JamAppController.mm
+    LyriaClient.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/magenta_paths.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/objc/MagentaModelManager.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/objc/MagentaModelDownloader.mm

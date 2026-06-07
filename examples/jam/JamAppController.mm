@@ -22,6 +22,7 @@
 #import "MagentaModelManager.h"
 #import "MagentaModelDownloader.h"
 #import "MagentaSettings.h"
+#import "LyriaClient.h"
 #include "magenta_paths.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -457,6 +458,39 @@ static BOOL isDevServerRunning(void) {
             }
         }
     }
+    else if ([type isEqualToString:@"setEngineMode"]) {
+        NSString* mode = body[@"value"];
+        if ([mode isKindOfClass:[NSString class]] && self.useLyria) {
+            BOOL lyria = [mode isEqualToString:@"lyria"];
+            if (self.useLyria->load(std::memory_order_relaxed) != lyria) {
+                // Stop playback in the CURRENT mode first: pauses/bypasses the
+                // local engine, or hard-cuts the Lyria socket.
+                if (_isPlaying) {
+                    [NSApp sendAction:@selector(menuTogglePlayStop:) to:nil from:self];
+                }
+                self.useLyria->store(lyria, std::memory_order_relaxed);
+                // Safety: never leave a socket open when leaving Lyria mode.
+                if (!lyria) [self.lyriaClient disconnect];
+            }
+        }
+    }
+    else if ([type isEqualToString:@"lyriaConfig"]) {
+        if (!self.lyriaClient) return;
+        NSMutableDictionary* cfg = [NSMutableDictionary dictionary];
+        for (NSString* key in @[@"bpm", @"temperature", @"density",
+                                @"brightness", @"scale"]) {
+            id v = body[key];
+            if (v) cfg[key] = v;
+        }
+        if (cfg.count > 0) [self.lyriaClient setConfig:cfg];
+    }
+    else if ([type isEqualToString:@"setLyriaKey"]) {
+        NSString* key = body[@"value"];
+        if ([key isKindOfClass:[NSString class]]) {
+            [[NSUserDefaults standardUserDefaults] setObject:key
+                                                      forKey:@"Jam_LyriaApiKey"];
+        }
+    }
     else if ([type isEqualToString:@"setSoloMode"]) {
         NSNumber* valueVal = body[@"value"];
         if (valueVal) {
@@ -469,6 +503,25 @@ static BOOL isDevServerRunning(void) {
     }
     else if ([type isEqualToString:@"textPrompts"]) {
         NSArray* promptsArray = body[@"value"];
+
+        // Cache/forward to the Lyria client (it only transmits while a
+        // session is open). SOLO prefixes are local-engine concepts.
+        if ([promptsArray isKindOfClass:[NSArray class]] && self.lyriaClient) {
+            NSMutableArray* weighted = [NSMutableArray array];
+            for (NSDictionary* p in promptsArray) {
+                NSString* text = p[@"text"];
+                NSNumber* weight = p[@"weight"];
+                if (![text isKindOfClass:[NSString class]] ||
+                    ![weight isKindOfClass:[NSNumber class]]) continue;
+                if ([text hasPrefix:@"SOLO "]) text = [text substringFromIndex:5];
+                NSString* trimmed = [text stringByTrimmingCharactersInSet:
+                    [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                if (trimmed.length == 0 || weight.floatValue <= 0.0f) continue;
+                [weighted addObject:@{@"text" : trimmed, @"weight" : weight}];
+            }
+            if (weighted.count > 0) [self.lyriaClient setWeightedPrompts:weighted];
+        }
+
         if ([promptsArray isKindOfClass:[NSArray class]] && self.engine) {
             std::vector<std::string> texts;
             std::vector<float> weights;

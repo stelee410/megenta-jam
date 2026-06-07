@@ -21,6 +21,7 @@
 #import <CoreMIDI/CoreMIDI.h>
 #import <CoreAudio/CoreAudio.h>
 #import "JamAppController.h"
+#import "LyriaClient.h"
 #import "../common/objc/MagentaSettings.h"
 #include <magentart/realtime_runner.h>
 #include "../common/cpp/magenta_paths.h"
@@ -390,6 +391,9 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
     std::atomic<bool> _soloMode;
     std::atomic<float> _cfgNotesSliderValue;
     std::atomic<float> _cfgNotesCurrentLevel;
+    // Lyria cloud engine — socket only exists while playing in Lyria mode.
+    LyriaClient* _lyriaClient;
+    std::atomic<bool> _useLyria;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification*)notification {
@@ -414,12 +418,22 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
     float savedCfgNotes = [[NSUserDefaults standardUserDefaults] floatForKey:@"Jam_Param_cfgnotes"];
     _cfgNotesSliderValue.store(savedCfgNotes > 0.0f ? savedCfgNotes : kMagentaDefaultCfgNotes);
 
+    _useLyria.store(false);
+    _lyriaClient = [[LyriaClient alloc] init];
+
     _controller = [[JamAppController alloc] init];
     _controller.engine = &_engine;
     _controller.sharedState = &_sharedState;
     _controller.soloMode = &_soloMode;
     _controller.cfgNotesSliderValue = &_cfgNotesSliderValue;
     _controller.gateDecaySeconds = &_gateDecaySeconds;
+    _controller.lyriaClient = _lyriaClient;
+    _controller.useLyria = &_useLyria;
+
+    __weak JamAppController* weakCtrl = _controller;
+    [_lyriaClient setStatusHandler:^(NSString* status) {
+        [weakCtrl sendStateUpdate:@{@"lyriaStatus" : status}];
+    }];
 
     // Restore saved parameters immediately so the engine has them from start
     [_controller restoreSavedParams];
@@ -469,6 +483,8 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
     auto* soloMode = &_soloMode;
     auto* cfgNotesSliderVal = &_cfgNotesSliderValue;
     auto* cfgNotesLevel = &_cfgNotesCurrentLevel;
+    auto* useLyria = &_useLyria;
+    LyriaAudioRing* lyriaRing = [_lyriaClient ring];
 
     // Request 64 frame buffer size on default output device
     AudioDeviceID deviceID = 0;
@@ -501,14 +517,18 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
         float* outR = (outputData->mNumberBuffers > 1)
                       ? (float*)outputData->mBuffers[1].mData : outL;
 
-        if (!engine->is_loaded()) {
+        if (useLyria->load(std::memory_order_relaxed)) {
+            // Cloud engine: drain the Lyria ring (silence until primed). The
+            // local engine stays bypassed, but FX/meters below still apply.
+            lyriaRing->readStereo(outL, outR, frameCount);
+        } else if (!engine->is_loaded()) {
             memset(outL, 0, frameCount * sizeof(float));
             if (outputData->mNumberBuffers > 1) memset(outR, 0, frameCount * sizeof(float));
             *isSilence = YES;
             return noErr;
+        } else {
+            engine->read_audio_stereo(outL, outR, frameCount, false);
         }
-
-        engine->read_audio_stereo(outL, outR, frameCount, false);
 
         // Check if any MIDI note is currently held
         bool anyNoteHeld = false;
@@ -516,7 +536,10 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
             anyNoteHeld = shared->midiNotes[n].load(std::memory_order_relaxed);
         }
 
-        bool isSolo = soloMode->load(std::memory_order_relaxed);
+        // Solo's note-gated envelope only applies to the local engine — Lyria
+        // has no MIDI conditioning, so never gate its stream to silence.
+        bool isSolo = !useLyria->load(std::memory_order_relaxed) &&
+                      soloMode->load(std::memory_order_relaxed);
 
         if (isSolo) {
             const float sliderVal = cfgNotesSliderVal->load(std::memory_order_relaxed);
@@ -702,6 +725,24 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
 }
 
 - (void)menuTogglePlayStop:(id)sender {
+    if (_useLyria.load(std::memory_order_relaxed)) {
+        // Cloud engine: the websocket only exists while playing. Pause is a
+        // hard cutoff (STOP + cancel) so no idle session keeps billing.
+        if (_isPlaying) {
+            [_lyriaClient disconnect];
+            _isPlaying = NO;
+            _playStopMenuItem.title = @"Play";
+        } else {
+            NSString* key =
+                [[NSUserDefaults standardUserDefaults] stringForKey:@"Jam_LyriaApiKey"];
+            [_lyriaClient connectWithApiKey:key];
+            _isPlaying = YES;
+            _playStopMenuItem.title = @"Pause";
+        }
+        [_controller sendPlayState:_isPlaying];
+        return;
+    }
+
     if (_isPlaying) {
         _engine.set_bypass(true);
         _isPlaying = NO;
@@ -762,6 +803,7 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
 // ─── Lifecycle ───────────────────────────────────────────────────────────────
 
 - (void)applicationWillTerminate:(NSNotification*)notification {
+    [_lyriaClient disconnect];
     _engine.stop();
     _engine.unload();
     [_audioEngine stop];
