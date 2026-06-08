@@ -24,5 +24,7 @@
     <string>${MAGENTART_VERSION}</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>MRT2 - Jam records short audio clips you choose to capture, to use as style prompts for music generation.</string>
 </dict>
 </plist>

@@ -21,8 +21,9 @@ import { JamSliderElastic } from './JamSliderElastic';
 import { MagentaDropdown, MidiSelector, ModelSelector, ResourceOnboardingModal, PROMPT_SUGGESTIONS, INSTRUMENT_SUGGESTIONS, AudioMeter, TimingIndicator, SettingsPanel, GREY_900, ALL_COLORS, DEFAULT_TEMPERATURE, DEFAULT_TOPK, DEFAULT_CFG_NOTES, DEFAULT_CFG_MUSICCOCA, DEFAULT_CFG_DRUMS, DEFAULT_UNMASK_WIDTH, DEFAULT_BUFFER_SIZE, DEFAULT_VOLUME, PromptSurface, calculateWeights } from '@magenta-rt/common';
 import type { PromptNode, ListenerNode } from '@magenta-rt/common';
 import { Turtle, Rabbit } from 'lucide-react';
-import { VisualLayer, VISUAL_PRESETS } from './VisualLayer';
+import { VisualLayer, VISUAL_PRESETS, FIRST_IMAGE_PRESET } from './VisualLayer';
 import type { VisualData } from './VisualLayer';
+import { CheatSheet } from './CheatSheet';
 import {
   IconButton,
   MenuItem,
@@ -40,6 +41,8 @@ import {
   Refresh,
   PlayArrow,
   Pause,
+  Mic,
+  Stop,
 } from '@mui/icons-material';
 
 // ─── WebKit bridge ───────────────────────────────────────────────────────────
@@ -355,9 +358,17 @@ function App() {
   const [isSoloMode, setIsSoloMode] = useState(false);
   const lastSentSoloMode = useRef(false);
 
+  // ─── Prompt cheat sheet ───────────────────────────────────────────────────
+  const [isCheatOpen, setIsCheatOpen] = useState(false);
+  const copyPromptText = useCallback((text: string) => {
+    post({ type: 'copyText', value: text });               // native NSPasteboard
+    navigator.clipboard?.writeText(text).catch(() => {});  // best-effort web fallback
+  }, []);
+
   // ─── Visual layer (audio-reactive shader) ─────────────────────────────────
   const [visualMode, setVisualMode] = useState<'off' | 'bg' | 'full'>('off');
   const [visualPreset, setVisualPreset] = useState(0);
+  const [visualImage, setVisualImage] = useState<string | null>(null);
   const visualDataRef = useRef<VisualData>({
     level: 0,
     kick: 0,
@@ -541,10 +552,15 @@ function App() {
       return;
     }
 
-    // Pick the first preset from the new mode's preset list (top to bottom)
-    const list = getActivePresetList(solo);
-    if (list.length > 0) {
-      const preset = list[0];
+    // Single mode inherits the primary mix chip's prompt (chip #1); solo falls
+    // back to the first instrument preset. This keeps single ↔ mix coherent.
+    let preset: string | undefined;
+    if (mode === 'single') {
+      preset = (mixPrompts[0]?.text || '').trim() || getActivePresetList(false)[0];
+    } else {
+      preset = getActivePresetList(solo)[0];
+    }
+    if (preset) {
       setRockerIndex(0);
       setPromptText(preset);
       setActiveColor(getPromptColor(preset));
@@ -841,29 +857,72 @@ function App() {
   const surfaceHostRef = useRef<HTMLDivElement | null>(null);
   const surfaceNextIdRef = useRef(0);
   const surfaceNextColorRef = useRef(0);
+  // Maps each surface node id → its backing chip index (0..5), so surface edits
+  // write back to the right chip even when disabled chips create gaps.
+  const surfaceChipMapRef = useRef<Map<number, number>>(new Map());
   const surfacePromptsRef = useRef(surfacePrompts);
   surfacePromptsRef.current = surfacePrompts;
   const surfaceListenerRef = useRef(surfaceListener);
   surfaceListenerRef.current = surfaceListener;
 
-  // Build the initial node layout once, the first time the surface is shown
-  // and has a measured size. Seeds from the enabled mix chips.
+  // Re-seed the surface node layout from the current mix chips every time the
+  // surface becomes active. This keeps the surface and circle/standard layouts
+  // showing identical prompt content (the chips are the single source of truth).
+  const surfaceActiveRef = useRef(false);
   useEffect(() => {
-    if (promptMode !== 'mix' || mixLayout !== 'surface' || surfaceInitialized.current) return;
+    const active = promptMode === 'mix' && mixLayout === 'surface';
+    if (!active) { surfaceActiveRef.current = false; return; }
+    if (surfaceActiveRef.current) return; // already seeded for this activation
     requestAnimationFrame(() => {
       const el = surfaceHostRef.current;
-      if (!el || surfaceInitialized.current) return;
+      if (!el) return;
       const { width, height } = el.getBoundingClientRect();
       if (width <= 0 || height <= 0) return;
-      const labels = mixPrompts.filter(p => p.enabled && p.text.trim()).map(p => p.text);
-      const layout = buildSurfaceLayout(labels.length > 0 ? labels : [PROMPT_SUGGESTIONS[0]], width, height);
+      const seedChips = mixPrompts
+        .map((c, i) => ({ c, i }))
+        .filter(({ c }) => c.enabled && c.text.trim());
+      const labels = seedChips.length > 0 ? seedChips.map(({ c }) => c.text) : [PROMPT_SUGGESTIONS[0]];
+      const layout = buildSurfaceLayout(labels, width, height);
+      // Pair each node (in label order) with its originating chip index.
+      const map = new Map<number, number>();
+      layout.prompts.forEach((node, k) => map.set(node.id, seedChips[k]?.i ?? k));
+      surfaceChipMapRef.current = map;
       setSurfacePrompts(layout.prompts);
       setSurfaceListener(layout.listener);
       surfaceNextIdRef.current = layout.prompts.length;
       surfaceNextColorRef.current = layout.prompts.length;
       surfaceInitialized.current = true;
+      surfaceActiveRef.current = true;
     });
   }, [promptMode, mixLayout, mixPrompts]);
+
+  // Single mode is a view over chip #1: mirror committed single-prompt edits
+  // back into chip 1 so switching to mix/circle/dj/surface keeps them in sync.
+  useEffect(() => {
+    if (promptMode !== 'single' || isAudioPrompt) return;
+    const t = promptText;
+    if (!t.trim()) return;
+    setMixPrompts(prev => {
+      if (prev[0]?.text === t) return prev;
+      const next = [...prev];
+      next[0] = { ...next[0], text: t, color: getPromptColor(t), enabled: true };
+      return next;
+    });
+  }, [promptText, promptMode, isAudioPrompt]);
+
+  // Persist the chips so they survive an app restart. Skip the initial mount
+  // (defaults) so we don't clobber saved chips before the restore arrives, and
+  // debounce so rapid edits (typing in a surface node) don't spam disk writes.
+  const mixPersistInit = useRef(false);
+  const mixSaveTimer = useRef<number | null>(null);
+  useEffect(() => {
+    if (!mixPersistInit.current) { mixPersistInit.current = true; return; }
+    if (mixSaveTimer.current) clearTimeout(mixSaveTimer.current);
+    mixSaveTimer.current = window.setTimeout(() => {
+      post({ type: 'saveMixPrompts', value: mixPrompts });
+      mixSaveTimer.current = null;
+    }, 500);
+  }, [mixPrompts]);
 
   /** Push the surface nodes' distance-based weights to the engine. */
   const sendSurfacePrompts = useCallback(() => {
@@ -911,6 +970,29 @@ function App() {
     if (surfaceSendThrottleRef.current) clearTimeout(surfaceSendThrottleRef.current);
   }, []);
 
+  // Surface labels are a view over the 6 shared chips: write each node back to
+  // its mapped chip (new nodes claim the first free slot) and disable chips
+  // with no node, so circle/dj/single always see the same content.
+  const syncSurfaceToChips = useCallback((nodes: PromptNode[]) => {
+    const map = surfaceChipMapRef.current;
+    setMixPrompts(prev => {
+      const next = prev.map(c => ({ ...c, enabled: false }));
+      const used = new Set<number>();
+      nodes.forEach(node => {
+        let chipIdx = map.get(node.id);
+        if (chipIdx === undefined || used.has(chipIdx)) {
+          chipIdx = next.findIndex((_, i) => !used.has(i));
+        }
+        if (chipIdx < 0) return;
+        used.add(chipIdx);
+        map.set(node.id, chipIdx);
+        const text = node.label;
+        next[chipIdx] = { ...next[chipIdx], text, color: getPromptColor(text), enabled: !!text.trim() };
+      });
+      return next;
+    });
+  }, []);
+
   const handleSurfacePromptMove = useCallback((id: number, x: number, y: number) => {
     setSurfacePrompts(prev => prev.map(p => (p.id === id ? { ...p, x, y } : p)));
   }, []);
@@ -920,18 +1002,18 @@ function App() {
   }, []);
 
   const handleSurfaceAdd = useCallback((x: number, y: number) => {
-    setSurfacePrompts(prev => {
-      if (prev.length >= MAX_SURFACE_PROMPTS) return prev;
-      const label = PROMPT_SUGGESTIONS[Math.floor(Math.random() * PROMPT_SUGGESTIONS.length)];
-      return [...prev, {
-        id: surfaceNextIdRef.current++,
-        x,
-        y,
-        label,
-        colorIndex: surfaceNextColorRef.current++,
-      }];
-    });
-  }, []);
+    if (surfacePromptsRef.current.length >= MAX_SURFACE_PROMPTS) return;
+    const label = PROMPT_SUGGESTIONS[Math.floor(Math.random() * PROMPT_SUGGESTIONS.length)];
+    const next = [...surfacePromptsRef.current, {
+      id: surfaceNextIdRef.current++,
+      x,
+      y,
+      label,
+      colorIndex: surfaceNextColorRef.current++,
+    }];
+    setSurfacePrompts(next);
+    syncSurfaceToChips(next);
+  }, [syncSurfaceToChips]);
 
   const handleSurfaceAddRandom = useCallback(() => {
     const el = surfaceHostRef.current;
@@ -945,13 +1027,48 @@ function App() {
   }, [handleSurfaceAdd]);
 
   const handleSurfaceTextChange = useCallback((id: number, text: string) => {
-    setSurfacePrompts(prev => prev.map(p => (p.id === id ? { ...p, label: text } : p)));
-  }, []);
+    const next = surfacePromptsRef.current.map(p => (p.id === id ? { ...p, label: text } : p));
+    setSurfacePrompts(next);
+    syncSurfaceToChips(next);
+  }, [syncSurfaceToChips]);
 
   const handleSurfaceDelete = useCallback((id: number) => {
-    setSurfacePrompts(prev => (prev.length > 1 ? prev.filter(p => p.id !== id) : prev));
+    if (surfacePromptsRef.current.length <= 1) return;
+    const next = surfacePromptsRef.current.filter(p => p.id !== id);
+    setSurfacePrompts(next);
     setSurfaceSelectedId(prev => (prev === id ? null : prev));
-  }, []);
+    syncSurfaceToChips(next);
+  }, [syncSurfaceToChips]);
+
+  /** Apply a cheat-sheet prompt into the active mode's target. */
+  const applyCheatPrompt = useCallback((text: string) => {
+    const t = text.trim();
+    if (!t) return;
+    if (promptMode === 'single' || promptMode === 'solo') {
+      if (isAudioPrompt) post({ type: 'clearAudioPrompt' });
+      setIsAudioPrompt(false);
+      setPromptText(t);
+      setActiveColor(getPromptColor(t));
+      setIsPromptEdited(false);
+      sendPrompt(t, true, promptMode === 'solo');
+    } else if (mixLayout === 'surface') {
+      setSurfacePrompts(prev => {
+        if (prev.length === 0) return prev;
+        const targetId = surfaceSelectedId ?? prev[0].id;
+        return prev.map(p => (p.id === targetId ? { ...p, label: t } : p));
+      });
+    } else {
+      // standard (dj) / circle: write into the focused chip
+      setMixPrompts(prev => {
+        const next = prev.map((item, i) => (
+          i === focusedMixIndex ? { ...item, text: t, color: getPromptColor(t), enabled: true } : item
+        ));
+        sendMixPrompts(layoutSendList(next, mixLayout), true);
+        return next;
+      });
+    }
+    setIsCheatOpen(false);
+  }, [promptMode, mixLayout, isAudioPrompt, surfaceSelectedId, focusedMixIndex]);
 
   /** Enable/disable a mix chip. Keeps at least one chip enabled. */
   const toggleMixPrompt = useCallback((index: number) => {
@@ -1042,6 +1159,171 @@ function App() {
     ] as Array<[PerformanceKey, number]>).forEach(([key, value]) => sendPerformanceChange(key, value));
   };
 
+  // ─── Session export / import ──────────────────────────────────────────────
+  // A "session" is the full musical + visual state: prompts, BPM, scale, theme,
+  // visual, engine params and FX. Saved/loaded as JSON via native file dialogs.
+  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
+  const sessionNoticeTimer = useRef<number | null>(null);
+  const flashSessionNotice = (msg: string) => {
+    setSessionNotice(msg);
+    if (sessionNoticeTimer.current) clearTimeout(sessionNoticeTimer.current);
+    sessionNoticeTimer.current = window.setTimeout(() => setSessionNotice(null), 2400);
+  };
+
+  const buildSession = () => ({
+    app: 'megenta-jam',
+    version: 1,
+    prompts: {
+      single: promptText,
+      mix: mixPrompts,
+      promptMode,
+      mixLayout,
+      deckFader,
+    },
+    musical: {
+      bpmLock,
+      bpmValue,
+      lyriaScaleIdx,
+      engineMode,
+    },
+    ui: {
+      theme: uiTheme,
+      visualMode,
+      visualPreset,
+    },
+    params: paramsState,
+    performance,
+  });
+
+  const exportSession = () => {
+    post({ type: 'exportSession', value: JSON.stringify(buildSession(), null, 2) });
+  };
+  const importSession = () => {
+    post({ type: 'importSession' });
+  };
+
+  // Engine-param addresses for the continuous params we re-push on import.
+  const ENGINE_PARAM_ADDR: Record<string, number> = {
+    temperature: 0, topk: 1, cfgmusiccoca: 3, cfgnotes: 4,
+    cfgdrums: 48, unmaskwidth: 7, buffersize: 8,
+  };
+
+  /** Apply an imported session JSON: restore UI state and re-push to engine. */
+  const applyImportedSession = (raw: string) => {
+    let s: any;
+    try { s = JSON.parse(raw); } catch { flashSessionNotice('Invalid session file'); return; }
+    if (!s || typeof s !== 'object') { flashSessionNotice('Invalid session file'); return; }
+
+    const pr = s.prompts ?? {};
+    const mu = s.musical ?? {};
+    const ui = s.ui ?? {};
+
+    // Mix chips (always 6 slots; pad from defaults if the file has fewer).
+    let mix = mixPrompts;
+    if (Array.isArray(pr.mix) && pr.mix.length > 0) {
+      mix = Array.from({ length: 6 }, (_, i) => {
+        const m = pr.mix[i];
+        if (m && typeof m === 'object') {
+          const text = typeof m.text === 'string' ? m.text : '';
+          return {
+            id: DEFAULT_MIX_PROMPTS[i]?.id ?? i + 1,
+            text,
+            weight: typeof m.weight === 'number' ? m.weight : (DEFAULT_MIX_PROMPTS[i]?.weight ?? 0.16),
+            color: typeof m.color === 'string' ? m.color : getPromptColor(text),
+            enabled: m.enabled !== false,
+          };
+        }
+        return DEFAULT_MIX_PROMPTS[i];
+      });
+      setMixPrompts(mix);
+    }
+
+    // BPM
+    if (typeof mu.bpmValue === 'number') {
+      const v = Math.max(40, Math.min(220, Math.round(mu.bpmValue)));
+      setBpmValue(v); setBpmText(String(v));
+    }
+    if (typeof mu.bpmLock === 'boolean') setBpmLock(mu.bpmLock);
+
+    // Scale (Lyria)
+    if (mu.lyriaScaleIdx === null || typeof mu.lyriaScaleIdx === 'number') {
+      setLyriaScaleIdx(mu.lyriaScaleIdx);
+      if (typeof mu.lyriaScaleIdx === 'number' && LYRIA_SCALES[mu.lyriaScaleIdx]) {
+        post({ type: 'lyriaConfig', scale: LYRIA_SCALES[mu.lyriaScaleIdx] });
+      }
+    }
+
+    // UI
+    if (typeof ui.theme === 'string' && (UI_THEMES as readonly string[]).includes(ui.theme)) {
+      setUiTheme(ui.theme as UiTheme);
+    }
+    if (ui.visualMode === 'off' || ui.visualMode === 'bg' || ui.visualMode === 'full') setVisualMode(ui.visualMode);
+    if (typeof ui.visualPreset === 'number') setVisualPreset(((ui.visualPreset % VISUAL_PRESETS.length) + VISUAL_PRESETS.length) % VISUAL_PRESETS.length);
+
+    // Engine params
+    if (s.params && typeof s.params === 'object') {
+      setParamsState(prev => ({ ...prev, ...s.params }));
+      Object.entries(ENGINE_PARAM_ADDR).forEach(([k, addr]) => {
+        const val = s.params[k];
+        if (typeof val === 'number') sendParamChange(addr, val);
+      });
+      if (typeof s.params.drumless === 'boolean') sendParamChange(39, s.params.drumless ? 1 : 0);
+      if (typeof s.params.onsetmode === 'boolean') sendParamChange(46, s.params.onsetmode ? 1 : 0);
+    }
+
+    // Performance FX
+    if (s.performance && typeof s.performance === 'object') {
+      Object.keys(s.performance).forEach(key => {
+        const v = s.performance[key];
+        if (typeof v === 'number') sendPerformanceChange(key as PerformanceKey, v);
+      });
+    }
+
+    // Deck fader + single prompt text
+    if (typeof pr.deckFader === 'number') setDeckFader(clamp01(pr.deckFader));
+    if (typeof pr.single === 'string') {
+      setPromptText(pr.single);
+      setActiveColor(getPromptColor(pr.single));
+    }
+
+    // Layout + force the surface to re-seed from the imported chips.
+    const layout: MixLayoutMode =
+      (pr.mixLayout === 'standard' || pr.mixLayout === 'circle' || pr.mixLayout === 'surface') ? pr.mixLayout : mixLayout;
+    setMixLayout(layout);
+    surfaceActiveRef.current = false;
+
+    // Mode (set after content so the re-send below targets the right path).
+    const mode: PromptMode =
+      (pr.promptMode === 'mix' || pr.promptMode === 'solo' || pr.promptMode === 'single') ? pr.promptMode : promptMode;
+    const solo = mode === 'solo';
+    setPromptMode(mode);
+    setIsSoloMode(solo);
+    post({ type: 'setSoloMode', value: solo });
+    setDraftText('');
+    setIsPromptEditing(false);
+    setIsPromptEdited(false);
+
+    // Engine (local vs Lyria) — switching stops playback natively.
+    if ((mu.engineMode === 'local' || mu.engineMode === 'lyria') && mu.engineMode !== engineMode) {
+      switchEngine(mu.engineMode);
+    }
+
+    // Re-push prompts to the engine for the restored mode.
+    if (mode === 'mix') {
+      if (layout !== 'surface') sendMixPrompts(layoutSendList(mix, layout), true);
+      // surface mode re-seeds via its effect; the throttled sender follows.
+    } else {
+      const text = (typeof pr.single === 'string' && pr.single.trim())
+        ? pr.single
+        : (mode === 'single' ? (mix[0]?.text ?? '') : '');
+      if (text) sendPrompt(text, true, solo);
+    }
+
+    flashSessionNotice('Session imported');
+  };
+  const applyImportedSessionRef = useRef(applyImportedSession);
+  applyImportedSessionRef.current = applyImportedSession;
+
   const togglePlay = () => {
     const newPlaying = !isPlaying;
     setIsPlaying(newPlaying);
@@ -1061,6 +1343,18 @@ function App() {
     post({ type: 'clearAudioPrompt' });
   };
 
+  // Record up to 10s from the mic and use it as the audio prompt. Native
+  // captures, resamples to 16 kHz mono, and feeds the engine; it also
+  // auto-stops at the 10s cap and reports state via `recordingState`.
+  const [recordingState, setRecordingState] = useState<'idle' | 'recording'>('idle');
+  const toggleRecordAudioPrompt = () => {
+    if (recordingState === 'recording') {
+      post({ type: 'stopRecordAudioPrompt' });
+    } else {
+      post({ type: 'startRecordAudioPrompt' });
+    }
+  };
+
 
 
   const openSettings = () => {
@@ -1073,6 +1367,7 @@ function App() {
   // `prompt` updates from native should populate the UI. After, we ignore
   // subsequent `prompt` echoes so they don't stomp in-progress typing.
   const promptInitialized = useRef(false);
+  const mixRestored = useRef(false);
 
   useEffect(() => {
     window.updateState = (state: any) => {
@@ -1161,6 +1456,28 @@ function App() {
         if (state.savedUserPresets.jam) setUserPresetsJam(state.savedUserPresets.jam);
       }
 
+      // Restore the unified mix chips (the source of truth for every mode).
+      let restoredChip0 = '';
+      if (Array.isArray(state.savedMixPrompts) && state.savedMixPrompts.length > 0 && !mixRestored.current) {
+        const restored = Array.from({ length: 6 }, (_, i) => {
+          const m = state.savedMixPrompts[i];
+          if (m && typeof m === 'object') {
+            const text = typeof m.text === 'string' ? m.text : (DEFAULT_MIX_PROMPTS[i]?.text ?? '');
+            return {
+              id: DEFAULT_MIX_PROMPTS[i]?.id ?? i + 1,
+              text,
+              weight: typeof m.weight === 'number' ? m.weight : (DEFAULT_MIX_PROMPTS[i]?.weight ?? 0.16),
+              color: typeof m.color === 'string' ? m.color : getPromptColor(text),
+              enabled: m.enabled !== false,
+            };
+          }
+          return DEFAULT_MIX_PROMPTS[i];
+        });
+        setMixPrompts(restored);
+        restoredChip0 = restored[0]?.text ?? '';
+        mixRestored.current = true;
+      }
+
       if (state.prompt !== undefined && !promptInitialized.current) {
         // Use saved rocker index if available, otherwise try to find a match
         let presetIdx = -1;
@@ -1177,7 +1494,9 @@ function App() {
           return (i in overrides) ? overrides[i] : text;
         });
 
-        let promptToUse = state.prompt;
+        // Single mode is chip #1 — prefer the restored chip over the legacy
+        // saved prompt so the unified model is authoritative on launch.
+        let promptToUse = (!solo && restoredChip0.trim()) ? restoredChip0 : state.prompt;
 
         if (!promptToUse) {
           // No saved prompt — use preset at the saved index (or first)
@@ -1214,6 +1533,12 @@ function App() {
       if (state.lyriaStatus !== undefined) {
         setLyriaStatus(state.lyriaStatus);
       }
+      if (state.visualImage !== undefined) {
+        setVisualImage(state.visualImage);
+        // Reveal the result: turn the visual layer on and jump to particles.
+        setVisualMode(m => (m === 'off' ? 'bg' : m));
+        setVisualPreset(FIRST_IMAGE_PRESET);
+      }
       if (state.computerKeyboardMidi !== undefined) {
         setKeyboardMidiEnabled(!!state.computerKeyboardMidi);
       }
@@ -1245,6 +1570,18 @@ function App() {
       }
       if (state.solomode !== undefined) {
         setIsSoloMode(!!state.solomode);
+      }
+      if (state.recordingState === 'recording' || state.recordingState === 'idle') {
+        setRecordingState(state.recordingState);
+      }
+      if (typeof state.importedSession === 'string') {
+        applyImportedSessionRef.current(state.importedSession);
+      }
+      if (typeof state.sessionNotice === 'string') {
+        flashSessionNotice(state.sessionNotice);
+      }
+      if (typeof state.sessionError === 'string') {
+        flashSessionNotice(state.sessionError);
       }
     };
 
@@ -1600,6 +1937,13 @@ function App() {
             >
               {uiTheme}
             </button>
+            <button
+              className={`jam-chat-button ${isCheatOpen ? 'is-active' : ''}`}
+              title="Prompt cheat sheet"
+              onClick={() => setIsCheatOpen(o => !o)}
+            >
+              Cheats
+            </button>
             <button className="jam-chat-button">Chat</button>
           </div>
         </div>
@@ -1622,11 +1966,28 @@ function App() {
                       </IconButton>
                     </Tooltip>
                   ) : (
-                    <Tooltip title="Upload audio prompt" placement="top">
-                      <IconButton variant="jam" onClick={loadAudioPrompt} sx={{ width: 32, height: 32 }}>
-                        <UploadFile sx={{ fontSize: 16 }} />
-                      </IconButton>
-                    </Tooltip>
+                    <>
+                      <Tooltip title="Upload audio prompt" placement="top">
+                        <IconButton variant="jam" onClick={loadAudioPrompt} sx={{ width: 32, height: 32 }}>
+                          <UploadFile sx={{ fontSize: 16 }} />
+                        </IconButton>
+                      </Tooltip>
+                      <Tooltip title={recordingState === 'recording' ? 'Stop recording' : 'Record audio prompt (10s)'} placement="top">
+                        <IconButton
+                          variant="jam"
+                          onClick={toggleRecordAudioPrompt}
+                          sx={{
+                            width: 32,
+                            height: 32,
+                            color: recordingState === 'recording' ? '#ff4f6b' : undefined,
+                          }}
+                        >
+                          {recordingState === 'recording'
+                            ? <Stop sx={{ fontSize: 16 }} className="jam-rec-pulse" />
+                            : <Mic sx={{ fontSize: 16 }} />}
+                        </IconButton>
+                      </Tooltip>
+                    </>
                   )}
                   <IconButton variant="jam" onClick={() => setIsSettingsOpen(true)} sx={{ width: 32, height: 32 }}>
                     <TuneIcon sx={{ fontSize: 16 }} />
@@ -1636,6 +1997,9 @@ function App() {
               <div className="jam-prompt-toolbar">
                 <div className="jam-prompt-toolset">
                   <button className="jam-mini-button" onClick={resetModel}>Reset</button>
+                  <button className="jam-mini-button" title="Export the current jam session to a file" onClick={exportSession}>export</button>
+                  <button className="jam-mini-button" title="Import a jam session from a file" onClick={importSession}>import</button>
+                  {sessionNotice && <span className="jam-session-notice">{sessionNotice}</span>}
                   <button
                     className={`jam-mini-button ${visualMode !== 'off' ? 'is-active' : ''}`}
                     title="Audio-reactive visual layer"
@@ -1651,6 +2015,13 @@ function App() {
                         onClick={() => setVisualPreset(p => (p + 1) % VISUAL_PRESETS.length)}
                       >
                         {VISUAL_PRESETS[visualPreset]}
+                      </button>
+                      <button
+                        className="jam-mini-button"
+                        title="Upload an image for particle / stretch / glitch effects"
+                        onClick={() => post({ type: 'loadVisualImage' })}
+                      >
+                        {visualImage ? 'image ✓' : '+ image'}
                       </button>
                       <button
                         className="jam-mini-button"
@@ -1720,6 +2091,7 @@ function App() {
                   bpm={bpmValue}
                   beatActive={bpmLock}
                   preset={visualPreset}
+                  imageSrc={visualImage}
                   dataRef={visualDataRef}
                   onExitFull={() => setVisualMode('bg')}
                 />
@@ -2282,10 +2654,19 @@ function App() {
           bpm={bpmValue}
           beatActive={bpmLock}
           preset={visualPreset}
+          imageSrc={visualImage}
           dataRef={visualDataRef}
           onExitFull={() => setVisualMode('bg')}
         />
       )}
+
+      {/* ── Prompt cheat sheet (drawer overlay) ── */}
+      <CheatSheet
+        open={isCheatOpen}
+        onClose={() => setIsCheatOpen(false)}
+        onCopy={copyPromptText}
+        onApply={applyCheatPrompt}
+      />
 
       {/* ── Settings Panel (drawer overlay) ── */}
       <SettingsPanel

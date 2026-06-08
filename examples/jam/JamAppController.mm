@@ -19,6 +19,8 @@
 #import <WebKit/WebKit.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <AudioToolbox/AudioToolbox.h>
+#import <AVFoundation/AVFoundation.h>
+#include <vector>
 #import "MagentaModelManager.h"
 #import "MagentaModelDownloader.h"
 #import "MagentaSettings.h"
@@ -96,6 +98,12 @@ static BOOL isDevServerRunning(void) {
     NSString* _modelName;
     NSString* _currentPromptText;
     BOOL _isPlaying;
+
+    // Audio-prompt recording (mic → 16 kHz mono → engine).
+    AVAudioEngine* _recordEngine;
+    AVAudioConverter* _recordConverter;
+    std::vector<float> _recordSamples;
+    BOOL _isRecording;
 }
 
 // ─── Parameter bridging ──────────────────────────────────────────────────────
@@ -333,6 +341,10 @@ static BOOL isDevServerRunning(void) {
     NSNumber* savedRockerIndex = [[NSUserDefaults standardUserDefaults] objectForKey:@"Jam_RockerIndex"];
     if (savedRockerIndex) state[@"savedRockerIndex"] = savedRockerIndex;
 
+    // Restore the unified mix chips (single source of truth for all modes)
+    NSArray* savedMixPrompts = [[NSUserDefaults standardUserDefaults] arrayForKey:@"Jam_MixPrompts"];
+    if (savedMixPrompts) state[@"savedMixPrompts"] = savedMixPrompts;
+
     // Restore saved prompt history
     NSArray* savedHistory = [[NSUserDefaults standardUserDefaults] arrayForKey:@"Jam_PromptHistory"];
     if (savedHistory) {
@@ -499,12 +511,29 @@ static BOOL isDevServerRunning(void) {
         }
         if (cfg.count > 0) [self.lyriaClient setConfig:cfg];
     }
+    else if ([type isEqualToString:@"copyText"]) {
+        NSString* text = body[@"value"];
+        if ([text isKindOfClass:[NSString class]] && text.length > 0) {
+            NSPasteboard* pb = [NSPasteboard generalPasteboard];
+            [pb clearContents];
+            [pb setString:text forType:NSPasteboardTypeString];
+        }
+    }
     else if ([type isEqualToString:@"setLyriaKey"]) {
         NSString* key = body[@"value"];
         if ([key isKindOfClass:[NSString class]]) {
             [[NSUserDefaults standardUserDefaults] setObject:key
                                                       forKey:@"Jam_LyriaApiKey"];
         }
+    }
+    else if ([type isEqualToString:@"exportSession"]) {
+        NSString* json = body[@"value"];
+        if ([json isKindOfClass:[NSString class]] && json.length > 0) {
+            [self handleExportSession:json];
+        }
+    }
+    else if ([type isEqualToString:@"importSession"]) {
+        [self handleImportSession];
     }
     else if ([type isEqualToString:@"setSoloMode"]) {
         NSNumber* valueVal = body[@"value"];
@@ -645,6 +674,15 @@ static BOOL isDevServerRunning(void) {
     else if ([type isEqualToString:@"loadAudioPrompt"]) {
         [self handleLoadAudioPrompt:0];
     }
+    else if ([type isEqualToString:@"startRecordAudioPrompt"]) {
+        [self startRecordingAudioPrompt];
+    }
+    else if ([type isEqualToString:@"stopRecordAudioPrompt"]) {
+        [self stopRecordingAudioPrompt];
+    }
+    else if ([type isEqualToString:@"loadVisualImage"]) {
+        [self handleLoadVisualImage];
+    }
     else if ([type isEqualToString:@"clearAudioPrompt"]) {
         dispatch_async(dispatch_get_main_queue(), ^{
             RealtimeRunner* engine = self.engine;
@@ -705,6 +743,12 @@ static BOOL isDevServerRunning(void) {
         NSNumber* value = body[@"value"];
         if (value) {
             [[NSUserDefaults standardUserDefaults] setObject:value forKey:@"Jam_RockerIndex"];
+        }
+    }
+    else if ([type isEqualToString:@"saveMixPrompts"]) {
+        NSArray* chips = body[@"value"];
+        if ([chips isKindOfClass:[NSArray class]]) {
+            [[NSUserDefaults standardUserDefaults] setObject:chips forKey:@"Jam_MixPrompts"];
         }
     }
     else if ([type isEqualToString:@"log"]) {
@@ -889,6 +933,238 @@ static BOOL isDevServerRunning(void) {
         [self loadAudioPromptFileAtPath:url.path index:index];
     };
 
+    if (self.view.window) {
+        [panel beginSheetModalForWindow:self.view.window completionHandler:completionBlock];
+    } else {
+        [panel beginWithCompletionHandler:completionBlock];
+    }
+}
+
+// ─── Audio-prompt recording (microphone) ────────────────────────────────────
+// The engine consumes a fixed 160000-frame (10s @ 16kHz) mono buffer for an
+// audio prompt. We capture from the default input device, resample to 16kHz
+// mono, cap at 10s (auto-stop), and loop-fill if the take is shorter.
+
+static const int kAudioPromptFrames = 160000; // 10s @ 16kHz
+
+- (void)startRecordingAudioPrompt {
+    if (_isRecording) return;
+    AVAuthorizationStatus st = [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio];
+    if (st == AVAuthorizationStatusNotDetermined) {
+        [AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:^(BOOL granted) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (granted) {
+                    [self beginMicCapture];
+                } else {
+                    [self sendStateUpdate:@{@"recordingState": @"idle",
+                                            @"sessionError": @"Microphone access denied"}];
+                }
+            });
+        }];
+        return;
+    }
+    if (st != AVAuthorizationStatusAuthorized) {
+        [self sendStateUpdate:@{@"recordingState": @"idle",
+                                @"sessionError": @"Microphone access denied — enable it in System Settings › Privacy"}];
+        return;
+    }
+    [self beginMicCapture];
+}
+
+- (void)beginMicCapture {
+    _recordSamples.clear();
+    _recordSamples.reserve(kAudioPromptFrames);
+
+    _recordEngine = [[AVAudioEngine alloc] init];
+    AVAudioInputNode* input = _recordEngine.inputNode;
+    AVAudioFormat* inFmt = [input outputFormatForBus:0];
+    if (!inFmt || inFmt.sampleRate <= 0 || inFmt.channelCount == 0) {
+        _recordEngine = nil;
+        [self sendStateUpdate:@{@"recordingState": @"idle",
+                                @"sessionError": @"No microphone input available"}];
+        return;
+    }
+    AVAudioFormat* outFmt = [[AVAudioFormat alloc] initWithCommonFormat:AVAudioPCMFormatFloat32
+                                                            sampleRate:16000.0
+                                                              channels:1
+                                                           interleaved:NO];
+    _recordConverter = [[AVAudioConverter alloc] initFromFormat:inFmt toFormat:outFmt];
+    if (!_recordConverter) {
+        _recordEngine = nil;
+        [self sendStateUpdate:@{@"recordingState": @"idle",
+                                @"sessionError": @"Audio converter init failed"}];
+        return;
+    }
+
+    const double ratio = 16000.0 / inFmt.sampleRate;
+    __weak JamAppController* weakSelf = self;
+    [input installTapOnBus:0 bufferSize:4096 format:inFmt block:^(AVAudioPCMBuffer* buf, AVAudioTime* when) {
+        JamAppController* s = weakSelf;
+        if (!s || !s->_isRecording || buf.frameLength == 0) return;
+        AVAudioFrameCount outCap = (AVAudioFrameCount)(buf.frameLength * ratio) + 64;
+        AVAudioPCMBuffer* outBuf = [[AVAudioPCMBuffer alloc] initWithPCMFormat:outFmt frameCapacity:outCap];
+        if (!outBuf) return;
+        __block BOOL fed = NO;
+        AVAudioConverterInputBlock inputBlock = ^AVAudioBuffer*(AVAudioPacketCount need, AVAudioConverterInputStatus* status) {
+            if (fed) { *status = AVAudioConverterInputStatus_NoDataNow; return nil; }
+            fed = YES;
+            *status = AVAudioConverterInputStatus_HaveData;
+            return buf;
+        };
+        NSError* err = nil;
+        [s->_recordConverter convertToBuffer:outBuf error:&err withInputFromBlock:inputBlock];
+        const float* data = outBuf.floatChannelData ? outBuf.floatChannelData[0] : NULL;
+        AVAudioFrameCount n = outBuf.frameLength;
+        if (!data || n == 0) return;
+        BOOL full = NO;
+        @synchronized (s) {
+            for (AVAudioFrameCount i = 0; i < n && (int)s->_recordSamples.size() < kAudioPromptFrames; ++i) {
+                s->_recordSamples.push_back(data[i]);
+            }
+            full = ((int)s->_recordSamples.size() >= kAudioPromptFrames);
+        }
+        if (full) {
+            dispatch_async(dispatch_get_main_queue(), ^{ [s stopRecordingAudioPrompt]; });
+        }
+    }];
+
+    NSError* startErr = nil;
+    _isRecording = YES;
+    if (![_recordEngine startAndReturnError:&startErr]) {
+        _isRecording = NO;
+        [input removeTapOnBus:0];
+        _recordEngine = nil;
+        _recordConverter = nil;
+        [self sendStateUpdate:@{@"recordingState": @"idle",
+                                @"sessionError": @"Could not start microphone"}];
+        return;
+    }
+    [self sendStateUpdate:@{@"recordingState": @"recording"}];
+}
+
+- (void)stopRecordingAudioPrompt {
+    if (!_isRecording) return;
+    _isRecording = NO;
+    if (_recordEngine) {
+        [_recordEngine.inputNode removeTapOnBus:0];
+        [_recordEngine stop];
+        _recordEngine = nil;
+    }
+    _recordConverter = nil;
+
+    std::vector<float> samples;
+    @synchronized (self) {
+        samples.swap(_recordSamples);
+    }
+    if (samples.empty()) {
+        [self sendStateUpdate:@{@"recordingState": @"idle",
+                                @"sessionError": @"No audio recorded"}];
+        return;
+    }
+
+    // Loop-fill to the fixed prompt length, matching the file-load path.
+    std::vector<float> out(kAudioPromptFrames, 0.0f);
+    const size_t srcLen = samples.size();
+    for (int i = 0; i < kAudioPromptFrames; ++i) out[i] = samples[i % srcLen];
+
+    RealtimeRunner* engine = self.engine;
+    if (engine) {
+        engine->set_audio_prompt_samples(0, "recording", out.data(), kAudioPromptFrames);
+    }
+    [self sendStateUpdate:@{
+        @"recordingState": @"idle",
+        @"prompt": @"recording",
+        @"isAudioPrompt": @YES,
+    }];
+}
+
+- (void)handleLoadVisualImage {
+    NSOpenPanel* panel = [NSOpenPanel openPanel];
+    [panel setCanChooseFiles:YES];
+    [panel setCanChooseDirectories:NO];
+    [panel setAllowedContentTypes:@[[UTType typeWithIdentifier:@"public.image"]]];
+    [panel setMessage:@"Select an image for the visual layer"];
+
+    void (^completionBlock)(NSModalResponse) = ^(NSModalResponse result) {
+        if (result != NSModalResponseOK) return;
+        NSURL* url = [panel URL];
+        if (!url) return;
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            NSData* data = [NSData dataWithContentsOfURL:url];
+            if (!data) return;
+            // Cap very large files so the data URL stays reasonable for IPC.
+            if (data.length > 12 * 1024 * 1024) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self sendStateUpdate:@{@"visualImageError": @"Image too large (max 12 MB)"}];
+                });
+                return;
+            }
+            NSString* ext = url.pathExtension.lowercaseString;
+            NSString* mime = @"image/png";
+            if ([ext isEqualToString:@"jpg"] || [ext isEqualToString:@"jpeg"]) mime = @"image/jpeg";
+            else if ([ext isEqualToString:@"gif"]) mime = @"image/gif";
+            else if ([ext isEqualToString:@"webp"]) mime = @"image/webp";
+            else if ([ext isEqualToString:@"bmp"]) mime = @"image/bmp";
+            NSString* dataUrl = [NSString stringWithFormat:@"data:%@;base64,%@",
+                mime, [data base64EncodedStringWithOptions:0]];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self sendStateUpdate:@{@"visualImage": dataUrl}];
+            });
+        });
+    };
+
+    if (self.view.window) {
+        [panel beginSheetModalForWindow:self.view.window completionHandler:completionBlock];
+    } else {
+        [panel beginWithCompletionHandler:completionBlock];
+    }
+}
+
+- (void)handleExportSession:(NSString*)json {
+    NSSavePanel* panel = [NSSavePanel savePanel];
+    [panel setNameFieldStringValue:@"jam-session.json"];
+    [panel setAllowedContentTypes:@[[UTType typeWithIdentifier:@"public.json"]]];
+    [panel setMessage:@"Export the current jam session"];
+    void (^completionBlock)(NSModalResponse) = ^(NSModalResponse result) {
+        if (result != NSModalResponseOK) return;
+        NSURL* url = [panel URL];
+        if (!url) return;
+        NSError* err = nil;
+        BOOL ok = [json writeToURL:url atomically:YES encoding:NSUTF8StringEncoding error:&err];
+        if (!ok) {
+            [self sendStateUpdate:@{@"sessionError":
+                [NSString stringWithFormat:@"Export failed: %@", err.localizedDescription ?: @"unknown"]}];
+        } else {
+            [self sendStateUpdate:@{@"sessionNotice": @"Session exported"}];
+        }
+    };
+    if (self.view.window) {
+        [panel beginSheetModalForWindow:self.view.window completionHandler:completionBlock];
+    } else {
+        [panel beginWithCompletionHandler:completionBlock];
+    }
+}
+
+- (void)handleImportSession {
+    NSOpenPanel* panel = [NSOpenPanel openPanel];
+    [panel setCanChooseFiles:YES];
+    [panel setCanChooseDirectories:NO];
+    [panel setAllowsMultipleSelection:NO];
+    [panel setAllowedContentTypes:@[[UTType typeWithIdentifier:@"public.json"]]];
+    [panel setMessage:@"Import a jam session"];
+    void (^completionBlock)(NSModalResponse) = ^(NSModalResponse result) {
+        if (result != NSModalResponseOK) return;
+        NSURL* url = [panel URL];
+        if (!url) return;
+        NSError* err = nil;
+        NSString* json = [NSString stringWithContentsOfURL:url encoding:NSUTF8StringEncoding error:&err];
+        if (!json) {
+            [self sendStateUpdate:@{@"sessionError":
+                [NSString stringWithFormat:@"Import failed: %@", err.localizedDescription ?: @"unreadable file"]}];
+            return;
+        }
+        [self sendStateUpdate:@{@"importedSession": json}];
+    };
     if (self.view.window) {
         [panel beginSheetModalForWindow:self.view.window completionHandler:completionBlock];
     } else {
