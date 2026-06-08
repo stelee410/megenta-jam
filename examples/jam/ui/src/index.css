@@ -1407,3 +1407,584 @@ body.cursor-grabbing * {
     justify-content: flex-end;
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   UI THEMES — data-theme attribute on <html> drives override blocks.
+   The prompt canvas and XY pads intentionally stay dark "display screens"
+   in every theme (hardware-synth metaphor); only the chrome re-skins.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  --text-primary: #fff;
+  --play-bg: #fff;
+  --play-fg: #000;
+  --play-edge: #ddd;
+  --bg-keyboard: #070708;
+  --bg-footer: #000;
+}
+
+.jam-root { color: var(--text-primary); }
+.jam-keyboard-zone { background-color: var(--bg-keyboard); }
+.jam-footer { background: var(--bg-footer); color: #fff; }
+
+/* ── LIGHT — studio: light chrome, dark screens ───────────────────────────── */
+
+html[data-theme="light"] {
+  --text-primary: #17181b;
+  --play-bg: #1d1e22;
+  --play-fg: #fff;
+  --play-edge: rgba(0, 0, 0, 0.35);
+  --bg-keyboard: #dde0e5;
+  --bg-footer: #1d1e22;
+}
+
+html[data-theme="light"] body { background: #e6e7ea; }
+
+html[data-theme="light"] .jam-app-shell {
+  background: linear-gradient(180deg, #f5f6f8, #e6e7ea 30%);
+}
+
+html[data-theme="light"] .jam-prompt-panel,
+html[data-theme="light"] .jam-performance-panel {
+  background: #f4f5f8;
+  border-color: rgba(0, 0, 0, 0.14);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.10);
+  color: #1b1c1f;
+}
+
+html[data-theme="light"] .jam-section-label,
+html[data-theme="light"] .jam-prompt-status,
+html[data-theme="light"] .jam-performance-head,
+html[data-theme="light"] .jam-latch-row,
+html[data-theme="light"] .jam-bpm-row,
+html[data-theme="light"] .jam-effect-label,
+html[data-theme="light"] .jam-effect-value,
+html[data-theme="light"] .jam-memory-indicator {
+  color: rgba(20, 21, 24, 0.72);
+}
+
+html[data-theme="light"] .jam-mini-button,
+html[data-theme="light"] .jam-chat-button {
+  border-color: rgba(0, 0, 0, 0.18);
+  background: rgba(0, 0, 0, 0.05);
+  color: rgba(20, 21, 24, 0.66);
+}
+
+html[data-theme="light"] .jam-mini-button.is-active {
+  border-color: rgba(20, 140, 105, 0.7);
+  background: rgba(25, 191, 143, 0.2);
+  color: #0d6e50;
+}
+
+html[data-theme="light"] .jam-mode-switch {
+  border-color: rgba(0, 0, 0, 0.16);
+  background: rgba(0, 0, 0, 0.06);
+}
+
+html[data-theme="light"] .jam-mode-switch button { color: rgba(20, 21, 24, 0.5); }
+html[data-theme="light"] .jam-mode-switch button.is-active {
+  background: #1d1e22;
+  color: #fff;
+}
+
+html[data-theme="light"] .jam-pad-mode-switch button {
+  border-color: rgba(0, 0, 0, 0.2);
+  color: rgba(20, 21, 24, 0.55);
+}
+html[data-theme="light"] .jam-pad-mode-switch button.is-active {
+  background: #1d1e22;
+  color: #fff;
+}
+
+html[data-theme="light"] .jam-slot-pill {
+  border-color: rgba(0, 0, 0, 0.14);
+  background: rgba(0, 0, 0, 0.05);
+  color: rgba(20, 21, 24, 0.78);
+}
+html[data-theme="light"] .jam-slot-pill em { color: rgba(20, 21, 24, 0.5); }
+
+html[data-theme="light"] .jam-bpm-row input {
+  border-color: rgba(0, 0, 0, 0.2);
+  background: #fff;
+  color: #17181b;
+}
+
+html[data-theme="light"] .jam-keyboard-head,
+html[data-theme="light"] .jam-gate-toggle {
+  color: rgba(20, 21, 24, 0.7);
+}
+
+html[data-theme="light"] .jam-lyria-status { color: #0d6e50; }
+html[data-theme="light"] .jam-lyria-status.is-error { color: #b3261e; }
+
+/* Topbar MUI buttons (model selector, timing) carry inline white styling */
+html[data-theme="light"] .jam-topbar-left button,
+html[data-theme="light"] .jam-topbar-right button:not(.jam-chat-button) {
+  color: #17181b !important;
+  border-color: rgba(0, 0, 0, 0.2) !important;
+  background: rgba(0, 0, 0, 0.04) !important;
+}
+
+/* ── FAMICOM — cream body, red controls, hard edges ───────────────────────── */
+
+html[data-theme="famicom"] {
+  --text-primary: #2a2118;
+  --play-bg: #b81414;
+  --play-fg: #fff;
+  --play-edge: #7a0d0d;
+  --bg-keyboard: #e9e1cf;
+  --bg-footer: #b81414;
+}
+
+html[data-theme="famicom"] body { background: #d9d2c4; }
+
+html[data-theme="famicom"] .jam-app-shell {
+  background: linear-gradient(180deg, #efe8d8, #d9d2c4 36%);
+}
+
+html[data-theme="famicom"] .jam-prompt-panel,
+html[data-theme="famicom"] .jam-performance-panel {
+  background: #f7f1e3;
+  border: 2px solid #2a2118;
+  box-shadow: 4px 4px 0 rgba(42, 33, 24, 0.35);
+  color: #2a2118;
+}
+
+html[data-theme="famicom"] .jam-prompt-canvas { border: 2px solid #2a2118; }
+
+html[data-theme="famicom"] .jam-section-label,
+html[data-theme="famicom"] .jam-prompt-status,
+html[data-theme="famicom"] .jam-performance-head,
+html[data-theme="famicom"] .jam-latch-row,
+html[data-theme="famicom"] .jam-bpm-row,
+html[data-theme="famicom"] .jam-effect-label,
+html[data-theme="famicom"] .jam-effect-value,
+html[data-theme="famicom"] .jam-keyboard-head,
+html[data-theme="famicom"] .jam-gate-toggle {
+  color: #2a2118;
+}
+
+html[data-theme="famicom"] .jam-mini-button,
+html[data-theme="famicom"] .jam-chat-button {
+  border: 2px solid #2a2118;
+  background: #f7f1e3;
+  color: #2a2118;
+}
+
+html[data-theme="famicom"] .jam-mini-button.is-active {
+  border-color: #7a0d0d;
+  background: #b81414;
+  color: #fff;
+}
+
+html[data-theme="famicom"] .jam-mode-switch {
+  border: 2px solid #2a2118;
+  background: #f7f1e3;
+}
+html[data-theme="famicom"] .jam-mode-switch button { color: rgba(42, 33, 24, 0.55); }
+html[data-theme="famicom"] .jam-mode-switch button.is-active {
+  background: #b81414;
+  color: #fff;
+}
+
+html[data-theme="famicom"] .jam-pad-mode-switch button {
+  border: 2px solid #2a2118;
+  color: #2a2118;
+}
+html[data-theme="famicom"] .jam-pad-mode-switch button.is-active {
+  background: #b81414;
+  border-color: #7a0d0d;
+  color: #fff;
+}
+
+html[data-theme="famicom"] .jam-slot-pill {
+  border: 2px solid #2a2118;
+  background: #f7f1e3;
+  color: #2a2118;
+}
+html[data-theme="famicom"] .jam-slot-pill em { color: rgba(42, 33, 24, 0.6); }
+
+html[data-theme="famicom"] .jam-bpm-row input {
+  border: 2px solid #2a2118;
+  background: #fff;
+  color: #2a2118;
+}
+
+html[data-theme="famicom"] .jam-active-dot { background: #b81414; box-shadow: none; }
+html[data-theme="famicom"] .jam-lyria-status { color: #7a0d0d; }
+html[data-theme="famicom"] .jam-lyria-status.is-error { color: #b81414; }
+
+html[data-theme="famicom"] .jam-topbar-left button,
+html[data-theme="famicom"] .jam-topbar-right button:not(.jam-chat-button) {
+  color: #2a2118 !important;
+  border-color: #2a2118 !important;
+  background: #f7f1e3 !important;
+}
+
+/* Hard edges on the chrome (round dials/dots keep their shape) */
+html[data-theme="famicom"] .jam-prompt-panel,
+html[data-theme="famicom"] .jam-performance-panel,
+html[data-theme="famicom"] .jam-prompt-canvas,
+html[data-theme="famicom"] .jam-mini-button,
+html[data-theme="famicom"] .jam-chat-button,
+html[data-theme="famicom"] .jam-mode-switch,
+html[data-theme="famicom"] .jam-mode-switch button,
+html[data-theme="famicom"] .jam-pad-mode-switch button,
+html[data-theme="famicom"] .jam-slot-pill,
+html[data-theme="famicom"] .jam-bpm-row input,
+html[data-theme="famicom"] .jam-prompt-chip,
+html[data-theme="famicom"] .jam-xfader-handle {
+  border-radius: 0 !important;
+}
+
+/* ── YAMAHA — charcoal body, amber LCD accents, cream keys ────────────────── */
+
+html[data-theme="yamaha"] {
+  --text-primary: #f0ede4;
+  --play-bg: #ffb000;
+  --play-fg: #1a1206;
+  --play-edge: #8f6400;
+  --bg-keyboard: #17181c;
+  --bg-footer: #0c0d10;
+}
+
+html[data-theme="yamaha"] body { background: #1b1c20; }
+
+html[data-theme="yamaha"] .jam-app-shell {
+  background: linear-gradient(180deg, #2a2b30, #1b1c20 34%);
+}
+
+html[data-theme="yamaha"] .jam-prompt-panel,
+html[data-theme="yamaha"] .jam-performance-panel {
+  background: #26272c;
+  border-color: rgba(255, 176, 0, 0.16);
+  color: #f0ede4;
+}
+
+html[data-theme="yamaha"] .jam-section-label,
+html[data-theme="yamaha"] .jam-keyboard-head,
+html[data-theme="yamaha"] .jam-gate-toggle { color: rgba(240, 237, 228, 0.6); }
+
+html[data-theme="yamaha"] .jam-performance-head,
+html[data-theme="yamaha"] .jam-prompt-status,
+html[data-theme="yamaha"] .jam-lyria-status { color: #ffb000; }
+
+html[data-theme="yamaha"] .jam-active-dot {
+  background: #ffb000;
+  box-shadow: 0 0 12px rgba(255, 176, 0, 0.6);
+}
+
+html[data-theme="yamaha"] .jam-mini-button.is-active {
+  border-color: rgba(255, 176, 0, 0.6);
+  background: rgba(255, 176, 0, 0.16);
+  color: #ffc63d;
+}
+
+html[data-theme="yamaha"] .jam-mode-switch button.is-active {
+  background: rgba(255, 176, 0, 0.85);
+  color: #1a1206;
+}
+
+html[data-theme="yamaha"] .jam-pad-mode-switch button.is-active {
+  background: rgba(255, 176, 0, 0.85);
+  border-color: transparent;
+  color: #1a1206;
+}
+
+html[data-theme="yamaha"] .jam-bpm-row input:focus { border-color: #ffb000; }
+html[data-theme="yamaha"] .jam-lyria-status.is-error { color: #ff7a7a; }
+
+/* ── CASIO — silver body, calculator-LCD green, colorful accents ──────────── */
+
+html[data-theme="casio"] {
+  --text-primary: #1f2125;
+  --play-bg: #2462d6;
+  --play-fg: #fff;
+  --play-edge: #163e8a;
+  --bg-keyboard: #c9ccd1;
+  --bg-footer: #3a3c40;
+}
+
+html[data-theme="casio"] body { background: #c9ccd1; }
+
+html[data-theme="casio"] .jam-app-shell {
+  background: linear-gradient(180deg, #e3e5e8, #c9ccd1 36%);
+}
+
+html[data-theme="casio"] .jam-prompt-panel,
+html[data-theme="casio"] .jam-performance-panel {
+  background: #e8eaec;
+  border-color: rgba(0, 0, 0, 0.18);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7), 0 8px 20px rgba(0, 0, 0, 0.18);
+  color: #1f2125;
+}
+
+html[data-theme="casio"] .jam-section-label,
+html[data-theme="casio"] .jam-prompt-status,
+html[data-theme="casio"] .jam-latch-row,
+html[data-theme="casio"] .jam-bpm-row,
+html[data-theme="casio"] .jam-effect-label,
+html[data-theme="casio"] .jam-effect-value,
+html[data-theme="casio"] .jam-keyboard-head,
+html[data-theme="casio"] .jam-gate-toggle {
+  color: rgba(31, 33, 37, 0.7);
+}
+
+/* Calculator LCD: green-grey window with dark segments */
+html[data-theme="casio"] .jam-performance-head,
+html[data-theme="casio"] .jam-lyria-status {
+  background: #c4d2a8;
+  border-radius: 3px;
+  padding: 2px 7px;
+  color: #29321a;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.28);
+}
+
+html[data-theme="casio"] .jam-bpm-row input {
+  border-color: rgba(0, 0, 0, 0.3);
+  background: #c4d2a8;
+  color: #29321a;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.28);
+}
+
+html[data-theme="casio"] .jam-mini-button,
+html[data-theme="casio"] .jam-chat-button {
+  border-color: rgba(0, 0, 0, 0.25);
+  background: linear-gradient(180deg, #fdfdfe, #dfe1e5);
+  color: #2a2c31;
+  box-shadow: 0 1.5px 0 rgba(0, 0, 0, 0.3);
+}
+
+html[data-theme="casio"] .jam-mini-button.is-active {
+  border-color: #163e8a;
+  background: linear-gradient(180deg, #4b82e8, #2462d6);
+  color: #fff;
+}
+
+html[data-theme="casio"] .jam-mode-switch {
+  border-color: rgba(0, 0, 0, 0.22);
+  background: #d6d8dc;
+}
+html[data-theme="casio"] .jam-mode-switch button { color: rgba(31, 33, 37, 0.55); }
+html[data-theme="casio"] .jam-mode-switch button.is-active {
+  background: #d6402c;
+  color: #fff;
+}
+
+html[data-theme="casio"] .jam-pad-mode-switch button {
+  border-color: rgba(0, 0, 0, 0.28);
+  color: #2a2c31;
+  background: linear-gradient(180deg, #fdfdfe, #dfe1e5);
+}
+html[data-theme="casio"] .jam-pad-mode-switch button.is-active {
+  background: #e8a821;
+  border-color: #9a6c08;
+  color: #221a04;
+}
+
+html[data-theme="casio"] .jam-slot-pill {
+  border-color: rgba(0, 0, 0, 0.2);
+  background: #f2f3f5;
+  color: rgba(31, 33, 37, 0.85);
+}
+html[data-theme="casio"] .jam-slot-pill em { color: rgba(31, 33, 37, 0.5); }
+
+html[data-theme="casio"] .jam-active-dot { background: #d6402c; box-shadow: none; }
+html[data-theme="casio"] .jam-lyria-status.is-error { color: #8a1d12; background: #e7c9b2; }
+
+html[data-theme="casio"] .jam-topbar-left button,
+html[data-theme="casio"] .jam-topbar-right button:not(.jam-chat-button) {
+  color: #1f2125 !important;
+  border-color: rgba(0, 0, 0, 0.25) !important;
+  background: linear-gradient(180deg, #fdfdfe, #dfe1e5) !important;
+}
+
+/* ── CYBERPUNK — neon magenta/cyan on deep violet black ───────────────────── */
+
+html[data-theme="cyberpunk"] {
+  --text-primary: #e8f6ff;
+  --play-bg: #ff2bd6;
+  --play-fg: #14001c;
+  --play-edge: #8a0f73;
+  --bg-keyboard: #0b0418;
+  --bg-footer: #060011;
+}
+
+html[data-theme="cyberpunk"] body { background: #0a0118; }
+
+html[data-theme="cyberpunk"] .jam-app-shell {
+  background:
+    radial-gradient(circle at 18% 0%, rgba(255, 43, 214, 0.14), transparent 42%),
+    radial-gradient(circle at 86% 100%, rgba(0, 240, 255, 0.10), transparent 46%),
+    #0a0118;
+}
+
+html[data-theme="cyberpunk"] .jam-prompt-panel,
+html[data-theme="cyberpunk"] .jam-performance-panel {
+  background: rgba(18, 6, 38, 0.88);
+  border-color: rgba(0, 240, 255, 0.28);
+  box-shadow: 0 0 18px rgba(0, 240, 255, 0.10), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  color: #e8f6ff;
+}
+
+html[data-theme="cyberpunk"] .jam-section-label,
+html[data-theme="cyberpunk"] .jam-keyboard-head,
+html[data-theme="cyberpunk"] .jam-gate-toggle { color: rgba(0, 240, 255, 0.62); }
+
+html[data-theme="cyberpunk"] .jam-performance-head,
+html[data-theme="cyberpunk"] .jam-prompt-status,
+html[data-theme="cyberpunk"] .jam-lyria-status {
+  color: #00f0ff;
+  text-shadow: 0 0 8px rgba(0, 240, 255, 0.55);
+}
+
+html[data-theme="cyberpunk"] .jam-active-dot {
+  background: #00f0ff;
+  box-shadow: 0 0 12px rgba(0, 240, 255, 0.8);
+}
+
+html[data-theme="cyberpunk"] .jam-mini-button,
+html[data-theme="cyberpunk"] .jam-chat-button {
+  border-color: rgba(0, 240, 255, 0.3);
+  color: rgba(232, 246, 255, 0.6);
+}
+
+html[data-theme="cyberpunk"] .jam-mini-button.is-active {
+  border-color: #ff2bd6;
+  background: rgba(255, 43, 214, 0.16);
+  color: #ff7ae6;
+  box-shadow: 0 0 12px rgba(255, 43, 214, 0.4);
+}
+
+html[data-theme="cyberpunk"] .jam-mode-switch { border-color: rgba(0, 240, 255, 0.3); }
+html[data-theme="cyberpunk"] .jam-mode-switch button.is-active {
+  background: #ff2bd6;
+  color: #14001c;
+  box-shadow: 0 0 14px rgba(255, 43, 214, 0.55);
+}
+
+html[data-theme="cyberpunk"] .jam-pad-mode-switch button { border-color: rgba(0, 240, 255, 0.35); }
+html[data-theme="cyberpunk"] .jam-pad-mode-switch button.is-active {
+  background: #ff2bd6;
+  color: #14001c;
+  box-shadow: 0 0 10px rgba(255, 43, 214, 0.5);
+}
+
+html[data-theme="cyberpunk"] .jam-bpm-row input {
+  border-color: rgba(0, 240, 255, 0.35);
+  background: rgba(0, 0, 0, 0.5);
+  color: #00f0ff;
+}
+
+html[data-theme="cyberpunk"] .jam-slot-pill { border-color: rgba(0, 240, 255, 0.2); }
+html[data-theme="cyberpunk"] .jam-lyria-status.is-error {
+  color: #ff5577;
+  text-shadow: 0 0 8px rgba(255, 85, 119, 0.6);
+}
+
+/* ── NANA — punk rock: black, rose red, gothic elegance ───────────────────── */
+
+html[data-theme="nana"] {
+  --text-primary: #f4eef0;
+  --play-bg: #d6244a;
+  --play-fg: #fff;
+  --play-edge: #7e1029;
+  --bg-keyboard: #15080c;
+  --bg-footer: #000;
+}
+
+html[data-theme="nana"] body { background: #121013; }
+
+html[data-theme="nana"] .jam-app-shell {
+  background:
+    radial-gradient(circle at 82% 4%, rgba(214, 36, 74, 0.14), transparent 38%),
+    linear-gradient(180deg, #1b181a, #121013 40%);
+}
+
+html[data-theme="nana"] .jam-prompt-panel,
+html[data-theme="nana"] .jam-performance-panel {
+  background: rgba(26, 22, 24, 0.92);
+  border-color: rgba(214, 36, 74, 0.34);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.5);
+  color: #f4eef0;
+}
+
+html[data-theme="nana"] .jam-section-label,
+html[data-theme="nana"] .jam-keyboard-head,
+html[data-theme="nana"] .jam-gate-toggle { color: rgba(244, 238, 240, 0.55); }
+
+html[data-theme="nana"] .jam-performance-head,
+html[data-theme="nana"] .jam-prompt-status,
+html[data-theme="nana"] .jam-lyria-status { color: #e9577a; }
+
+html[data-theme="nana"] .jam-active-dot {
+  background: #d6244a;
+  box-shadow: 0 0 12px rgba(214, 36, 74, 0.65);
+}
+
+html[data-theme="nana"] .jam-mini-button,
+html[data-theme="nana"] .jam-chat-button { border-color: rgba(214, 36, 74, 0.3); }
+
+html[data-theme="nana"] .jam-mini-button.is-active {
+  border-color: rgba(214, 36, 74, 0.75);
+  background: rgba(214, 36, 74, 0.2);
+  color: #ff8aa5;
+}
+
+html[data-theme="nana"] .jam-mode-switch { border-color: rgba(214, 36, 74, 0.3); }
+html[data-theme="nana"] .jam-mode-switch button.is-active {
+  background: #d6244a;
+  color: #fff;
+}
+
+html[data-theme="nana"] .jam-pad-mode-switch button { border-color: rgba(214, 36, 74, 0.4); }
+html[data-theme="nana"] .jam-pad-mode-switch button.is-active {
+  background: #d6244a;
+  border-color: transparent;
+  color: #fff;
+}
+
+html[data-theme="nana"] .jam-bpm-row input {
+  border-color: rgba(214, 36, 74, 0.4);
+  background: rgba(0, 0, 0, 0.45);
+  color: #f4eef0;
+}
+
+html[data-theme="nana"] .jam-slot-pill { border-color: rgba(214, 36, 74, 0.22); }
+html[data-theme="nana"] .jam-lyria-status.is-error { color: #ff5d5d; }
+
+/* ── Visual layer (audio-reactive shader) ─────────────────────────────────── */
+
+.jam-visual-layer.is-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.85;
+}
+
+.jam-visual-layer.is-full {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: #000;
+  cursor: pointer;
+}
+
+.jam-visual-layer canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.jam-visual-hint {
+  position: absolute;
+  right: 18px;
+  bottom: 14px;
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: lowercase;
+  color: rgba(255, 255, 255, 0.35);
+  pointer-events: none;
+}

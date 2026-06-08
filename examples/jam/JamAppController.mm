@@ -218,6 +218,20 @@ static BOOL isDevServerRunning(void) {
             @"left": @(pL),
             @"right": @(pR)
         };
+
+        // Compact waveform for the UI visual layer: newest ~2048 samples of
+        // the viz ring downsampled to 96 points (25 Hz × 96 floats is cheap).
+        constexpr int kWavePoints = 96;
+        constexpr int kWaveWindow = 2048;
+        const int head = shared->vizHead.load(std::memory_order_acquire);
+        NSMutableArray* wave = [NSMutableArray arrayWithCapacity:kWavePoints];
+        for (int i = 0; i < kWavePoints; i++) {
+            int idx = head - kWaveWindow + (i * kWaveWindow) / kWavePoints;
+            idx = ((idx % JamSharedState::VIZ_BUF_SIZE) + JamSharedState::VIZ_BUF_SIZE)
+                  % JamSharedState::VIZ_BUF_SIZE;
+            [wave addObject:@(roundf(shared->vizRing[idx] * 1000.0f) / 1000.0f)];
+        }
+        stateUpdate[@"waveform"] = wave;
     }
 
     // Metrics every 5th tick (~5 Hz)

@@ -21,6 +21,8 @@ import { JamSliderElastic } from './JamSliderElastic';
 import { MagentaDropdown, MidiSelector, ModelSelector, ResourceOnboardingModal, PROMPT_SUGGESTIONS, INSTRUMENT_SUGGESTIONS, AudioMeter, TimingIndicator, SettingsPanel, GREY_900, ALL_COLORS, DEFAULT_TEMPERATURE, DEFAULT_TOPK, DEFAULT_CFG_NOTES, DEFAULT_CFG_MUSICCOCA, DEFAULT_CFG_DRUMS, DEFAULT_UNMASK_WIDTH, DEFAULT_BUFFER_SIZE, DEFAULT_VOLUME, PromptSurface, calculateWeights } from '@magenta-rt/common';
 import type { PromptNode, ListenerNode } from '@magenta-rt/common';
 import { Turtle, Rabbit } from 'lucide-react';
+import { VisualLayer, VISUAL_PRESETS } from './VisualLayer';
+import type { VisualData } from './VisualLayer';
 import {
   IconButton,
   MenuItem,
@@ -183,6 +185,32 @@ const padYFromTopk = (k: number) =>
 const filterXFromPad = (x: number) => clamp01(2 * x);
 const filterYFromPad = (y: number) => clamp01(2 * y - 1);
 
+// ─── UI themes ───────────────────────────────────────────────────────────────
+// Theme = a data-theme attribute on <html> driving CSS override blocks, plus
+// per-theme piano key colors. The prompt canvas / XY pad stay dark "display
+// screens" in every theme (hardware-synth metaphor).
+
+const UI_THEMES = ['dark', 'light', 'famicom', 'yamaha', 'casio', 'cyberpunk', 'nana'] as const;
+type UiTheme = (typeof UI_THEMES)[number];
+
+const THEME_KEYS: Record<UiTheme, { white: string; black: string }> = {
+  dark: { white: '#111214', black: '#030405' },
+  light: { white: '#fafafa', black: '#1b1c1f' },
+  famicom: { white: '#f5e9d6', black: '#8f1111' },
+  yamaha: { white: '#f2efe7', black: '#141519' },
+  casio: { white: '#fbfbfb', black: '#2a2b2e' },
+  cyberpunk: { white: '#1c1133', black: '#06030d' },
+  nana: { white: '#f3eef0', black: '#26070f' },
+};
+
+const loadSavedTheme = (): UiTheme => {
+  try {
+    const t = window.localStorage.getItem('jamTheme');
+    if (t && (UI_THEMES as readonly string[]).includes(t)) return t as UiTheme;
+  } catch { /* private mode etc. */ }
+  return 'dark';
+};
+
 // ─── Lyria scale selection ───────────────────────────────────────────────────
 // In Lyria mode the piano keyboard doubles as a key/scale selector: pressing
 // any key locks musicGenerationConfig.scale to that pitch class's
@@ -326,6 +354,25 @@ function App() {
   // Solo / Accompany state
   const [isSoloMode, setIsSoloMode] = useState(false);
   const lastSentSoloMode = useRef(false);
+
+  // ─── Visual layer (audio-reactive shader) ─────────────────────────────────
+  const [visualMode, setVisualMode] = useState<'off' | 'bg' | 'full'>('off');
+  const [visualPreset, setVisualPreset] = useState(0);
+  const visualDataRef = useRef<VisualData>({
+    level: 0,
+    kick: 0,
+    wave: new Float32Array(96),
+  });
+
+  // ─── UI theme ─────────────────────────────────────────────────────────────
+  const [uiTheme, setUiTheme] = useState<UiTheme>(loadSavedTheme);
+  useEffect(() => {
+    document.documentElement.dataset.theme = uiTheme;
+    try { window.localStorage.setItem('jamTheme', uiTheme); } catch { /* noop */ }
+  }, [uiTheme]);
+  const cycleTheme = () => {
+    setUiTheme(t => UI_THEMES[(UI_THEMES.indexOf(t) + 1) % UI_THEMES.length]);
+  };
 
   // ─── Engine mode: local MLX model vs Lyria RealTime cloud ────────────────
   // The native side hard-cuts the Lyria websocket on pause/stop/switch/quit,
@@ -1042,7 +1089,27 @@ function App() {
           return next;
         });
       }
-      if (state.audioLevels) setAudioLevels(state.audioLevels);
+      if (state.audioLevels) {
+        setAudioLevels(state.audioLevels);
+        // Envelope + transient detection for the visual layer (refs only —
+        // no extra re-renders at 25 Hz).
+        const lvl = Math.max(state.audioLevels.left ?? 0, state.audioLevels.right ?? 0);
+        const vd = visualDataRef.current;
+        const prevLvl = vd.level;
+        vd.level = lvl > vd.level
+          ? vd.level * 0.55 + lvl * 0.45   // fast attack
+          : vd.level * 0.92 + lvl * 0.08;  // slow release
+        vd.kick = Math.max(
+          vd.kick * 0.82,
+          lvl > prevLvl * 1.35 && lvl > 0.12 ? Math.min(1, lvl * 1.4) : 0,
+        );
+      }
+      if (state.waveform) {
+        const w = state.waveform as number[];
+        const arr = visualDataRef.current.wave;
+        const n = Math.min(arr.length, w.length);
+        for (let i = 0; i < n; i++) arr[i] = w[i];
+      }
       if (state.modelName !== undefined) setModelName(state.modelName);
       if (state.isPlaying !== undefined) setIsPlaying(state.isPlaying);
       if (state.activeNotes) {
@@ -1436,13 +1503,13 @@ function App() {
         width: 63,
         height: 44,
         borderRadius: '8px',
-        backgroundColor: '#FFF',
-        color: '#000',
-        borderBottom: '1.5px solid #ddd',
+        backgroundColor: 'var(--play-bg, #FFF)',
+        color: 'var(--play-fg, #000)',
+        borderBottom: '1.5px solid var(--play-edge, #ddd)',
         transition: 'opacity 0.15s ease',
         '&:hover': {
-          backgroundColor: '#FFF',
-          color: '#000',
+          backgroundColor: 'var(--play-bg, #FFF)',
+          color: 'var(--play-fg, #000)',
           opacity: 0.9,
         },
         '&.Mui-disabled': {
@@ -1462,6 +1529,7 @@ function App() {
 
   return (
     <div
+      className="jam-root"
       style={{
         height: '100vh',
         width: '100vw',
@@ -1469,7 +1537,6 @@ function App() {
         flexDirection: 'column',
         overflow: 'hidden',
         boxSizing: 'border-box',
-        color: '#FFF',
         fontFamily: "'Google Sans Text', system-ui, sans-serif",
       }}
     >
@@ -1526,6 +1593,13 @@ function App() {
               }}
               isPlaying={isPlaying}
             />
+            <button
+              className="jam-chat-button"
+              title="Switch UI theme"
+              onClick={cycleTheme}
+            >
+              {uiTheme}
+            </button>
             <button className="jam-chat-button">Chat</button>
           </div>
         </div>
@@ -1562,6 +1636,31 @@ function App() {
               <div className="jam-prompt-toolbar">
                 <div className="jam-prompt-toolset">
                   <button className="jam-mini-button" onClick={resetModel}>Reset</button>
+                  <button
+                    className={`jam-mini-button ${visualMode !== 'off' ? 'is-active' : ''}`}
+                    title="Audio-reactive visual layer"
+                    onClick={() => setVisualMode(m => (m === 'off' ? 'bg' : 'off'))}
+                  >
+                    visual
+                  </button>
+                  {visualMode !== 'off' && (
+                    <>
+                      <button
+                        className="jam-mini-button"
+                        title="Cycle visual preset"
+                        onClick={() => setVisualPreset(p => (p + 1) % VISUAL_PRESETS.length)}
+                      >
+                        {VISUAL_PRESETS[visualPreset]}
+                      </button>
+                      <button
+                        className="jam-mini-button"
+                        title="Fullscreen visuals (click or Esc to exit)"
+                        onClick={() => setVisualMode('full')}
+                      >
+                        full
+                      </button>
+                    </>
+                  )}
                   {promptMode === 'mix' && (
                     <>
                       {(['standard', 'circle', 'surface'] as MixLayoutMode[]).map(layout => (
@@ -1614,6 +1713,17 @@ function App() {
                 }
               }}
             >
+              {visualMode === 'bg' && (
+                <VisualLayer
+                  mode="bg"
+                  accent={activeColor}
+                  bpm={bpmValue}
+                  beatActive={bpmLock}
+                  preset={visualPreset}
+                  dataRef={visualDataRef}
+                  onExitFull={() => setVisualMode('bg')}
+                />
+              )}
               {(promptMode === 'single' || promptMode === 'solo') && (
                 <div className="jam-single-prompt">
                   <div className="jam-single-kicker">{activeModeLabel}</div>
@@ -2012,10 +2122,10 @@ function App() {
           PIANO KEYBOARD — full bleed, no padding
           ══════════════════════════════════════════════════════════════════ */}
       <div
+        className="jam-keyboard-zone"
         style={{
           flexShrink: 0,
           height: '158px',
-          backgroundColor: '#070708',
           paddingTop: '26px',
           paddingLeft: '18px',
           paddingRight: '18px',
@@ -2055,7 +2165,7 @@ function App() {
           gap: '4px',
           padding: '4px 8px',
           borderRadius: '8px',
-          backgroundColor: '#000',
+          backgroundColor: 'var(--bg-footer, #000)',
           visibility: keyboardMidiEnabled ? 'visible' : 'hidden',
         }}>
           <IconButton
@@ -2109,8 +2219,8 @@ function App() {
           startNote={keyboardStartNote}
           endNote={keyboardEndNote}
           keyboardMidiEnabled={keyboardMidiEnabled}
-          whiteKeyColor="#111214"
-          blackKeyColor="#030405"
+          whiteKeyColor={THEME_KEYS[uiTheme].white}
+          blackKeyColor={THEME_KEYS[uiTheme].black}
           onNoteOn={(visualNote) => {
             // Remap visual piano note to actual MIDI note
             const note = keyboardMidiEnabled
@@ -2134,11 +2244,10 @@ function App() {
           BLACK FOOTER — MIDI, spacing, AudioMeter
           ══════════════════════════════════════════════════════════════════ */}
       <div
+        className="jam-footer"
         style={{
           flexShrink: 0,
           height: '48px',
-          background: '#000',
-          color: '#FFF',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
@@ -2164,6 +2273,19 @@ function App() {
           <AudioMeter leftLevel={audioLevels.left} rightLevel={audioLevels.right} width="45px" height="14px" />
         </div>
       </div>
+
+      {/* ── Fullscreen audio-reactive visuals ── */}
+      {visualMode === 'full' && (
+        <VisualLayer
+          mode="full"
+          accent={activeColor}
+          bpm={bpmValue}
+          beatActive={bpmLock}
+          preset={visualPreset}
+          dataRef={visualDataRef}
+          onExitFull={() => setVisualMode('bg')}
+        />
+      )}
 
       {/* ── Settings Panel (drawer overlay) ── */}
       <SettingsPanel
