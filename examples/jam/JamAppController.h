@@ -146,13 +146,14 @@ struct JamSharedState {
     void noteOff(uint8_t note) { if (note < 128) midiNotes[note].store(false, std::memory_order_relaxed); }
 };
 
-@class LyriaClient;
+@class LyriaConductor;
 
 @interface JamAppController : NSViewController
 @property (nonatomic, assign) RealtimeRunner* engine;
 @property (nonatomic, assign) JamSharedState* sharedState;
-// Lyria cloud engine bridge (owned by the app delegate)
-@property (nonatomic, strong) LyriaClient* lyriaClient;
+// Lyria cloud engine bridge (owned by the app delegate). The conductor runs
+// two channels and crossfades to survive the gateway's 10-minute limit.
+@property (nonatomic, strong) LyriaConductor* lyriaClient;
 @property (nonatomic, assign) std::atomic<bool>* useLyria;
 @property (nonatomic, assign) MIDIPortRef midiInputPort;
 @property (nonatomic, strong) NSMutableSet<NSNumber*>* connectedSources;

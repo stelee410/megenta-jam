@@ -23,6 +23,7 @@
 #import "MagentaModelDownloader.h"
 #import "MagentaSettings.h"
 #import "LyriaClient.h"
+#import "LyriaConductor.h"
 #include "magenta_paths.h"
 #include <sys/socket.h>
 #include <netinet/in.h>

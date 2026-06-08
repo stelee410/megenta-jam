@@ -22,6 +22,7 @@
 #import <CoreAudio/CoreAudio.h>
 #import "JamAppController.h"
 #import "LyriaClient.h"
+#import "LyriaConductor.h"
 #import "../common/objc/MagentaSettings.h"
 #include <magentart/realtime_runner.h>
 #include "../common/cpp/magenta_paths.h"
@@ -391,8 +392,10 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
     std::atomic<bool> _soloMode;
     std::atomic<float> _cfgNotesSliderValue;
     std::atomic<float> _cfgNotesCurrentLevel;
-    // Lyria cloud engine — socket only exists while playing in Lyria mode.
-    LyriaClient* _lyriaClient;
+    // Lyria cloud engine — sockets only exist while playing in Lyria mode.
+    // The conductor runs two LyriaClient channels and crossfades between them
+    // to survive the gateway's 10-minute per-connection limit.
+    LyriaConductor* _lyriaClient;
     std::atomic<bool> _useLyria;
 }
 
@@ -419,7 +422,7 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
     _cfgNotesSliderValue.store(savedCfgNotes > 0.0f ? savedCfgNotes : kMagentaDefaultCfgNotes);
 
     _useLyria.store(false);
-    _lyriaClient = [[LyriaClient alloc] init];
+    _lyriaClient = [[LyriaConductor alloc] init];
 
     _controller = [[JamAppController alloc] init];
     _controller.engine = &_engine;
@@ -484,7 +487,7 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
     auto* cfgNotesSliderVal = &_cfgNotesSliderValue;
     auto* cfgNotesLevel = &_cfgNotesCurrentLevel;
     auto* useLyria = &_useLyria;
-    LyriaAudioRing* lyriaRing = [_lyriaClient ring];
+    __unsafe_unretained LyriaConductor* lyriaConductor = _lyriaClient;
 
     // Request 64 frame buffer size on default output device
     AudioDeviceID deviceID = 0;
@@ -518,9 +521,10 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                       ? (float*)outputData->mBuffers[1].mData : outL;
 
         if (useLyria->load(std::memory_order_relaxed)) {
-            // Cloud engine: drain the Lyria ring (silence until primed). The
-            // local engine stays bypassed, but FX/meters below still apply.
-            lyriaRing->readStereo(outL, outR, frameCount);
+            // Cloud engine: the conductor mixes its two channels (crossfading
+            // near the 10-min limit) into the output; silence until primed.
+            // The local engine stays bypassed, but FX/meters below still apply.
+            [lyriaConductor readStereoLeft:outL right:outR frames:frameCount];
         } else if (!engine->is_loaded()) {
             memset(outL, 0, frameCount * sizeof(float));
             if (outputData->mNumberBuffers > 1) memset(outR, 0, frameCount * sizeof(float));
