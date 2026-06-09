@@ -399,6 +399,28 @@ input[type="range"]::-webkit-slider-thumb {
   background: rgba(255, 255, 255, 0.025);
 }
 
+/* Editing variant: a real textarea (native paste/selection), same look. */
+.jam-single-input {
+  width: 88%;
+  cursor: text;
+  resize: none;
+  overflow: hidden;
+  outline: none;
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.58);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.028)),
+    rgba(0, 0, 0, 0.22);
+  box-shadow:
+    inset 0 -2px 0 rgba(117, 235, 199, 0.72),
+    0 0 0 6px rgba(117, 235, 199, 0.08);
+}
+
+.jam-single-input::placeholder {
+  color: rgba(255, 255, 255, 0.32);
+  font-weight: 700;
+}
+
 .jam-prompt-canvas.is-editing .jam-single-text {
   border-color: rgba(255, 255, 255, 0.58);
   background:
@@ -2116,6 +2138,71 @@ html[data-theme="nana"] .jam-lyria-status.is-error { color: #ff5d5d; }
   font-size: 11px;
   line-height: 1.5;
   color: rgba(255, 255, 255, 0.5);
+}
+
+/* ── AI assist ── */
+.jam-cheat-ai {
+  margin-bottom: 20px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.jam-cheat-ai-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid rgba(117, 235, 199, 0.28);
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
+}
+.jam-cheat-ai-input:focus { border-color: rgba(117, 235, 199, 0.6); }
+
+.jam-cheat-ai-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+
+.jam-cheat-ai-go {
+  padding: 6px 16px;
+  border: 1px solid rgba(117, 235, 199, 0.5);
+  border-radius: 7px;
+  background: rgba(25, 191, 143, 0.18);
+  color: #75ebc7;
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+}
+.jam-cheat-ai-go:hover:not(:disabled) {
+  background: rgba(25, 191, 143, 0.3);
+  border-color: rgba(117, 235, 199, 0.8);
+}
+.jam-cheat-ai-go:disabled { opacity: 0.45; cursor: default; }
+
+.jam-cheat-ai-error {
+  margin-top: 9px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #ff8095;
+}
+
+.jam-cheat-ai-result {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid rgba(117, 235, 199, 0.28);
+  border-radius: 8px;
+  background: rgba(25, 191, 143, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .jam-cheat-items { display: flex; flex-direction: column; gap: 5px; }

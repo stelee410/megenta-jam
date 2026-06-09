@@ -327,7 +327,7 @@ function App() {
   const [promptMode, setPromptMode] = useState<PromptMode>('single');
   const [draftText, setDraftText] = useState('');
   const [isPromptEditing, setIsPromptEditing] = useState(false);
-  const [mixLayout, setMixLayout] = useState<MixLayoutMode>('surface');
+  const [mixLayout, setMixLayout] = useState<MixLayoutMode>('standard');
   const [focusedMixIndex, setFocusedMixIndex] = useState(0);
   const [mixPrompts, setMixPrompts] = useState<MixPrompt[]>(DEFAULT_MIX_PROMPTS);
   const [isPromptEdited, setIsPromptEdited] = useState(false);
@@ -364,6 +364,19 @@ function App() {
     post({ type: 'copyText', value: text });               // native NSPasteboard
     navigator.clipboard?.writeText(text).catch(() => {});  // best-effort web fallback
   }, []);
+
+  // AI prompt assist: free-form idea → engine-tuned prompt (agentllm / c-music-express).
+  const [aiResult, setAiResult] = useState<string | null>(null);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const generateAiPrompt = useCallback((idea: string) => {
+    const t = idea.trim();
+    if (!t || aiLoading) return;
+    setAiError(null);
+    setAiResult(null);
+    setAiLoading(true);
+    post({ type: 'aiPrompt', value: t });
+  }, [aiLoading]);
 
   // ─── Visual layer (audio-reactive shader) ─────────────────────────────────
   const [visualMode, setVisualMode] = useState<'off' | 'bg' | 'full'>('off');
@@ -544,11 +557,10 @@ function App() {
     setParamsState(p => ({ ...p, unmaskwidth: solo ? 127 : 0 }));
 
     if (mode === 'mix') {
-      if (mixLayout === 'surface') {
-        if (surfaceInitialized.current) sendSurfacePrompts();
-      } else {
-        sendMixPrompts(layoutSendList(mixPrompts, mixLayout), false);
-      }
+      // Entering mix always lands on the DJ (standard) layout.
+      setMixLayout('standard');
+      setFocusedMixIndex(i => (i > 1 ? 0 : i));
+      sendMixPrompts(layoutSendList(mixPrompts, 'standard'), false);
       return;
     }
 
@@ -755,6 +767,9 @@ function App() {
   }, [draftText, focusedMixIndex, isAudioPrompt, promptMode, mixLayout]);
 
   const handlePromptSurfaceKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    // Single/solo editing now uses a real <textarea> which handles its own keys
+    // (incl. native paste/selection); don't let the fake-capture intercept it.
+    if (e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement) return;
     if ((promptMode === 'single' || promptMode === 'solo') && !isPromptEditing) return;
     // The Collider-style surface manages its own editing/keyboard handling.
     if (promptMode === 'mix' && mixLayout === 'surface') return;
@@ -799,6 +814,8 @@ function App() {
   }, [commitDraftText, isPromptEditing, promptMode, mixLayout]);
 
   const handlePromptSurfacePaste = useCallback((e: React.ClipboardEvent<HTMLDivElement>) => {
+    // The single/solo textarea pastes natively; only the fake mix-capture needs this.
+    if (e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLInputElement) return;
     const text = e.clipboardData.getData('text/plain');
     if (!text) return;
     e.preventDefault();
@@ -1574,6 +1591,15 @@ function App() {
       if (state.recordingState === 'recording' || state.recordingState === 'idle') {
         setRecordingState(state.recordingState);
       }
+      if (typeof state.aiPromptResult === 'string') {
+        setAiResult(state.aiPromptResult);
+        setAiError(null);
+        setAiLoading(false);
+      }
+      if (typeof state.aiPromptError === 'string') {
+        setAiError(state.aiPromptError);
+        setAiLoading(false);
+      }
       if (typeof state.importedSession === 'string') {
         applyImportedSessionRef.current(state.importedSession);
       }
@@ -1788,6 +1814,26 @@ function App() {
   const promptIsDirty = isPromptEdited && promptText.trim() !== '' && promptText !== savedPresetText;
   const committedPromptLabel = isAudioPrompt ? 'Audio prompt loaded' : (promptText || 'just type');
   const activeModeLabel = promptMode.toUpperCase();
+
+  // Shrink the big single-prompt text as it gets longer; short text keeps the
+  // responsive CSS clamp. undefined = leave the stylesheet's clamp in charge.
+  const singleFontSize = (text: string): string | undefined => {
+    const len = (text || '').trim().length;
+    if (len <= 12) return undefined;
+    return `${Math.max(22, Math.min(76, Math.round(880 / len)))}px`;
+  };
+
+  /** Enter single/solo edit mode, prefilling the box with the current prompt. */
+  const beginSingleEdit = () => {
+    setDraftText(isAudioPrompt ? '' : promptText);
+    setIsPromptEditing(true);
+  };
+
+  /** Grow the single-prompt textarea to fit its content (no inner scrollbar). */
+  const autoGrowSingle = (el: HTMLTextAreaElement) => {
+    el.style.height = 'auto';
+    el.style.height = `${el.scrollHeight}px`;
+  };
   const totalMixWeight = mixPrompts.reduce((sum, item) => sum + (item.enabled ? item.weight : 0), 0) || 1;
   const mixPositions = getMixPositions(mixLayout);
   const normalizedMixPrompts = mixPrompts.map(item => ({
@@ -2099,22 +2145,39 @@ function App() {
               {(promptMode === 'single' || promptMode === 'solo') && (
                 <div className="jam-single-prompt">
                   <div className="jam-single-kicker">{activeModeLabel}</div>
-                  <button
-                    className="jam-single-text"
-                    style={{ color: activeColor }}
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      setIsPromptEditing(true);
-                      window.setTimeout(() => promptSurfaceRef.current?.focus(), 0);
-                    }}
-                  >
-                    {draftText ? (
-                      <span className="jam-draft-text">{draftText}<span className="jam-caret" /></span>
-                    ) : (
-                      committedPromptLabel
-                    )}
-                  </button>
-                  <div className="jam-prompt-hint">{isPromptEditing ? (draftText ? 'Enter to apply' : 'type prompt') : 'keyboard plays'}</div>
+                  {isPromptEditing ? (
+                    <textarea
+                      className="jam-single-text jam-single-input"
+                      style={{ color: activeColor, fontSize: singleFontSize(draftText) }}
+                      value={draftText}
+                      autoFocus
+                      spellCheck={false}
+                      rows={1}
+                      placeholder="type or paste a prompt"
+                      onFocus={(e) => autoGrowSingle(e.currentTarget)}
+                      onChange={(e) => { setDraftText(e.target.value); setIsPromptEdited(true); autoGrowSingle(e.currentTarget); }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          commitDraftText();
+                        } else if (e.key === 'Escape') {
+                          e.preventDefault();
+                          setDraftText('');
+                          setIsPromptEditing(false);
+                        }
+                      }}
+                      onBlur={() => { setDraftText(''); setIsPromptEditing(false); }}
+                    />
+                  ) : (
+                    <button
+                      className="jam-single-text"
+                      style={{ color: activeColor, fontSize: singleFontSize(committedPromptLabel) }}
+                      onMouseDown={(e) => { e.preventDefault(); beginSingleEdit(); }}
+                    >
+                      {committedPromptLabel}
+                    </button>
+                  )}
+                  <div className="jam-prompt-hint">{isPromptEditing ? 'Enter to apply · Esc to cancel' : 'click to edit · keyboard plays'}</div>
                   <div className="jam-corner jam-corner-tl" />
                   <div className="jam-corner jam-corner-br" />
                 </div>
@@ -2666,6 +2729,10 @@ function App() {
         onClose={() => setIsCheatOpen(false)}
         onCopy={copyPromptText}
         onApply={applyCheatPrompt}
+        onAiGenerate={generateAiPrompt}
+        aiResult={aiResult}
+        aiError={aiError}
+        aiLoading={aiLoading}
       />
 
       {/* ── Settings Panel (drawer overlay) ── */}

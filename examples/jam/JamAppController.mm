@@ -526,6 +526,12 @@ static BOOL isDevServerRunning(void) {
                                                       forKey:@"Jam_LyriaApiKey"];
         }
     }
+    else if ([type isEqualToString:@"aiPrompt"]) {
+        NSString* idea = body[@"value"];
+        if ([idea isKindOfClass:[NSString class]] && idea.length > 0) {
+            [self handleAiPrompt:idea];
+        }
+    }
     else if ([type isEqualToString:@"exportSession"]) {
         NSString* json = body[@"value"];
         if ([json isKindOfClass:[NSString class]] && json.length > 0) {
@@ -1118,6 +1124,88 @@ static const int kAudioPromptFrames = 160000; // 10s @ 16kHz
     } else {
         [panel beginWithCompletionHandler:completionBlock];
     }
+}
+
+// ─── AI prompt assist (agentllm, model c-music-express) ─────────────────────
+// Turns a free-form idea (any language) into a concise English music prompt
+// tuned for this engine. Reuses the Lyria API key; runs off the main thread.
+
+- (void)handleAiPrompt:(NSString*)idea {
+    NSString* apiKey = [[NSUserDefaults standardUserDefaults] stringForKey:@"Jam_LyriaApiKey"];
+    if (apiKey.length == 0) {
+        [self sendStateUpdate:@{@"aiPromptError": @"No API key — set it in the Lyria settings first"}];
+        return;
+    }
+
+    NSURL* url = [NSURL URLWithString:@"https://agentllm.linkyun.co/v1/chat/completions"];
+    NSMutableURLRequest* req = [NSMutableURLRequest requestWithURL:url];
+    req.HTTPMethod = @"POST";
+    req.timeoutInterval = 45.0;
+    [req setValue:[NSString stringWithFormat:@"Bearer %@", apiKey] forHTTPHeaderField:@"Authorization"];
+    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+
+    NSString* sys = @"You are a prompt engineer for a real-time music generation model. "
+                     "Convert the user idea (any language) into ONE concise English music prompt. "
+                     "Stack concrete descriptors: genre + instrument/texture + production/mood, "
+                     "comma-separated. No tempo or key. Output ONLY the prompt text, lowercase, "
+                     "no quotes, no explanation.";
+    NSDictionary* payload = @{
+        @"model": @"c-music-express",
+        @"max_tokens": @1200,
+        @"temperature": @0.8,
+        @"stream": @NO,
+        @"messages": @[
+            @{@"role": @"system", @"content": sys},
+            @{@"role": @"user", @"content": idea},
+        ],
+    };
+    NSError* jsonErr = nil;
+    NSData* bodyData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:&jsonErr];
+    if (!bodyData) {
+        [self sendStateUpdate:@{@"aiPromptError": @"Could not encode request"}];
+        return;
+    }
+    req.HTTPBody = bodyData;
+
+    NSURLSessionDataTask* task = [[NSURLSession sharedSession] dataTaskWithRequest:req
+        completionHandler:^(NSData* data, NSURLResponse* response, NSError* error) {
+            NSString* result = nil;
+            NSString* errMsg = nil;
+            if (error) {
+                errMsg = error.localizedDescription;
+            } else if (data) {
+                NSError* parseErr = nil;
+                id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:&parseErr];
+                if ([json isKindOfClass:[NSDictionary class]]) {
+                    NSArray* choices = json[@"choices"];
+                    if ([choices isKindOfClass:[NSArray class]] && choices.count > 0) {
+                        NSDictionary* msg = choices[0][@"message"];
+                        NSString* content = [msg isKindOfClass:[NSDictionary class]] ? msg[@"content"] : nil;
+                        if ([content isKindOfClass:[NSString class]]) {
+                            NSCharacterSet* trimSet = [NSCharacterSet characterSetWithCharactersInString:@" \n\r\t\"'`"];
+                            result = [content stringByTrimmingCharactersInSet:trimSet];
+                        }
+                    }
+                    if (result.length == 0) {
+                        NSDictionary* apiErr = json[@"error"];
+                        if ([apiErr isKindOfClass:[NSDictionary class]] && [apiErr[@"message"] isKindOfClass:[NSString class]]) {
+                            errMsg = apiErr[@"message"];
+                        }
+                    }
+                }
+                if (result.length == 0 && !errMsg) errMsg = @"Empty response from AI";
+            } else {
+                errMsg = @"No response data";
+            }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (result.length > 0) {
+                    [self sendStateUpdate:@{@"aiPromptResult": result}];
+                } else {
+                    [self sendStateUpdate:@{@"aiPromptError": errMsg ?: @"AI request failed"}];
+                }
+            });
+        }];
+    [task resume];
 }
 
 - (void)handleExportSession:(NSString*)json {
