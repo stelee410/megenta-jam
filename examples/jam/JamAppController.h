@@ -47,6 +47,25 @@ struct JamSharedState {
     std::atomic<float> tremolo{0.0f};      // 0 = off, 1 = full depth (BPM-synced)
     std::atomic<float> fxTempo{120.0f};    // BPM driving the tremolo LFO
 
+    // Punch-in FX (EP-133 style): a momentary master effect while a pad is held.
+    //   0 stutter, 1 tape stop, 2 reverse, 3 pitch down, 4 pitch up,
+    //   5 lpf, 6 hpf, 7 delay throw, 8 reverb wash, 9 crush, 10 gate, 11 squash
+    std::atomic<int> punchFx{-1};          // -1 = none
+    std::atomic<float> punchAmt{0.5f};     // 0..1, modulated by vertical drag
+    std::atomic<uint32_t> punchGen{0};     // bumped on engage → resets DSP state
+
+    static constexpr int PUNCH_RING = 48000 * 4;   // 4 s history for time FX
+    float punchRingL[PUNCH_RING] = {};
+    float punchRingR[PUNCH_RING] = {};
+    long long punchWriteAbs = 0;   // monotonically increasing write position
+    long long punchAnchor = 0;     // write position at engage
+    long long punchCount = 0;      // samples since engage
+    double punchPos = 0.0;         // fractional read position (tape/pitch/reverse)
+    float punchRate = 1.0f;        // tape-stop playback rate
+    uint32_t punchGenSeen = 0;
+    float punchGateG = 1.0f, punchGatePhase = 0.0f;  // gate chop state
+    float punchHpL = 0.0f, punchHpR = 0.0f;          // punch HPF state
+
     float lpZ1L = 0.0f, lpZ2L = 0.0f, lpZ1R = 0.0f, lpZ2R = 0.0f;
     float toneLpL = 0.0f, toneLpR = 0.0f;     // tilt-EQ low-band state
     float tremPhase = 0.0f;                   // tremolo LFO phase
@@ -64,11 +83,89 @@ struct JamSharedState {
         return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
     }
 
+    // Punch time FX: the ring always captures the dry signal; while a
+    // time-based pad (0..4) is held, the output is replaced by reading the
+    // ring — looped (stutter), slowing (tape), backwards (reverse) or
+    // resampled (pitch). Runs on the audio thread only.
+    void processPunchTime(float* left, float* right, int count, int pfx, float pamt) {
+        const uint32_t gen = punchGen.load(std::memory_order_relaxed);
+        if (gen != punchGenSeen) {             // pad freshly engaged → reset
+            punchGenSeen = gen;
+            punchAnchor = punchWriteAbs;
+            punchPos = (double)punchWriteAbs;
+            punchRate = 1.0f;
+            punchCount = 0;
+            punchGateG = 1.0f;
+            punchGatePhase = 0.0f;
+            punchHpL = punchHpR = 0.0f;
+        }
+        for (int i = 0; i < count; ++i) {
+            const int w = (int)(punchWriteAbs % PUNCH_RING);
+            punchRingL[w] = left[i];
+            punchRingR[w] = right[i];
+            punchWriteAbs++;
+            if (pfx < 0 || pfx > 4) continue;
+
+            double pos;
+            switch (pfx) {
+                case 0: { // stutter: loop the moment right before the press
+                    const long long len = (long long)(12000 - pamt * 10800); // ~250→25 ms
+                    long long base = punchAnchor - len;
+                    if (base < 0) base = 0;
+                    pos = (double)(base + (punchCount % len));
+                    break;
+                }
+                case 1: { // tape stop: decelerate to a halt
+                    punchRate -= (0.25f + 2.2f * pamt) / 48000.0f;
+                    if (punchRate < 0.0f) punchRate = 0.0f;
+                    punchPos += punchRate;
+                    pos = punchPos;
+                    break;
+                }
+                case 2: { // reverse: play history backwards
+                    punchPos -= 1.0;
+                    pos = punchPos;
+                    break;
+                }
+                case 3: { // pitch down: under-speed resample
+                    punchPos += 1.0 - 0.55 * pamt;
+                    pos = punchPos;
+                    break;
+                }
+                default: { // 4 pitch up: over-speed, granular jump-back at the head
+                    punchPos += 1.0 + 1.0 * pamt;
+                    if (punchPos >= (double)punchWriteAbs - 2.0) punchPos -= 4800.0;
+                    pos = punchPos;
+                    break;
+                }
+            }
+            punchCount++;
+
+            // Clamp into the available history window.
+            const double oldest = (double)(punchWriteAbs > PUNCH_RING
+                                           ? punchWriteAbs - PUNCH_RING + 2 : 0);
+            if (pos < oldest) pos = oldest;
+            const long long ip = (long long)pos;
+            const float fr = (float)(pos - (double)ip);
+            const int i0 = (int)(ip % PUNCH_RING);
+            const int i1 = (int)((ip + 1) % PUNCH_RING);
+            left[i]  = punchRingL[i0] * (1.0f - fr) + punchRingL[i1] * fr;
+            right[i] = punchRingR[i0] * (1.0f - fr) + punchRingR[i1] * fr;
+        }
+    }
+
     void processPerformanceFX(float* left, float* right, int count) {
         constexpr float sampleRate = 48000.0f;
         constexpr float pi = 3.14159265358979323846f;
 
-        const float fx = clamp01(filterX.load(std::memory_order_relaxed));
+        // Punch-in FX: time-domain pads replace the source; the others override
+        // params of the chain below (filter/delay/reverb/crush) or chop at the end.
+        const int pfx = punchFx.load(std::memory_order_relaxed);
+        const float pamt = clamp01(punchAmt.load(std::memory_order_relaxed));
+        processPunchTime(left, right, count, pfx, pamt);
+
+        const float fx = (pfx == 5) ? (1.0f - pamt * 0.93f)
+                                    : clamp01(filterX.load(std::memory_order_relaxed));
         const float fy = clamp01(filterY.load(std::memory_order_relaxed));
         const float cutoff = 80.0f * std::pow(18000.0f / 80.0f, fx);
         const float q = 0.55f + fy * 8.0f;
@@ -86,11 +183,15 @@ struct JamSharedState {
         const float driveAmt = clamp01(drive.load(std::memory_order_relaxed));
         const float driveGain = 1.0f + driveAmt * 10.0f;
         const float driveNorm = std::tanh(driveGain);
-        const float dMix = clamp01(delayMix.load(std::memory_order_relaxed)) * 0.65f;
-        const float dFeedback = clamp01(delayFeedback.load(std::memory_order_relaxed)) * 0.86f;
+        const float dMix = (pfx == 7) ? (0.35f + 0.30f * pamt)
+                                      : clamp01(delayMix.load(std::memory_order_relaxed)) * 0.65f;
+        const float dFeedback = (pfx == 7) ? (0.55f + 0.38f * pamt)
+                                           : clamp01(delayFeedback.load(std::memory_order_relaxed)) * 0.86f;
         const int delaySamples = 18000;
-        const float rMix = clamp01(reverbMix.load(std::memory_order_relaxed)) * 0.55f;
-        const float rFeedback = 0.58f + clamp01(reverbMix.load(std::memory_order_relaxed)) * 0.30f;
+        const float rMix = (pfx == 8) ? (0.40f + 0.45f * pamt)
+                                      : clamp01(reverbMix.load(std::memory_order_relaxed)) * 0.55f;
+        const float rFeedback = (pfx == 8) ? 0.88f
+                                           : 0.58f + clamp01(reverbMix.load(std::memory_order_relaxed)) * 0.30f;
         const int reverbSamples = 11317;
         const float limitAmt = clamp01(limiter.load(std::memory_order_relaxed));
         const float threshold = 1.0f - limitAmt * 0.55f;
@@ -100,7 +201,14 @@ struct JamSharedState {
         const float toneG = (clamp01(tone.load(std::memory_order_relaxed)) - 0.5f) * 2.0f;   // -1..1
         const float toneCoef = 2.0f * pi * 320.0f / sampleRate;                              // ~320 Hz split
         const float gainAmt = clamp01(outGain.load(std::memory_order_relaxed)) * 2.0f;       // unity at 0.5
-        const float crushAmt = clamp01(crush.load(std::memory_order_relaxed));
+        const float crushAmt = (pfx == 9) ? (0.3f + 0.7f * pamt)
+                                          : clamp01(crush.load(std::memory_order_relaxed));
+
+        // Punch HPF sweep + BPM-synced gate chop params.
+        const float hpFreq = 120.0f * std::pow(30.0f, pamt);                  // 120 Hz → 3.6 kHz
+        const float hpCoef = std::min(0.95f, 2.0f * pi * hpFreq / sampleRate);
+        const float gateInc = (std::max(40.0f, fxTempo.load(std::memory_order_relaxed)) / 60.0f)
+                              * (2.0f + std::floor(pamt * 6.0f)) / sampleRate;
         const float crushLevels = std::pow(2.0f, 16.0f - crushAmt * 13.0f);                  // 16..3 bits
         const float crushHoldLen = 1.0f + crushAmt * crushAmt * 40.0f;                       // sample & hold
         const float tremDepth = clamp01(tremolo.load(std::memory_order_relaxed));
@@ -117,6 +225,14 @@ struct JamSharedState {
             r = b0 * r + lpZ1R;
             lpZ1R = b1 * right[i] - a1 * r + lpZ2R;
             lpZ2R = b2 * right[i] - a2 * r;
+
+            // Punch HPF sweep: one-pole highpass, cutoff rides the pad drag.
+            if (pfx == 6) {
+                punchHpL += hpCoef * (l - punchHpL);
+                punchHpR += hpCoef * (r - punchHpR);
+                l -= punchHpL;
+                r -= punchHpR;
+            }
 
             if (driveAmt > 0.001f) {
                 l = std::tanh(l * driveGain) / driveNorm;
@@ -182,6 +298,21 @@ struct JamSharedState {
                 const float pan = tremDepth * 0.35f * std::sin(tremPhase);
                 l *= 1.0f - std::max(0.0f, pan);
                 r *= 1.0f - std::max(0.0f, -pan);
+            }
+
+            // Punch gate chop (BPM-synced square, slewed to avoid clicks) and
+            // squash (heavy soft-knee saturation).
+            if (pfx == 10) {
+                punchGatePhase += gateInc;
+                if (punchGatePhase >= 1.0f) punchGatePhase -= 1.0f;
+                const float tg = punchGatePhase < 0.5f ? 1.0f : 0.0f;
+                punchGateG += (tg - punchGateG) * 0.012f;
+                l *= punchGateG;
+                r *= punchGateG;
+            } else if (pfx == 11) {
+                const float g = 1.0f + 8.0f * pamt;
+                l = std::tanh(l * g) * 0.85f;
+                r = std::tanh(r * g) * 0.85f;
             }
 
             // Master output gain (unity at 0.5), then the limiter catches boosts.

@@ -501,6 +501,26 @@ static BOOL isDevServerRunning(void) {
             self.sharedState->fxTempo.store(value.floatValue, std::memory_order_relaxed);
         }
     }
+    else if ([type isEqualToString:@"punchFx"]) {
+        // Punch-in pad: id >= 0 engages/updates (value = amount), id -1 releases.
+        NSNumber* fxIdVal = body[@"id"];
+        NSNumber* amtVal = body[@"value"];
+        if (self.sharedState && [fxIdVal isKindOfClass:[NSNumber class]]) {
+            const int fxId = fxIdVal.intValue;
+            if ([amtVal isKindOfClass:[NSNumber class]]) {
+                float v = amtVal.floatValue;
+                if (v < 0.0f) v = 0.0f;
+                if (v > 1.0f) v = 1.0f;
+                self.sharedState->punchAmt.store(v, std::memory_order_relaxed);
+            }
+            const int prev = self.sharedState->punchFx.load(std::memory_order_relaxed);
+            if (fxId >= 0 && fxId != prev) {
+                // Fresh engage → reset the punch DSP state on the audio thread.
+                self.sharedState->punchGen.fetch_add(1, std::memory_order_relaxed);
+            }
+            self.sharedState->punchFx.store(fxId, std::memory_order_relaxed);
+        }
+    }
     else if ([type isEqualToString:@"setEngineMode"]) {
         NSString* mode = body[@"value"];
         if ([mode isKindOfClass:[NSString class]] && self.useLyria) {

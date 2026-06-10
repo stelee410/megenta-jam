@@ -1194,6 +1194,84 @@ input[type="range"]::-webkit-slider-thumb {
   align-items: start;
 }
 
+/* ── Punch-in FX pads (EP-133 style) ── */
+.jam-fx-panel { flex: 0 0 auto; }
+
+.jam-punch-panel {
+  flex: 1 1 auto;
+  min-height: 128px;
+}
+
+.jam-punch-readout { color: #f8d35c; }
+
+.jam-punch-grid {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-auto-rows: 1fr;
+  gap: 5px;
+}
+
+.jam-punch-pad {
+  position: relative;
+  min-height: 30px;
+  border-radius: 7px;
+  /* Neutral grey alpha so the pad is visible on both light and dark themes. */
+  border: 1px solid rgba(130, 130, 140, 0.42);
+  background: rgba(130, 130, 140, 0.12);
+  overflow: hidden;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 4px;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+
+.jam-punch-pad .jam-punch-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: var(--punch-fill, 60%);
+  background: rgba(248, 211, 92, 0.18);
+  pointer-events: none;
+  transition: height 0.05s linear;
+}
+
+.jam-punch-pad .jam-punch-label {
+  position: relative;
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  color: inherit;       /* follow the panel's themed text colour */
+  opacity: 0.72;
+  pointer-events: none;
+}
+
+.jam-punch-pad:hover {
+  border-color: rgba(130, 130, 140, 0.7);
+}
+
+.jam-punch-pad.is-active {
+  border-color: rgba(248, 211, 92, 0.85);
+  background: rgba(248, 211, 92, 0.10);
+  box-shadow: 0 0 10px rgba(248, 211, 92, 0.35);
+}
+
+.jam-punch-pad.is-active .jam-punch-fill {
+  background: rgba(248, 211, 92, 0.30);
+}
+
+.jam-punch-pad.is-active .jam-punch-label {
+  color: #f8d35c;
+  opacity: 1;
+}
+
 /* Lyria GENERATE controls — shown in the right panel's GEN tab */
 .jam-lyria-knobs {
   display: grid;

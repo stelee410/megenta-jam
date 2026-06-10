@@ -67,6 +67,23 @@ const post = (msg: any) => window.webkit?.messageHandlers?.auHost?.postMessage(m
 const isComposingKey = (e: React.KeyboardEvent): boolean =>
   e.nativeEvent.isComposing || (e.nativeEvent as KeyboardEvent).keyCode === 229;
 
+// Punch-in FX pads (EP-133 style): hold to engage, drag up/down to modulate.
+// Ids match the native DSP switch in JamAppController.h.
+const PUNCH_FX_LIST = [
+  { id: 0, label: 'stut' },
+  { id: 1, label: 'tape' },
+  { id: 2, label: 'rev' },
+  { id: 3, label: 'pit−' },
+  { id: 4, label: 'pit+' },
+  { id: 5, label: 'lpf' },
+  { id: 6, label: 'hpf' },
+  { id: 7, label: 'dly' },
+  { id: 8, label: 'verb' },
+  { id: 9, label: 'crsh' },
+  { id: 10, label: 'gate' },
+  { id: 11, label: 'sqsh' },
+] as const;
+
 // ─── Computer keyboard → MIDI (Ableton Live layout) ──────────────────────────
 // Base row (lower octave): A S D F G H J = C D E F G A B, with W E T Y U as
 // black keys (C# D# F# G# A#). Upper octave continues on K O L P ; (C C# D D# E).
@@ -361,6 +378,35 @@ function App() {
     crush: 0.0,
     tremolo: 0.0,
   });
+
+  // Punch-in FX pads: pointer-down engages, vertical drag rides the amount,
+  // release disengages. Each pad remembers its last amount.
+  const [punchActive, setPunchActive] = useState<number | null>(null);
+  const [punchAmt, setPunchAmt] = useState(0.6);
+  const punchMemRef = useRef<Record<number, number>>({});
+  const punchDragRef = useRef({ y: 0, amt: 0.6 });
+  const punchDown = (id: number, e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const amt = punchMemRef.current[id] ?? 0.6;
+    punchDragRef.current = { y: e.clientY, amt };
+    setPunchActive(id);
+    setPunchAmt(amt);
+    post({ type: 'punchFx', id, value: amt });
+  };
+  const punchMove = (id: number, e: React.PointerEvent<HTMLDivElement>) => {
+    if (punchActive !== id || e.buttons !== 1) return;
+    const delta = (punchDragRef.current.y - e.clientY) / 140; // up = stronger
+    const v = clamp01(punchDragRef.current.amt + delta);
+    setPunchAmt(v);
+    punchMemRef.current[id] = v;
+    post({ type: 'punchFx', id, value: v });
+  };
+  const punchUp = () => {
+    if (punchActive === null) return;
+    setPunchActive(null);
+    post({ type: 'punchFx', id: -1 });
+  };
 
   // XY pad: 'prob' drives temperature/topK, 'filter' drives cutoff/resonance
   const [padMode, setPadMode] = useState<XYPadMode>('prob');
@@ -2739,6 +2785,38 @@ function App() {
                     </div>
                     <span className="jam-effect-label">{item.label}</span>
                     <span className="jam-effect-value">{Math.round(item.value * 100)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="jam-performance-panel jam-punch-panel">
+              <div className="jam-performance-head">
+                <span>PUNCH</span>
+                <span className={punchActive !== null ? 'jam-punch-readout' : ''}>
+                  {punchActive !== null
+                    ? `${PUNCH_FX_LIST[punchActive].label} ${Math.round(punchAmt * 100)}`
+                    : 'hold · drag'}
+                </span>
+              </div>
+              <div className="jam-punch-grid">
+                {PUNCH_FX_LIST.map(fx => (
+                  <div
+                    key={fx.id}
+                    className={`jam-punch-pad ${punchActive === fx.id ? 'is-active' : ''}`}
+                    style={{
+                      '--punch-fill': `${Math.round(
+                        (punchActive === fx.id ? punchAmt : (punchMemRef.current[fx.id] ?? 0.6)) * 100,
+                      )}%`,
+                    } as React.CSSProperties}
+                    onPointerDown={(e) => punchDown(fx.id, e)}
+                    onPointerMove={(e) => punchMove(fx.id, e)}
+                    onPointerUp={punchUp}
+                    onPointerCancel={punchUp}
+                    onContextMenu={(e) => e.preventDefault()}
+                  >
+                    <span className="jam-punch-fill" />
+                    <span className="jam-punch-label">{fx.label}</span>
                   </div>
                 ))}
               </div>
