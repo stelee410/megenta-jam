@@ -482,7 +482,23 @@ static BOOL isDevServerRunning(void) {
                 self.sharedState->reverbMix.store(v, std::memory_order_relaxed);
             } else if ([key isEqualToString:@"limiter"]) {
                 self.sharedState->limiter.store(v, std::memory_order_relaxed);
+            } else if ([key isEqualToString:@"stereoWidth"]) {
+                self.sharedState->stereoWidth.store(v, std::memory_order_relaxed);
+            } else if ([key isEqualToString:@"tone"]) {
+                self.sharedState->tone.store(v, std::memory_order_relaxed);
+            } else if ([key isEqualToString:@"outGain"]) {
+                self.sharedState->outGain.store(v, std::memory_order_relaxed);
+            } else if ([key isEqualToString:@"crush"]) {
+                self.sharedState->crush.store(v, std::memory_order_relaxed);
+            } else if ([key isEqualToString:@"tremolo"]) {
+                self.sharedState->tremolo.store(v, std::memory_order_relaxed);
             }
+        }
+    }
+    else if ([type isEqualToString:@"fxTempo"]) {
+        NSNumber* value = body[@"value"];
+        if ([value isKindOfClass:[NSNumber class]] && self.sharedState) {
+            self.sharedState->fxTempo.store(value.floatValue, std::memory_order_relaxed);
         }
     }
     else if ([type isEqualToString:@"setEngineMode"]) {
@@ -505,7 +521,8 @@ static BOOL isDevServerRunning(void) {
         if (!self.lyriaClient) return;
         NSMutableDictionary* cfg = [NSMutableDictionary dictionary];
         for (NSString* key in @[@"bpm", @"temperature", @"density",
-                                @"brightness", @"scale"]) {
+                                @"brightness", @"scale", @"guidance",
+                                @"muteBass", @"muteDrums", @"onlyBassAndDrums"]) {
             id v = body[key];
             if (v) cfg[key] = v;
         }

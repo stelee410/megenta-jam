@@ -437,6 +437,9 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
     [_lyriaClient setStatusHandler:^(NSString* status) {
         [weakCtrl sendStateUpdate:@{@"lyriaStatus" : status}];
     }];
+    [_lyriaClient setChannelStateHandler:^(NSArray<NSString*>* states) {
+        [weakCtrl sendStateUpdate:@{@"lyriaChannels" : states}];
+    }];
 
     // Restore saved parameters immediately so the engine has them from start
     [_controller restoreSavedParams];
@@ -458,6 +461,11 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
     _window.contentViewController = _controller;
     [_window center];
     [_window makeKeyAndOrderFront:nil];
+
+    // Open in fullscreen by default.
+    if (!(_window.styleMask & NSWindowStyleMaskFullScreen)) {
+        [_window toggleFullScreen:nil];
+    }
 
     [self setupAudioEngine];
     [self setupMIDI];
@@ -601,10 +609,47 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
     [_audioEngine attachNode:_sourceNode];
     [_audioEngine connect:_sourceNode to:_audioEngine.mainMixerNode format:format];
 
+    // When the output device changes (plug in headphones, switch speakers,
+    // (dis)connect Bluetooth), AVAudioEngine stops itself and posts this
+    // notification. Nothing restarts it automatically → silence. Re-establish
+    // the graph and restart so audio follows the new device.
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(handleAudioEngineConfigChange:)
+                                                 name:AVAudioEngineConfigurationChangeNotification
+                                               object:_audioEngine];
+
     NSError* error = nil;
     if (![_audioEngine startAndReturnError:&error]) {
         NSLog(@"Jam: AVAudioEngine failed to start: %@", error);
     }
+}
+
+- (void)handleAudioEngineConfigChange:(NSNotification*)note {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!self->_audioEngine) return;
+        if (self->_audioEngine.isRunning) return;  // already recovered
+        NSLog(@"Jam: output device changed — restarting AVAudioEngine");
+        NSError* err = nil;
+        if ([self->_audioEngine startAndReturnError:&err]) {
+            NSLog(@"Jam: AVAudioEngine restarted on new device");
+            return;
+        }
+        // Restart failed: the graph may have been torn down. Reconnect the
+        // source node (fixed 48 kHz; the mixer resamples to the device) and retry.
+        NSLog(@"Jam: restart failed (%@) — reconnecting source node", err);
+        @try {
+            AVAudioFormat* fmt = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:48000.0 channels:2];
+            [self->_audioEngine connect:self->_sourceNode to:self->_audioEngine.mainMixerNode format:fmt];
+        } @catch (NSException* e) {
+            NSLog(@"Jam: source reconnect threw: %@", e);
+        }
+        err = nil;
+        if (![self->_audioEngine startAndReturnError:&err]) {
+            NSLog(@"Jam: AVAudioEngine restart retry failed: %@", err);
+        } else {
+            NSLog(@"Jam: AVAudioEngine restarted after reconnect");
+        }
+    });
 }
 
 // ─── CoreMIDI ────────────────────────────────────────────────────────────────
@@ -807,6 +852,9 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
 // ─── Lifecycle ───────────────────────────────────────────────────────────────
 
 - (void)applicationWillTerminate:(NSNotification*)notification {
+    [[NSNotificationCenter defaultCenter] removeObserver:self
+                                                    name:AVAudioEngineConfigurationChangeNotification
+                                                  object:_audioEngine];
     [_lyriaClient disconnect];
     _engine.stop();
     _engine.unload();

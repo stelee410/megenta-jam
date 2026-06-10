@@ -57,4 +57,9 @@
 /// streaming / relinking / error: …).
 - (void)setStatusHandler:(void (^)(NSString* status))handler;
 
+/// Per-channel light state callback on the main queue. Each element is one of
+/// "off" / "warming" / "playing" for channel 0 and 1 respectively. Fires
+/// whenever the pair changes (steady → prewarm → crossfade → handover).
+- (void)setChannelStateHandler:(void (^)(NSArray<NSString*>* states))handler;
+
 @end

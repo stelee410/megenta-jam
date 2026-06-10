@@ -30,12 +30,18 @@
 // websocket delegate queue, drained by the audio render thread.
 struct LyriaAudioRing {
     static constexpr size_t kCapFrames = 48000 * 30;        // 30 s
-    static constexpr size_t kPrebufferFrames = 48000 * 2;   // 2 s before start
+    // A deeper start cushion absorbs network jitter (VPN/proxy hops stall the
+    // stream for a second or two). After the first prime, an underrun only needs
+    // a short top-up to resume — so a brief stall costs ~0.4 s, not a full 4 s.
+    static constexpr size_t kPrebufferFrames = 48000 * 4;       // 4 s before first start
+    static constexpr size_t kReprimeFrames   = 48000 * 2 / 5;   // 0.4 s to recover after an underrun
 
     std::vector<float> buf;               // interleaved L/R
     std::atomic<uint64_t> writeFrames{0}; // monotonic frames written
     std::atomic<uint64_t> readFrames{0};  // monotonic frames read
     std::atomic<bool> primed{false};      // enough buffered to start draining
+    std::atomic<uint64_t> underruns{0};   // diagnostics: # of underrun events
+    bool everPrimed = false;              // producer-thread only
 
     LyriaAudioRing() : buf(2 * kCapFrames, 0.0f) {}
 
@@ -43,6 +49,7 @@ struct LyriaAudioRing {
         primed.store(false, std::memory_order_relaxed);
         readFrames.store(0, std::memory_order_relaxed);
         writeFrames.store(0, std::memory_order_relaxed);
+        everPrimed = false;
     }
 
     uint64_t available() const {
@@ -65,10 +72,16 @@ struct LyriaAudioRing {
             buf[slot + 1] = samples[i * 2 + 1] / 32768.0f;
         }
         writeFrames.store(w + frames, std::memory_order_release);
-        if (!primed.load(std::memory_order_relaxed) &&
-            writeFrames.load(std::memory_order_relaxed) -
-                readFrames.load(std::memory_order_relaxed) >= kPrebufferFrames) {
-            primed.store(true, std::memory_order_release);
+        if (!primed.load(std::memory_order_relaxed)) {
+            const uint64_t avail = writeFrames.load(std::memory_order_relaxed) -
+                                   readFrames.load(std::memory_order_relaxed);
+            // First start waits for the full cushion; recovering from an underrun
+            // only needs a small top-up so playback resumes quickly.
+            const size_t need = everPrimed ? kReprimeFrames : kPrebufferFrames;
+            if (avail >= need) {
+                primed.store(true, std::memory_order_release);
+                everPrimed = true;
+            }
         }
     }
 
@@ -90,7 +103,10 @@ struct LyriaAudioRing {
         if (have < frames) {
             memset(L + have, 0, (frames - have) * sizeof(float));
             memset(R + have, 0, (frames - have) * sizeof(float));
-            primed.store(false, std::memory_order_relaxed); // re-buffer
+            if (primed.load(std::memory_order_relaxed)) {
+                underruns.fetch_add(1, std::memory_order_relaxed);
+            }
+            primed.store(false, std::memory_order_relaxed); // re-buffer (fast)
         }
         readFrames.store(r + have, std::memory_order_release);
     }

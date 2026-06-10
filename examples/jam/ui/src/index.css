@@ -657,6 +657,41 @@ input[type="range"]::-webkit-slider-thumb {
   color: #ff7a7a;
 }
 
+/* Dual cloud-stream indicator lights */
+.jam-lyria-lights {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+}
+
+.jam-lyria-light {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+/* Steady lit = this channel is the audible output */
+.jam-lyria-light.is-playing {
+  background: #2ee6a6;
+  box-shadow: 0 0 7px 1px rgba(46, 230, 166, 0.75), inset 0 0 0 1px rgba(46, 230, 166, 0.9);
+}
+
+/* Fast blink = connected/warming up, not yet audible */
+.jam-lyria-light.is-warming {
+  background: #f7b733;
+  box-shadow: 0 0 7px 1px rgba(247, 183, 51, 0.8), inset 0 0 0 1px rgba(247, 183, 51, 0.95);
+  animation: jam-lyria-blink 0.45s steps(1, end) infinite;
+}
+
+@keyframes jam-lyria-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0.12; }
+}
+
 /* BPM lock row */
 .jam-bpm-row {
   display: flex;
@@ -849,6 +884,28 @@ input[type="range"]::-webkit-slider-thumb {
   font-weight: 700;
 }
 
+/* Inline editor: a real <input> (native paste/selection) styled like the pill. */
+.jam-slot-pill.is-editing {
+  border-color: color-mix(in srgb, var(--chip-color), white 24%);
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.jam-slot-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: #fff;
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 0;
+}
+
+.jam-slot-input::placeholder { color: rgba(255, 255, 255, 0.3); }
+.jam-slot-input::selection { background: color-mix(in srgb, var(--chip-color), transparent 45%); }
+
 .jam-slot-pill em,
 .jam-slot-pill i {
   flex: 0 0 auto;
@@ -868,6 +925,7 @@ input[type="range"]::-webkit-slider-thumb {
   flex-direction: column;
   gap: 10px;
   min-height: 0;
+  overflow-y: auto;
 }
 
 .jam-transport-row {
@@ -1118,6 +1176,62 @@ input[type="range"]::-webkit-slider-thumb {
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 5px;
   align-items: start;
+}
+
+/* Lyria live-steering panel — floats at the top-left of the prompt stage */
+.jam-lyria-float {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 6;
+  width: max-content;
+  padding: 10px 12px 11px;
+  border-radius: 11px;
+  background: rgba(17, 18, 20, 0.82);
+  -webkit-backdrop-filter: blur(9px);
+  backdrop-filter: blur(9px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
+  color: #fff;
+}
+
+.jam-lyria-float .jam-performance-head {
+  margin-bottom: 9px;
+  gap: 18px;
+}
+.jam-lyria-float .jam-performance-head span:last-child { color: #6ff4d6; }
+
+.jam-lyria-float-knobs {
+  display: flex;
+  gap: 12px;
+}
+.jam-lyria-float-knobs .jam-effect-knob { width: 48px; }
+
+.jam-lyria-mutes {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.jam-mute-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.5);
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.jam-mute-btn.is-on {
+  border-color: rgba(255, 95, 120, 0.6);
+  background: rgba(255, 79, 107, 0.2);
+  color: #ff8095;
 }
 
 .jam-effect-knob {

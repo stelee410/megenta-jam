@@ -20,10 +20,16 @@
 // Measured gateway behavior: every connection is cleanly closed (code 1000)
 // at ~600 s with no advance warning. We must hand over BEFORE that, driven
 // entirely by our own clock. Times are seconds since the channel connected.
-static const double kPrewarmAt   = 530.0;  // open the relief channel
-static const double kCrossfadeAt = 545.0;  // begin the equal-power fade
-static const double kXfadeSec    = 8.0;    // fade duration (completes ~553 s)
-// → ~47 s safety margin before the 600 s hard close.
+//
+// The fade must not begin until the relief channel is actually producing audio
+// (its ring is primed) — otherwise we fade into silence. So we open the relief
+// early, then start the fade as soon as it is primed (after a short settle),
+// with a hard deadline as a backstop if priming is unusually slow.
+static const double kPrewarmAt       = 500.0;  // open the relief channel (early → lead time)
+static const double kCrossfadeMinAt  = 512.0;  // earliest fade (let the relief settle)
+static const double kCrossfadeMaxAt  = 565.0;  // backstop: fade even if not yet primed
+static const double kXfadeSec        = 8.0;    // fade duration
+// → fade completes by ~573 s at the latest, ~27 s before the 600 s hard close.
 
 static const float kHalfPi = 1.57079632679f;
 static const float kSampleRate = 48000.0f;
@@ -34,6 +40,10 @@ typedef NS_ENUM(int, ConductorPhase) {
     PhaseCrossfading,  // fading primary → relief
 };
 
+@interface LyriaConductor ()
+- (void)handleChannelDown:(int)idx;
+@end
+
 @implementation LyriaConductor {
     LyriaClient* _ch[2];
     LyriaAudioRing* _ring[2];
@@ -41,6 +51,8 @@ typedef NS_ENUM(int, ConductorPhase) {
     NSArray<NSDictionary*>* _cachedPrompts;
     NSMutableDictionary* _cachedConfig;
     void (^_statusHandler)(NSString*);
+    void (^_channelsHandler)(NSArray<NSString*>*);
+    NSArray<NSString*>* _lastChannelStates;
 
     BOOL _running;
     int _primary;                 // main-thread only
@@ -48,6 +60,7 @@ typedef NS_ENUM(int, ConductorPhase) {
     double _channelConnectAt[2];  // CFAbsoluteTime of each channel's connect
     double _crossfadeStartedAt;
     NSTimer* _timer;
+    uint64_t _lastUnderruns[2];   // diagnostics: last logged underrun counts
 
     // Shared with the audio thread:
     std::atomic<float> _mixTarget; // 0 → ch0, 1 → ch1
@@ -66,8 +79,16 @@ typedef NS_ENUM(int, ConductorPhase) {
             // Forward only error status from either channel; the conductor
             // emits its own lifecycle status (connecting/streaming/relinking).
             __weak LyriaConductor* weakSelf = self;
+            const int idx = i;
             [_ch[i] setStatusHandler:^(NSString* status) {
-                if ([status hasPrefix:@"error"]) [weakSelf emit:status];
+                LyriaConductor* s = weakSelf;
+                if (!s) return;
+                if ([status hasPrefix:@"error"]) {
+                    [s emit:status];
+                    // A socket dropping (gateway close, network blip) is the very
+                    // thing that causes an audible cut — recover immediately.
+                    dispatch_async(dispatch_get_main_queue(), ^{ [s handleChannelDown:idx]; });
+                }
             }];
         }
     }
@@ -76,6 +97,35 @@ typedef NS_ENUM(int, ConductorPhase) {
 
 - (void)setStatusHandler:(void (^)(NSString*))handler {
     _statusHandler = [handler copy];
+}
+
+- (void)setChannelStateHandler:(void (^)(NSArray<NSString*>*))handler {
+    _channelsHandler = [handler copy];
+}
+
+// Compute each channel's indicator state and push it to the UI when it changes.
+//   "playing" → steady lit (audible output)
+//   "warming" → fast blink (connected/prewarming, not yet audible)
+//   "off"     → dark (not connected)
+- (void)broadcastChannelStates {
+    NSString* s0 = @"off";
+    NSString* s1 = @"off";
+    if (_running) {
+        const int other = 1 - _primary;
+        NSString* prim = @"playing";
+        NSString* oth  = @"off";
+        if (_phase == PhasePrewarmed)      oth = @"warming";
+        else if (_phase == PhaseCrossfading) oth = @"playing";
+        if (_primary == 0) { s0 = prim; s1 = oth; }
+        else               { s1 = prim; s0 = oth; }
+    }
+    NSArray<NSString*>* states = @[s0, s1];
+    if ([states isEqualToArray:_lastChannelStates]) return;
+    _lastChannelStates = states;
+    if (_channelsHandler) {
+        void (^h)(NSArray<NSString*>*) = _channelsHandler;
+        dispatch_async(dispatch_get_main_queue(), ^{ h(states); });
+    }
 }
 
 - (void)emit:(NSString*)status {
@@ -132,12 +182,15 @@ typedef NS_ENUM(int, ConductorPhase) {
         [self emit:@"connecting"];
         [self->_ch[0] connectWithApiKey:apiKey];
         self->_channelConnectAt[0] = CFAbsoluteTimeGetCurrent();
+        NSLog(@"Lyria conductor: connect primary ch0 (prewarm@%.0fs xfade@%.0f-%.0fs)",
+              kPrewarmAt, kCrossfadeMinAt, kCrossfadeMaxAt);
 
         self->_timer = [NSTimer scheduledTimerWithTimeInterval:0.5
                                                         target:self
                                                       selector:@selector(tick)
                                                       userInfo:nil
                                                        repeats:YES];
+        [self broadcastChannelStates];
     });
 }
 
@@ -151,6 +204,7 @@ typedef NS_ENUM(int, ConductorPhase) {
         self->_mixTarget.store(0.0f);
         self->_phase = PhaseSteady;
         [self emit:@"idle"];
+        [self broadcastChannelStates];
     });
 }
 
@@ -162,6 +216,18 @@ typedef NS_ENUM(int, ConductorPhase) {
     const double elapsed = now - _channelConnectAt[_primary];
     const int other = 1 - _primary;
 
+    // Surface audio-ring underruns (network jitter starving the buffer) — these
+    // are the silent cutouts that leave no socket error behind.
+    for (int i = 0; i < 2; i++) {
+        if (!_ring[i]) continue;
+        const uint64_t u = _ring[i]->underruns.load(std::memory_order_relaxed);
+        if (u != _lastUnderruns[i]) {
+            NSLog(@"Lyria conductor: ch%d audio UNDERRUN (count=%llu)%s — buffer starved (network jitter)",
+                  i, (unsigned long long)u, i == _primary ? " [PRIMARY]" : "");
+            _lastUnderruns[i] = u;
+        }
+    }
+
     switch (_phase) {
         case PhaseSteady:
             if (elapsed >= kPrewarmAt) {
@@ -172,16 +238,25 @@ typedef NS_ENUM(int, ConductorPhase) {
                 _channelConnectAt[other] = now;
                 _phase = PhasePrewarmed;
                 [self emit:@"relinking"];
+                NSLog(@"Lyria conductor: prewarm relief ch%d at primary elapsed=%.0fs", other, elapsed);
             }
             break;
 
-        case PhasePrewarmed:
-            if (elapsed >= kCrossfadeAt) {
+        case PhasePrewarmed: {
+            // Only fade once the relief is actually streaming (ring primed), so
+            // we never fade into silence. Backstop forces it near the deadline.
+            const BOOL reliefReady = _ring[other] &&
+                _ring[other]->primed.load(std::memory_order_relaxed);
+            const BOOL forced = elapsed >= kCrossfadeMaxAt;
+            if ((elapsed >= kCrossfadeMinAt && reliefReady) || forced) {
                 _mixTarget.store(other == 1 ? 1.0f : 0.0f);
                 _crossfadeStartedAt = now;
                 _phase = PhaseCrossfading;
+                NSLog(@"Lyria conductor: crossfade start elapsed=%.0fs reliefPrimed=%d%s",
+                      elapsed, reliefReady, forced && !reliefReady ? " (FORCED, relief not primed!)" : "");
             }
             break;
+        }
 
         case PhaseCrossfading:
             if (now - _crossfadeStartedAt >= kXfadeSec) {
@@ -189,9 +264,33 @@ typedef NS_ENUM(int, ConductorPhase) {
                 _primary = other;
                 _phase = PhaseSteady;
                 [self emit:@"streaming"];
+                NSLog(@"Lyria conductor: handover complete, primary now ch%d", other);
             }
             break;
     }
+
+    [self broadcastChannelStates];
+}
+
+// ─── Early-loss recovery ─────────────────────────────────────────────────────
+// If the *primary* channel drops before our scheduled handover, bring the relief
+// up right now and let the prewarmed→crossfade gate fire as soon as it primes.
+- (void)handleChannelDown:(int)idx {
+    if (!_running) return;
+    if (idx != _primary) return;          // a relief/spent channel closing is expected
+    if (_phase != PhaseSteady) return;    // a handover is already in flight
+    NSLog(@"Lyria conductor: primary ch%d dropped early — accelerating handover", idx);
+    const int other = 1 - _primary;
+    const double now = CFAbsoluteTimeGetCurrent();
+    [_ch[other] setWeightedPrompts:_cachedPrompts];
+    [_ch[other] setConfig:_cachedConfig];
+    [_ch[other] connectWithApiKey:_apiKey];
+    _channelConnectAt[other] = now;
+    // Backdate the primary so the crossfade gate is already past its min and
+    // fires the instant the relief primes.
+    _channelConnectAt[_primary] = now - kCrossfadeMinAt;
+    _phase = PhasePrewarmed;
+    [self emit:@"relinking"];
 }
 
 // ─── Prompts / config broadcast to all live channels ─────────────────────────

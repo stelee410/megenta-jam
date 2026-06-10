@@ -99,7 +99,12 @@ type PerformanceKey =
   | 'delayMix'
   | 'delayFeedback'
   | 'reverbMix'
-  | 'limiter';
+  | 'limiter'
+  | 'stereoWidth'
+  | 'tone'
+  | 'outGain'
+  | 'crush'
+  | 'tremolo';
 
 type PerformanceState = Record<PerformanceKey, number>;
 
@@ -343,6 +348,11 @@ function App() {
     delayFeedback: 0.25,
     reverbMix: 0.0,
     limiter: 0.35,
+    stereoWidth: 0.5,
+    tone: 0.5,
+    outGain: 0.5,
+    crush: 0.0,
+    tremolo: 0.0,
   });
 
   // XY pad: 'prob' drives temperature/topK, 'filter' drives cutoff/resonance
@@ -403,6 +413,29 @@ function App() {
   // so no session is left open (and billing) while idle.
   const [engineMode, setEngineMode] = useState<'local' | 'lyria'>('local');
   const [lyriaStatus, setLyriaStatus] = useState('idle');
+  // Per-channel indicator state for the dual cloud streams: 'off'|'warming'|'playing'.
+  const [lyriaChannels, setLyriaChannels] = useState<string[]>(['off', 'off']);
+
+  // Lyria live-steering params (cloud mode). Knob values are 0..1 and mapped to
+  // the API ranges when sent. Mute toggles arrange the stems on the fly.
+  const [lyriaParams, setLyriaParams] = useState({
+    density: 0.5, brightness: 0.5, temperature: 0.4, guidance: 0.5,
+  });
+  const [muteBass, setMuteBass] = useState(false);
+  const [muteDrums, setMuteDrums] = useState(false);
+  const setLyriaParam = (key: 'density' | 'brightness' | 'temperature' | 'guidance', knob: number) => {
+    const v = Math.max(0, Math.min(1, knob));
+    setLyriaParams(p => ({ ...p, [key]: v }));
+    const mapped = key === 'temperature' ? v * 2.0 : key === 'guidance' ? v * 6.0 : v;
+    post({ type: 'lyriaConfig', [key]: mapped });
+  };
+  const toggleLyriaMute = (which: 'bass' | 'drums') => {
+    if (which === 'bass') {
+      setMuteBass(v => { const nv = !v; post({ type: 'lyriaConfig', muteBass: nv }); return nv; });
+    } else {
+      setMuteDrums(v => { const nv = !v; post({ type: 'lyriaConfig', muteDrums: nv }); return nv; });
+    }
+  };
   const engineModeRef = useRef<'local' | 'lyria'>('local');
   engineModeRef.current = engineMode;
 
@@ -435,6 +468,9 @@ function App() {
   const [bpmText, setBpmText] = useState('120');
   const bpmRef = useRef({ lock: false, value: 120 });
   bpmRef.current = { lock: bpmLock, value: bpmValue };
+
+  // Keep the audio-thread tremolo LFO synced to the displayed BPM.
+  useEffect(() => { post({ type: 'fxTempo', value: bpmValue }); }, [bpmValue]);
 
   /** Parse the typed BPM and apply it (clamped); reset the box if invalid. */
   const commitBpmText = () => {
@@ -1173,6 +1209,11 @@ function App() {
       ['delayFeedback', 0.25],
       ['reverbMix', 0.0],
       ['limiter', 0.35],
+      ['stereoWidth', 0.5],
+      ['tone', 0.5],
+      ['outGain', 0.5],
+      ['crush', 0.0],
+      ['tremolo', 0.0],
     ] as Array<[PerformanceKey, number]>).forEach(([key, value]) => sendPerformanceChange(key, value));
   };
 
@@ -1547,6 +1588,9 @@ function App() {
         setIsAudioPrompt(state.isAudioPrompt);
       }
 
+      if (Array.isArray(state.lyriaChannels)) {
+        setLyriaChannels(state.lyriaChannels);
+      }
       if (state.lyriaStatus !== undefined) {
         setLyriaStatus(state.lyriaStatus);
       }
@@ -1791,7 +1835,74 @@ function App() {
     { key: 'delayFeedback', label: 'Feedback', value: performance.delayFeedback },
     { key: 'reverbMix', label: 'Reverb', value: performance.reverbMix },
     { key: 'limiter', label: 'Limiter', value: performance.limiter },
+    { key: 'crush', label: 'Crush', value: performance.crush },
+    { key: 'stereoWidth', label: 'Width', value: performance.stereoWidth },
+    { key: 'tone', label: 'Tone', value: performance.tone },
+    { key: 'tremolo', label: 'Tremolo', value: performance.tremolo },
+    { key: 'outGain', label: 'Gain', value: performance.outGain },
   ];
+
+  // Lyria live-steering panel — floats at the top-left of the prompt stage in
+  // cloud mode (keeps the right FX column free for other uses).
+  const lyriaGeneratePanel = engineMode === 'lyria' ? (
+    <div className="jam-lyria-float">
+      <div className="jam-performance-head">
+        <span>GENERATE</span>
+        <span>Lyria</span>
+      </div>
+      <div className="jam-lyria-float-knobs">
+        {([
+          { key: 'density', label: 'Density', value: lyriaParams.density },
+          { key: 'brightness', label: 'Bright', value: lyriaParams.brightness },
+          { key: 'temperature', label: 'Temp', value: lyriaParams.temperature },
+          { key: 'guidance', label: 'Guide', value: lyriaParams.guidance },
+        ] as const).map(item => (
+          <div
+            className="jam-effect-knob"
+            key={item.key}
+            role="slider"
+            tabIndex={0}
+            aria-label={item.label}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={Math.round(item.value * 100)}
+            title={`${item.label}: ${Math.round(item.value * 100)}`}
+            onWheel={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              const d = Math.max(-0.04, Math.min(0.04, -e.deltaY * 0.001));
+              setLyriaParam(item.key, item.value + (e.shiftKey ? d * 2.5 : d));
+            }}
+            onKeyDown={(e) => {
+              if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+              e.preventDefault();
+              setLyriaParam(item.key, item.value + (e.key === 'ArrowUp' ? 1 : -1) * (e.shiftKey ? 0.05 : 0.01));
+            }}
+          >
+            <div
+              className="jam-knob-dial"
+              style={{
+                '--knob-pct': `${item.value * 75}%`,
+                '--knob-rotation': `${-135 + item.value * 270}deg`,
+              } as React.CSSProperties}
+            >
+              <span className="jam-knob-pointer" />
+            </div>
+            <span className="jam-effect-label">{item.label}</span>
+            <span className="jam-effect-value">{Math.round(item.value * 100)}</span>
+          </div>
+        ))}
+      </div>
+      <div className="jam-lyria-mutes">
+        <button className={`jam-mute-btn ${muteBass ? 'is-on' : ''}`} onClick={() => toggleLyriaMute('bass')}>
+          mute bass
+        </button>
+        <button className={`jam-mute-btn ${muteDrums ? 'is-on' : ''}`} onClick={() => toggleLyriaMute('drums')}>
+          mute drums
+        </button>
+      </div>
+    </div>
+  ) : null;
 
   // XY pad dot position + readout for the active mode
   const padPos = padMode === 'filter'
@@ -1834,6 +1945,30 @@ function App() {
     el.style.height = 'auto';
     el.style.height = `${el.scrollHeight}px`;
   };
+
+  // ── Mix chip editing (real <input> per slot: native paste/selection) ──────
+  const mixInputRefs = useRef<(HTMLInputElement | null)[]>([]);
+  const isMixEditingIndex = (i: number) =>
+    isPromptEditing && promptMode === 'mix' && mixLayout !== 'surface' && focusedMixIndex === i;
+  /** Focus a chip's text input, prefilled with its current prompt. */
+  const beginMixEdit = (index: number) => {
+    setPromptMode('mix');
+    setFocusedMixIndex(index);
+    setDraftText(mixPrompts[index]?.text ?? '');
+    setIsPromptEdited(false);
+    setIsPromptEditing(true);
+  };
+  /** Commit the focused chip's draft text and leave edit mode. */
+  const commitMixEdit = () => {
+    commitDraftText();
+    setIsPromptEditing(false);
+  };
+  // When a chip enters edit mode, focus + select its input so typing/paste replaces.
+  useEffect(() => {
+    if (!isPromptEditing || promptMode !== 'mix' || mixLayout === 'surface') return;
+    const el = mixInputRefs.current[focusedMixIndex];
+    if (el) { el.focus(); el.select(); }
+  }, [isPromptEditing, focusedMixIndex, promptMode, mixLayout]);
   const totalMixWeight = mixPrompts.reduce((sum, item) => sum + (item.enabled ? item.weight : 0), 0) || 1;
   const mixPositions = getMixPositions(mixLayout);
   const normalizedMixPrompts = mixPrompts.map(item => ({
@@ -1962,6 +2097,16 @@ function App() {
               <span className={`jam-lyria-status ${lyriaStatus.startsWith('error') ? 'is-error' : ''}`}>
                 {lyriaStatus}
               </span>
+            )}
+            {engineMode === 'lyria' && (
+              <div
+                className="jam-lyria-lights"
+                title="Cloud stream channels — steady = playing, fast blink = warming up"
+              >
+                {lyriaChannels.map((s, i) => (
+                  <span key={i} className={`jam-lyria-light is-${s}`} title={`ch${i}: ${s}`} />
+                ))}
+              </div>
             )}
           </div>
           <div className="jam-topbar-right">
@@ -2142,6 +2287,7 @@ function App() {
                   onExitFull={() => setVisualMode('bg')}
                 />
               )}
+              {lyriaGeneratePanel}
               {(promptMode === 'single' || promptMode === 'solo') && (
                 <div className="jam-single-prompt">
                   <div className="jam-single-kicker">{activeModeLabel}</div>
@@ -2278,10 +2424,7 @@ function App() {
                             } as React.CSSProperties}
                             onClick={(e) => {
                               e.stopPropagation();
-                              setFocusedMixIndex(index);
-                              setDraftText('');
-                              setIsPromptEditing(true);
-                              promptSurfaceRef.current?.focus();
+                              beginMixEdit(index);
                             }}
                           >
                             <span
@@ -2321,10 +2464,7 @@ function App() {
                             } as React.CSSProperties}
                             onClick={(e) => {
                               e.stopPropagation();
-                              setFocusedMixIndex(index);
-                              setDraftText('');
-                              setIsPromptEditing(true);
-                              promptSurfaceRef.current?.focus();
+                              beginMixEdit(index);
                             }}
                             onPointerDown={(e) => e.stopPropagation()}
                           >
@@ -2370,18 +2510,12 @@ function App() {
             {promptMode === 'mix' && mixLayout !== 'surface' && (
               <div className={`jam-slot-row ${mixLayout === 'standard' ? 'is-dj' : ''}`}>
                 {(mixLayout === 'standard' ? normalizedMixPrompts.slice(0, 2) : normalizedMixPrompts).map((item, index) => (
-                  <button
+                  <div
                     key={item.id}
-                    className={`jam-slot-pill ${index === focusedMixIndex ? 'is-focused' : ''} ${item.enabled ? '' : 'is-disabled'}`}
+                    className={`jam-slot-pill ${index === focusedMixIndex ? 'is-focused' : ''} ${item.enabled ? '' : 'is-disabled'} ${isMixEditingIndex(index) ? 'is-editing' : ''}`}
                     style={{ '--chip-color': item.color } as React.CSSProperties}
-                    onClick={() => {
-                    setFocusedMixIndex(index);
-                    setDraftText('');
-                    setPromptMode('mix');
-                    setIsPromptEditing(true);
-                    promptSurfaceRef.current?.focus();
-                  }}
-                >
+                    onClick={() => { if (!isMixEditingIndex(index)) beginMixEdit(index); }}
+                  >
                     <span
                       title={item.enabled ? 'Disable prompt' : 'Enable prompt'}
                       onClick={(e) => {
@@ -2389,7 +2523,29 @@ function App() {
                         toggleMixPrompt(index);
                       }}
                     />
-                    <b>{item.text}</b>
+                    {isMixEditingIndex(index) ? (
+                      <input
+                        ref={(el) => { mixInputRefs.current[index] = el; }}
+                        className="jam-slot-input"
+                        value={draftText}
+                        spellCheck={false}
+                        placeholder="type or paste"
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => { setDraftText(e.target.value); setIsPromptEdited(true); }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') { e.preventDefault(); commitMixEdit(); }
+                          else if (e.key === 'Escape') { e.preventDefault(); setDraftText(''); setIsPromptEditing(false); }
+                          else if (e.key === 'Tab') {
+                            e.preventDefault();
+                            const slotCount = mixLayout === 'standard' ? 2 : 6;
+                            beginMixEdit((index + (e.shiftKey ? slotCount - 1 : 1)) % slotCount);
+                          }
+                        }}
+                        onBlur={() => commitDraftText()}
+                      />
+                    ) : (
+                      <b>{item.text}</b>
+                    )}
                     <em>
                       {!item.enabled
                         ? 'off'
@@ -2397,8 +2553,7 @@ function App() {
                           ? `${Math.round((index === 0 ? 1 - xfade : xfade) * 100)}%`
                           : `${item.displayWeight}%`}
                     </em>
-                    {index === focusedMixIndex && draftText && <i>pending</i>}
-                  </button>
+                  </div>
                 ))}
               </div>
             )}
