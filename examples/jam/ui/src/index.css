@@ -1194,6 +1194,505 @@ input[type="range"]::-webkit-slider-thumb {
   align-items: start;
 }
 
+/* ── Main tabs (JAM / INSTRUMENT) ── */
+.jam-main-tabs { flex: 0 0 auto; }
+.jam-main-grid.is-tab-hidden { display: none !important; }
+
+/* ════════════════════════════════════════════════════════════════════
+   INSTRUMENT tab — MicroFreak hardware aesthetic
+   Dark charcoal panel, orange oscillator knobs, white encoders, black
+   pots with white pointers, LED selectors, OLED preset display, section
+   rules with centered uppercase titles, decorative band + wordmark.
+   ════════════════════════════════════════════════════════════════════ */
+.freak {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 16px 22px 0;
+  box-sizing: border-box;
+  border-radius: 12px;
+  background:
+    radial-gradient(120% 90% at 50% 0%, rgba(255, 255, 255, 0.045), transparent 52%),
+    linear-gradient(180deg, #232427, #1a1b1e 60%, #161719);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 18px 42px rgba(0, 0, 0, 0.5);
+  color: #e8e8ea;
+  font-family: "Google Sans", system-ui, sans-serif;
+}
+
+/* ── Section blocks: content above, titled rule below (hardware style) ── */
+.freak-row {
+  display: grid;
+  gap: 18px;
+  align-items: stretch;
+}
+.freak-row-1 { grid-template-columns: 0.55fr 2.1fr 1.5fr 1.8fr; }
+.freak-row-2 { grid-template-columns: 0.55fr 2.6fr 1.3fr 1.8fr; }
+
+.freak-block {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.freak-rule {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 2px;
+}
+.freak-rule::before,
+.freak-rule::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.22);
+}
+.freak-rule span {
+  flex: 0 0 auto;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 2.2px;
+  color: rgba(255, 255, 255, 0.82);
+  white-space: nowrap;
+}
+
+.freak-knobs {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-evenly;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* ── Knobs ── */
+.freak-knob {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  width: 64px;
+  outline: none;
+  cursor: ns-resize;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+}
+.freak-knob.is-sm { width: 52px; }
+.freak-knob.is-lg { width: 80px; }
+
+.freak-knob-arc {
+  position: absolute;
+  top: -5px;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background:
+    repeating-conic-gradient(from -135deg,
+      rgba(255, 255, 255, 0.35) 0deg 1.6deg,
+      transparent 1.6deg 24.4deg);
+  -webkit-mask: radial-gradient(circle, transparent 58%, #000 60%, #000 100%);
+  mask: radial-gradient(circle, transparent 58%, #000 60%, #000 100%);
+  clip-path: polygon(0 0, 100% 0, 100% 78%, 50% 78%, 0 78%);
+  opacity: 0.5;
+  pointer-events: none;
+}
+.freak-knob.is-lg .freak-knob-arc { width: 70px; height: 70px; top: -6px; }
+.freak-knob.is-sm .freak-knob-arc { width: 46px; height: 46px; top: -4px; }
+
+.freak-knob-body {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  position: relative;
+  background:
+    radial-gradient(circle at 32% 28%, #3a3b3f, #232427 58%, #101113);
+  border: 1px solid rgba(0, 0, 0, 0.85);
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.16),
+    0 5px 10px rgba(0, 0, 0, 0.55);
+}
+.freak-knob.is-lg .freak-knob-body { width: 56px; height: 56px; }
+.freak-knob.is-sm .freak-knob-body { width: 36px; height: 36px; }
+
+.freak-knob-pointer {
+  position: absolute;
+  left: 50%;
+  top: 3px;
+  width: 3px;
+  height: 36%;
+  margin-left: -1.5px;
+  border-radius: 2px;
+  background: #f2f2f4;
+  box-shadow: 0 0 4px rgba(255, 255, 255, 0.35);
+}
+
+/* Orange oscillator knobs (the hardware signature) */
+.freak-knob.is-orange .freak-knob-body {
+  background:
+    radial-gradient(circle at 32% 28%, #ff8a5c, #f55d2c 55%, #b93a14);
+  border-color: rgba(120, 35, 8, 0.9);
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.35),
+    0 5px 12px rgba(245, 93, 44, 0.28),
+    0 5px 10px rgba(0, 0, 0, 0.45);
+}
+.freak-knob.is-orange .freak-knob-pointer { background: #2a1006; box-shadow: none; }
+
+/* White encoder knobs (Rate / Preset) */
+.freak-knob.is-white .freak-knob-body {
+  background:
+    radial-gradient(circle at 32% 28%, #ffffff, #dfe0e2 55%, #aaabb0);
+  border-color: rgba(0, 0, 0, 0.55);
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.9),
+    0 5px 10px rgba(0, 0, 0, 0.5);
+}
+.freak-knob.is-white .freak-knob-pointer { background: #232427; box-shadow: none; }
+
+.freak-knob-label {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  color: rgba(255, 255, 255, 0.8);
+  text-align: center;
+  white-space: nowrap;
+}
+.freak-knob-label.is-accent { color: #6fb3ff; }   /* blue shift-labels like the hardware */
+.freak-knob-value {
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 8.5px;
+  color: rgba(255, 255, 255, 0.42);
+}
+.freak-knob:focus-visible .freak-knob-body { box-shadow: 0 0 0 2px rgba(111, 179, 255, 0.6); }
+
+/* ── LED selectors ── */
+.freak-leds {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-self: center;
+}
+.freak-leds.is-horizontal { flex-direction: row; flex-wrap: wrap; }
+
+.freak-led {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.55);
+  font-family: "Google Sans", system-ui, sans-serif;
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.freak-led-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.10);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+  flex: 0 0 auto;
+}
+
+.freak-led.is-on { color: #fff; }
+.freak-led.is-on .freak-led-dot {
+  background: #fff;
+  box-shadow: 0 0 7px 2px rgba(255, 255, 255, 0.55);
+}
+
+/* ── Top row ── */
+.freak-top {
+  display: grid;
+  grid-template-columns: 1.4fr 2fr 0.8fr;
+  gap: 18px;
+  align-items: stretch;
+}
+
+.freak-top-mid {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+}
+
+.freak-top-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.freak-grain {
+  font-size: 10px;
+  font-style: italic;
+  color: rgba(255, 255, 255, 0.4);
+  letter-spacing: 0.5px;
+}
+
+/* Soft buttons (Paraphonic / Save / Hold / Sync / Dice) */
+.freak-soft {
+  height: 30px;
+  padding: 0 14px;
+  border-radius: 15px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(0, 0, 0, 0.25));
+  color: rgba(255, 255, 255, 0.66);
+  font-family: "Google Sans", system-ui, sans-serif;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.freak-soft:disabled { opacity: 0.35; cursor: default; }
+.freak-soft.is-lit {
+  border-color: rgba(140, 200, 255, 0.85);
+  color: #cfe7ff;
+  box-shadow: 0 0 9px rgba(120, 185, 255, 0.5), inset 0 0 5px rgba(120, 185, 255, 0.25);
+}
+.freak-soft.is-danger { color: #ff8095; border-color: rgba(255, 95, 120, 0.5); }
+
+.freak-preset-keys { display: flex; flex-direction: column; gap: 6px; }
+.freak-preset-select { appearance: none; -webkit-appearance: none; text-align: center; max-width: 120px; }
+
+/* OLED preset display */
+.freak-oled {
+  width: 190px;
+  padding: 7px 9px 8px;
+  border-radius: 5px;
+  background: #04060a;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  box-shadow: inset 0 0 14px rgba(0, 0, 0, 0.9), 0 0 0 3px #101113;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.freak-oled-title {
+  align-self: flex-start;
+  padding: 1px 7px;
+  background: #e6f2ff;
+  color: #04060a;
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 8.5px;
+  font-weight: 700;
+}
+
+.freak-oled-name {
+  border: none;
+  outline: none;
+  background: transparent;
+  color: #e6f2ff;
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-shadow: 0 0 8px rgba(160, 215, 255, 0.55);
+  width: 100%;
+}
+
+.freak-oled-engine {
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 8.5px;
+  color: rgba(190, 225, 255, 0.55);
+}
+
+/* ── Matrix (LED grid, hardware top-left) ── */
+.freak-block-matrix { justify-content: flex-end; }
+
+.freak-matrix { display: flex; flex-direction: column; gap: 4px; }
+
+.freak-matrix-row {
+  display: grid;
+  grid-template-columns: 46px repeat(5, 26px);
+  gap: 4px;
+  align-items: center;
+}
+
+.freak-matrix-head { margin-bottom: 1px; }
+.freak-matrix-dst {
+  font-size: 7.5px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.5);
+  transform: rotate(-38deg);
+  transform-origin: 30% 100%;
+  white-space: nowrap;
+}
+
+.freak-matrix-src {
+  font-size: 7.5px;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.5);
+  text-align: right;
+  padding-right: 2px;
+}
+
+.freak-matrix-cell {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.05);
+  cursor: ns-resize;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
+  padding: 0;
+}
+
+.freak-matrix-cell.is-pos {
+  background: rgba(255, 244, 214, calc(0.18 + var(--mag) * 0.8));
+  border-color: rgba(255, 244, 214, 0.8);
+  box-shadow: 0 0 calc(var(--mag) * 10px) rgba(255, 240, 200, 0.7);
+}
+
+.freak-matrix-cell.is-neg {
+  background: rgba(120, 185, 255, calc(0.18 + var(--mag) * 0.8));
+  border-color: rgba(120, 185, 255, 0.8);
+  box-shadow: 0 0 calc(var(--mag) * 10px) rgba(120, 185, 255, 0.7);
+}
+
+/* ── Octave ── */
+.freak-octave {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.freak-round {
+  flex: 0 0 38px;
+  width: 38px;
+  height: 38px;
+  min-width: 38px;
+  padding: 0;
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.85);
+  background:
+    radial-gradient(circle at 34% 26%, #45464b, #26272b 56%, #121316);
+  box-shadow:
+    inset 0 1.5px 1px rgba(255, 255, 255, 0.2),
+    inset 0 -2px 3px rgba(0, 0, 0, 0.6),
+    0 5px 10px rgba(0, 0, 0, 0.55),
+    0 0 0 3px rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: transform 0.05s ease, box-shadow 0.12s ease;
+}
+.freak-round:hover { color: #fff; box-shadow:
+  inset 0 1.5px 1px rgba(255, 255, 255, 0.25),
+  inset 0 -2px 3px rgba(0, 0, 0, 0.6),
+  0 5px 12px rgba(0, 0, 0, 0.6),
+  0 0 0 3px rgba(255, 255, 255, 0.09); }
+.freak-round:active { transform: translateY(1px) scale(0.97); }
+.freak-oct-read {
+  min-width: 24px;
+  text-align: center;
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  color: #6fb3ff;
+}
+
+/* Shift button: blue halo when engaged (hardware-style) */
+.freak-shift.is-lit {
+  border-color: rgba(120, 185, 255, 0.95);
+  color: #cfe7ff;
+  box-shadow:
+    0 0 10px rgba(120, 185, 255, 0.65),
+    inset 0 0 6px rgba(120, 185, 255, 0.35),
+    inset 0 1px 1px rgba(255, 255, 255, 0.16);
+}
+
+/* ── ARP middle toggles ── */
+.freak-arp-mid { display: flex; align-items: center; }
+.freak-arp-toggles {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.freak-sync { align-self: center; }
+
+/* ── AI strip ── */
+.freak-ai {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.freak-ai-tag {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: #f55d2c;
+  color: #1a0c05;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 1.5px;
+}
+.freak-ai-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 8px 11px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.4);
+  color: #e8e8ea;
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 11.5px;
+  outline: none;
+}
+.freak-ai-input:focus { border-color: rgba(245, 93, 44, 0.65); }
+.freak-ai-error { font-size: 10px; color: #ff8095; }
+
+/* ── Decorative band + wordmark (the Arturia strip) ── */
+.freak-band {
+  margin: 6px -22px 0;
+  padding: 9px 22px 10px;
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+  background:
+    repeating-linear-gradient(135deg,
+      rgba(255, 255, 255, 0.05) 0 2px, transparent 2px 6px),
+    linear-gradient(180deg, #111214, #0c0d0f);
+  border-radius: 0 0 12px 12px;
+}
+.freak-wordmark {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 3.5px;
+  color: rgba(255, 255, 255, 0.85);
+}
+.freak-wordsub {
+  font-size: 8.5px;
+  font-style: italic;
+  letter-spacing: 1px;
+  color: rgba(255, 255, 255, 0.38);
+}
+
 /* ── Punch-in FX pads (EP-133 style) ── */
 .jam-fx-panel { flex: 0 0 auto; }
 

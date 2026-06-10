@@ -345,6 +345,10 @@ static BOOL isDevServerRunning(void) {
     NSArray* savedMixPrompts = [[NSUserDefaults standardUserDefaults] arrayForKey:@"Jam_MixPrompts"];
     if (savedMixPrompts) state[@"savedMixPrompts"] = savedMixPrompts;
 
+    // Restore performance-synth user presets
+    NSArray* savedSynthPresets = [[NSUserDefaults standardUserDefaults] arrayForKey:@"Jam_SynthPresets"];
+    if (savedSynthPresets) state[@"savedSynthPresets"] = savedSynthPresets;
+
     // Restore saved prompt history
     NSArray* savedHistory = [[NSUserDefaults standardUserDefaults] arrayForKey:@"Jam_PromptHistory"];
     if (savedHistory) {
@@ -499,6 +503,93 @@ static BOOL isDevServerRunning(void) {
         NSNumber* value = body[@"value"];
         if ([value isKindOfClass:[NSNumber class]] && self.sharedState) {
             self.sharedState->fxTempo.store(value.floatValue, std::memory_order_relaxed);
+        }
+    }
+    else if ([type isEqualToString:@"instrumentActive"]) {
+        NSNumber* value = body[@"value"];
+        if ([value isKindOfClass:[NSNumber class]] && self.sharedState) {
+            const BOOL on = value.boolValue;
+            self.sharedState->synth.active.store(on, std::memory_order_relaxed);
+            // Leaving the instrument: release any held synth notes so nothing drones.
+            if (!on) self.sharedState->synth.allNotesOff();
+        }
+    }
+    else if ([type isEqualToString:@"synthParam"]) {
+        NSString* key = body[@"key"];
+        NSNumber* value = body[@"value"];
+        if ([key isKindOfClass:[NSString class]] &&
+            [value isKindOfClass:[NSNumber class]] && self.sharedState) {
+            JamSynth& sy = self.sharedState->synth;
+            const float v = value.floatValue;
+            const int iv = value.intValue;
+            if ([key isEqualToString:@"oscType"])          sy.oscType.store(MAX(0, MIN(4, iv)), std::memory_order_relaxed);
+            else if ([key isEqualToString:@"wave"])        sy.wave.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"timbre"])      sy.timbre.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"shape"])       sy.shape.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"glide"])       sy.glide.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"attack"])      sy.attack.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"decay"])       sy.decay.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"sustain"])     sy.sustain.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"release"])     sy.release.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"filterType"])  sy.filterType.store(MAX(0, MIN(2, iv)), std::memory_order_relaxed);
+            else if ([key isEqualToString:@"cutoff"])      sy.cutoff.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"resonance"])   sy.resonance.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"envFilter"])   sy.envFilter.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"lfoShape"])    sy.lfoShape.store(MAX(0, MIN(4, iv)), std::memory_order_relaxed);
+            else if ([key isEqualToString:@"lfoRate"])     sy.lfoRate.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"lfoSync"])     sy.lfoSync.store(v > 0.5f, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"cycMode"])     sy.cycMode.store(MAX(0, MIN(2, iv)), std::memory_order_relaxed);
+            else if ([key isEqualToString:@"cycRise"])     sy.cycRise.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"cycFall"])     sy.cycFall.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"cycHold"])     sy.cycHold.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"cycRiseShape"]) sy.cycRiseShape.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"cycFallShape"]) sy.cycFallShape.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"cycAmount"])   sy.cycAmount.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"arpMode"])     sy.arpMode.store(MAX(0, MIN(6, iv)), std::memory_order_relaxed);
+            else if ([key isEqualToString:@"arpOct"])      sy.arpOct.store(MAX(1, MIN(4, iv)), std::memory_order_relaxed);
+            else if ([key isEqualToString:@"arpDiv"])      sy.arpDiv.store(MAX(0, MIN(5, iv)), std::memory_order_relaxed);
+            else if ([key isEqualToString:@"arpHold"])     sy.arpHold.store(v > 0.5f, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"arpSwing"])    sy.arpSwing.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"arpGate"])     sy.arpGate.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"arpSpice"])    sy.arpSpice.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"monoMode"])    sy.monoMode.store(v > 0.5f, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"chorus"])      sy.chorus.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"space"])       sy.space.store(v, std::memory_order_relaxed);
+            else if ([key isEqualToString:@"volume"])      sy.volume.store(v, std::memory_order_relaxed);
+        }
+    }
+    else if ([type isEqualToString:@"synthDice"]) {
+        // Re-roll the arp pattern (Dice).
+        if (self.sharedState) {
+            self.sharedState->synth.diceSeed.fetch_add(
+                (uint32_t)(arc4random() | 1), std::memory_order_relaxed);
+        }
+    }
+    else if ([type isEqualToString:@"synthMatrix"]) {
+        // One mod-matrix cell: index 0..24 (src*5+dest), value -1..1.
+        NSNumber* idxVal = body[@"index"];
+        NSNumber* value = body[@"value"];
+        if ([idxVal isKindOfClass:[NSNumber class]] &&
+            [value isKindOfClass:[NSNumber class]] && self.sharedState) {
+            const int idx = idxVal.intValue;
+            if (idx >= 0 && idx < 25) {
+                float v = value.floatValue;
+                if (v < -1.0f) v = -1.0f;
+                if (v > 1.0f) v = 1.0f;
+                self.sharedState->synth.matrix[idx].store(v, std::memory_order_relaxed);
+            }
+        }
+    }
+    else if ([type isEqualToString:@"saveSynthPresets"]) {
+        NSArray* presets = body[@"value"];
+        if ([presets isKindOfClass:[NSArray class]]) {
+            [[NSUserDefaults standardUserDefaults] setObject:presets forKey:@"Jam_SynthPresets"];
+        }
+    }
+    else if ([type isEqualToString:@"aiPatch"]) {
+        NSString* desc = body[@"value"];
+        if ([desc isKindOfClass:[NSString class]] && desc.length > 0) {
+            [self handleAiPatch:desc];
         }
     }
     else if ([type isEqualToString:@"punchFx"]) {
@@ -746,6 +837,12 @@ static BOOL isDevServerRunning(void) {
         if (!noteVal || !onVal || !self.engine) return;
         uint8_t note = (uint8_t)MIN(127, MAX(0, noteVal.intValue));
         BOOL on = onVal.boolValue;
+        // Instrument tab: notes play the performance synth instead of
+        // conditioning the generative engine.
+        if (self.sharedState && self.sharedState->synth.active.load(std::memory_order_relaxed)) {
+            self.sharedState->synth.pushNote(note, 100, on);
+            return;
+        }
         if (on) {
             self.engine->set_note_on(note);
             if (self.sharedState) self.sharedState->noteOn(note);
@@ -1168,6 +1265,161 @@ static const int kAudioPromptFrames = 160000; // 10s @ 16kHz
 // ─── AI prompt assist (agentllm, model c-music-express) ─────────────────────
 // Turns a free-form idea (any language) into a concise English music prompt
 // tuned for this engine. Reuses the Lyria API key; runs off the main thread.
+
+// ─── AI patch design (Instrument tab) ────────────────────────────────────────
+// Turns a free-form sound description (any language) into a synth patch JSON
+// for the MicroFreak-style performance synth. Reuses the agentllm key.
+
+// Parse a (possibly truncated) JSON object. If a straight parse fails, trim to
+// the last complete '}' and balance any unclosed brackets with a small stack.
+static NSDictionary* JamParsePatchJson(NSString* jsonStr) {
+    id parsed = [NSJSONSerialization JSONObjectWithData:
+        [jsonStr dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+    if ([parsed isKindOfClass:[NSDictionary class]]) return parsed;
+
+    // Truncated output (finish_reason == length): cut at the last '}' so we are
+    // not inside a string/number, then close whatever is still open.
+    NSRange lastBrace = [jsonStr rangeOfString:@"}" options:NSBackwardsSearch];
+    if (lastBrace.location == NSNotFound) return nil;
+    NSString* cut = [jsonStr substringToIndex:lastBrace.location + 1];
+
+    NSMutableString* closers = [NSMutableString string];
+    {
+        char stack[64];
+        int sp = 0;
+        BOOL inStr = NO, esc = NO;
+        for (NSUInteger i = 0; i < cut.length; ++i) {
+            const unichar c = [cut characterAtIndex:i];
+            if (esc) { esc = NO; continue; }
+            if (inStr) {
+                if (c == '\\') esc = YES;
+                else if (c == '"') inStr = NO;
+                continue;
+            }
+            if (c == '"') inStr = YES;
+            else if ((c == '{' || c == '[') && sp < 63) stack[sp++] = (char)c;
+            else if ((c == '}' || c == ']') && sp > 0) sp--;
+        }
+        while (sp > 0) [closers appendString:(stack[--sp] == '{' ? @"}" : @"]")];
+    }
+    NSString* repaired = [cut stringByAppendingString:closers];
+    parsed = [NSJSONSerialization JSONObjectWithData:
+        [repaired dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
+    return [parsed isKindOfClass:[NSDictionary class]] ? parsed : nil;
+}
+
+- (void)handleAiPatch:(NSString*)desc {
+    NSString* apiKey = [[NSUserDefaults standardUserDefaults] stringForKey:@"Jam_LyriaApiKey"];
+    if (apiKey.length == 0) {
+        [self sendStateUpdate:@{@"aiPatchError": @"No API key — set it in the Lyria settings first"}];
+        return;
+    }
+
+    NSURL* url = [NSURL URLWithString:@"https://agentllm.linkyun.co/v1/chat/completions"];
+    NSMutableURLRequest* req = [NSMutableURLRequest requestWithURL:url];
+    req.HTTPMethod = @"POST";
+    req.timeoutInterval = 45.0;
+    [req setValue:[NSString stringWithFormat:@"Bearer %@", apiKey] forHTTPHeaderField:@"Authorization"];
+    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+
+    NSString* sys =
+        @"You are a sound designer for a MicroFreak-style synthesizer. Convert the user's "
+         "description (any language) into ONE patch as STRICT JSON, no code fences, no extra text. "
+         "Schema (floats 0..1 unless noted): {\"name\": short english patch name, "
+         "\"oscType\": \"analog\"|\"supersaw\"|\"wavetable\"|\"fm\"|\"harmonic\", "
+         "\"wave\": float (analog: sub level / supersaw: unison / wavetable: position / fm: ratio / harmonic: partials), "
+         "\"timbre\": float (saw-pulse blend / detune / wavefold / fm index / rolloff), "
+         "\"shape\": float (pulse width / side mix / phase distortion / fm feedback / odd-even), "
+         "\"cutoff\": float, \"resonance\": float, \"filterType\": \"lp\"|\"bp\"|\"hp\", "
+         "\"envFilter\": float -1..1 (filter env amount), "
+         "\"attack\": float, \"decay\": float, \"sustain\": float, \"release\": float, "
+         "\"lfoShape\": \"sine\"|\"tri\"|\"saw\"|\"square\"|\"sh\", \"lfoRate\": float, \"lfoSync\": bool, "
+         "\"cycMode\": \"env\"|\"run\"|\"loop\", \"cycRise\": float, \"cycFall\": float, "
+         "\"cycHold\": float (env: sustain level, run/loop: hold time), "
+         "\"cycRiseShape\": float (0 log, 0.5 lin, 1 exp), \"cycFallShape\": float, "
+         "\"cycAmount\": float (cycling-env output level, default 1), "
+         "\"arp\": \"off\"|\"up\"|\"down\"|\"updown\"|\"random\"|\"order\"|\"pattern\", \"arpOct\": int 1-4, "
+         "\"arpDiv\": \"1/4\"|\"1/8\"|\"1/8T\"|\"1/16\"|\"1/16T\"|\"1/32\", "
+         "\"arpSwing\": float, \"arpGate\": float, \"arpSpice\": float (variation probability), "
+         "\"mono\": bool, \"glide\": float, \"chorus\": float, \"space\": float (reverb), "
+         "\"volume\": float (default 0.6), "
+         "\"matrix\": up to 6 of {\"src\": \"cycenv\"|\"env\"|\"lfo\"|\"velo\"|\"key\", "
+         "\"dest\": \"pitch\"|\"wave\"|\"timbre\"|\"shape\"|\"cutoff\", \"amt\": float -1..1}}. "
+         "SOUND-DESIGN RULES (stage quality): always give chorus 0.15-0.5 and space 0.1-0.5 "
+         "unless the user asks for dry; vibrato = lfo→pitch amt 0.02-0.06 with lfoRate ~0.45; "
+         "wobble = lfoSync true + lfo→cutoff 0.3-0.6; movement = cycenv run mode → wave/timbre. "
+         "Basses: mono true, envFilter +0.3..0.6, cutoff 0.25-0.45, space ≤0.15. "
+         "Pads: attack 0.4-0.7, release 0.6-0.8, chorus 0.4+, space 0.4+, supersaw or wavetable. "
+         "Plucks/keys: attack 0, decay 0.25-0.45, sustain 0-0.2, envFilter +0.3. "
+         "Leads: mono true, glide 0.05-0.15, vibrato. Arp only if rhythm implied. "
+         "EXAMPLE (lush trance pad): {\"name\":\"Crystal Dawn\",\"oscType\":\"supersaw\","
+         "\"wave\":0.95,\"timbre\":0.5,\"shape\":0.75,\"cutoff\":0.62,\"resonance\":0.12,"
+         "\"filterType\":\"lp\",\"envFilter\":0.15,\"attack\":0.55,\"decay\":0.6,\"sustain\":0.75,"
+         "\"release\":0.7,\"lfoShape\":\"tri\",\"lfoRate\":0.35,\"lfoSync\":false,"
+         "\"cycMode\":\"run\",\"cycRise\":0.7,\"cycFall\":0.7,\"cycHold\":0.3,\"cycAmount\":0.8,"
+         "\"arp\":\"off\",\"mono\":false,\"glide\":0,\"chorus\":0.45,\"space\":0.5,\"volume\":0.6,"
+         "\"matrix\":[{\"src\":\"cycenv\",\"dest\":\"timbre\",\"amt\":0.18},"
+         "{\"src\":\"lfo\",\"dest\":\"cutoff\",\"amt\":0.08}]}";
+
+    NSDictionary* payload = @{
+        @"model": @"c-music-express",
+        @"max_tokens": @4000,   // the backend spends tokens on hidden reasoning
+        @"temperature": @0.6,
+        @"stream": @NO,
+        @"messages": @[
+            @{@"role": @"system", @"content": sys},
+            @{@"role": @"user", @"content": desc},
+        ],
+    };
+    NSError* jsonErr = nil;
+    NSData* bodyData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:&jsonErr];
+    if (!bodyData) {
+        [self sendStateUpdate:@{@"aiPatchError": @"Could not encode request"}];
+        return;
+    }
+    req.HTTPBody = bodyData;
+
+    NSURLSessionDataTask* task = [[NSURLSession sharedSession] dataTaskWithRequest:req
+        completionHandler:^(NSData* data, NSURLResponse* response, NSError* error) {
+            NSDictionary* patch = nil;
+            NSString* errMsg = nil;
+            if (error) {
+                errMsg = error.localizedDescription;
+            } else if (data) {
+                id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                NSString* content = nil;
+                if ([json isKindOfClass:[NSDictionary class]]) {
+                    NSArray* choices = json[@"choices"];
+                    if ([choices isKindOfClass:[NSArray class]] && choices.count > 0) {
+                        NSDictionary* msg = choices[0][@"message"];
+                        if ([msg isKindOfClass:[NSDictionary class]] &&
+                            [msg[@"content"] isKindOfClass:[NSString class]]) {
+                            content = msg[@"content"];
+                        }
+                    }
+                }
+                if (content.length > 0) {
+                    // Extract the JSON object (the model may wrap it in fences/prose),
+                    // repairing truncated output if the token cap was hit.
+                    NSRange open = [content rangeOfString:@"{"];
+                    if (open.location != NSNotFound) {
+                        patch = JamParsePatchJson([content substringFromIndex:open.location]);
+                    }
+                }
+                if (!patch) errMsg = @"AI returned an unreadable patch";
+            } else {
+                errMsg = @"No response data";
+            }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (patch) {
+                    [self sendStateUpdate:@{@"aiPatchResult": patch}];
+                } else {
+                    [self sendStateUpdate:@{@"aiPatchError": errMsg ?: @"Patch request failed"}];
+                }
+            });
+        }];
+    [task resume];
+}
 
 - (void)handleAiPrompt:(NSString*)idea history:(NSArray*)history {
     NSString* apiKey = [[NSUserDefaults standardUserDefaults] stringForKey:@"Jam_LyriaApiKey"];

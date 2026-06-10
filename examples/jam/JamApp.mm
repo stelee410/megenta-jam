@@ -534,10 +534,10 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
             // The local engine stays bypassed, but FX/meters below still apply.
             [lyriaConductor readStereoLeft:outL right:outR frames:frameCount];
         } else if (!engine->is_loaded()) {
+            // No model yet — keep the buffers zeroed but fall through so the
+            // performance synth (Instrument tab) can still play.
             memset(outL, 0, frameCount * sizeof(float));
             if (outputData->mNumberBuffers > 1) memset(outR, 0, frameCount * sizeof(float));
-            *isSilence = YES;
-            return noErr;
         } else {
             engine->read_audio_stereo(outL, outR, frameCount, false);
         }
@@ -600,6 +600,11 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
             gateLevel->store(1.0f, std::memory_order_relaxed);
             engine->set_cfg_notes(cfgNotesSliderVal->load(std::memory_order_relaxed));
         }
+
+        // Live-performance synth (Instrument tab): mixed in before the FX chain
+        // so it shares the filter/delay/reverb/punch pads with the music.
+        shared->synth.render(outL, outR, frameCount,
+                             shared->fxTempo.load(std::memory_order_relaxed));
 
         shared->processPerformanceFX(outL, outR, frameCount);
         shared->pushAudioSamples(outL, outR, frameCount);
@@ -686,11 +691,19 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                         uint8_t note = (word >> 8) & 0x7F;
                         uint8_t velocity = word & 0x7F;
                         if (statusNibble == 0x90 && velocity > 0) {
-                            engine->set_note_on(note);
-                            shared->noteOn(note);
+                            if (shared->synth.active.load(std::memory_order_relaxed)) {
+                                shared->synth.pushNote(note, velocity, true);
+                            } else {
+                                engine->set_note_on(note);
+                                shared->noteOn(note);
+                            }
                         } else if (statusNibble == 0x80 || (statusNibble == 0x90 && velocity == 0)) {
-                            engine->set_note_off(note);
-                            shared->noteOff(note);
+                            if (shared->synth.active.load(std::memory_order_relaxed)) {
+                                shared->synth.pushNote(note, 0, false);
+                            } else {
+                                engine->set_note_off(note);
+                                shared->noteOff(note);
+                            }
                         }
                     }
                 }
@@ -714,11 +727,19 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                         uint8_t note = (word >> 8) & 0x7F;
                         uint8_t velocity = word & 0x7F;
                         if (statusNibble == 0x90 && velocity > 0) {
-                            engine->set_note_on(note);
-                            shared->noteOn(note);
+                            if (shared->synth.active.load(std::memory_order_relaxed)) {
+                                shared->synth.pushNote(note, velocity, true);
+                            } else {
+                                engine->set_note_on(note);
+                                shared->noteOn(note);
+                            }
                         } else if (statusNibble == 0x80 || (statusNibble == 0x90 && velocity == 0)) {
-                            engine->set_note_off(note);
-                            shared->noteOff(note);
+                            if (shared->synth.active.load(std::memory_order_relaxed)) {
+                                shared->synth.pushNote(note, 0, false);
+                            } else {
+                                engine->set_note_off(note);
+                                shared->noteOff(note);
+                            }
                         }
                     }
                 }

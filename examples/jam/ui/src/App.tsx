@@ -27,6 +27,12 @@ import { CheatSheet } from './CheatSheet';
 import { ChatPanel } from './ChatPanel';
 import type { ChatMessage } from './ChatPanel';
 import {
+  InstrumentPanel, DEFAULT_SYNTH, OSC_TYPES,
+  CYC_MODES, ARP_DIVS, MATRIX_SRC, MATRIX_DST,
+} from './InstrumentPanel';
+import type { SynthParams, SynthPreset } from './InstrumentPanel';
+import { FACTORY_PRESETS } from './SynthPresets';
+import {
   IconButton,
   MenuItem,
   CircularProgress,
@@ -378,6 +384,148 @@ function App() {
     crush: 0.0,
     tremolo: 0.0,
   });
+
+  // ─── Main tabs: JAM (generative mix) vs INSTRUMENT (performance synth) ────
+  const [mainTab, setMainTab] = useState<'jam' | 'instrument'>('jam');
+  const mainTabRef = useRef(mainTab);
+  mainTabRef.current = mainTab;
+  // Gate native note routing: instrument tab → notes play the synth.
+  useEffect(() => {
+    post({ type: 'instrumentActive', value: mainTab === 'instrument' });
+  }, [mainTab]);
+
+  // Performance synth (MicroFreak-style) parameters — UI is the source of truth.
+  const [synthParams, setSynthParams] = useState<SynthParams>(DEFAULT_SYNTH);
+  const setSynthParam = useCallback((key: keyof SynthParams, value: number) => {
+    setSynthParams(s => ({ ...s, [key]: value }));
+    post({ type: 'synthParam', key, value });
+  }, []);
+
+  // Mod matrix: 25 bipolar amounts [src*5+dest].
+  const [synthMatrix, setSynthMatrix] = useState<number[]>(() => Array(25).fill(0));
+  const setMatrixCell = useCallback((index: number, value: number) => {
+    setSynthMatrix(m => { const next = [...m]; next[index] = value; return next; });
+    post({ type: 'synthMatrix', index, value });
+  }, []);
+  /** Replace the whole matrix (preset load / AI patch). */
+  const applyMatrix = (cells: number[]) => {
+    setSynthMatrix(cells);
+    cells.forEach((value, index) => post({ type: 'synthMatrix', index, value }));
+  };
+  /** Push a full param set to the engine and the UI. */
+  const applySynthParams = (params: SynthParams) => {
+    setSynthParams(params);
+    Object.entries(params).forEach(([key, value]) => post({ type: 'synthParam', key, value }));
+  };
+
+  // Presets (persisted via native NSUserDefaults).
+  const [patchName, setPatchName] = useState('init');
+  const [synthPresets, setSynthPresets] = useState<SynthPreset[]>([]);
+  const saveSynthPreset = useCallback(() => {
+    const name = patchName.trim() || 'untitled';
+    setSynthPresets(prev => {
+      const next = [...prev.filter(p => p.name !== name),
+                    { name, params: synthParams, matrix: synthMatrix }];
+      post({ type: 'saveSynthPresets', value: next });
+      return next;
+    });
+    setPatchName(name);
+  }, [patchName, synthParams, synthMatrix]);
+  const loadSynthPreset = useCallback((name: string) => {
+    const p = synthPresets.find(x => x.name === name)
+           ?? FACTORY_PRESETS.find(x => x.name === name);
+    if (!p) return;
+    applySynthParams({ ...DEFAULT_SYNTH, ...p.params });
+    applyMatrix(Array.isArray(p.matrix) && p.matrix.length === 25 ? p.matrix : Array(25).fill(0));
+    setPatchName(p.name);
+  }, [synthPresets]);
+  const deleteSynthPreset = useCallback((name: string) => {
+    setSynthPresets(prev => {
+      const next = prev.filter(p => p.name !== name);
+      post({ type: 'saveSynthPresets', value: next });
+      return next;
+    });
+  }, []);
+
+  // AI patch designer state
+  const [aiPatchBusy, setAiPatchBusy] = useState(false);
+  const [aiPatchError, setAiPatchError] = useState<string | null>(null);
+  const requestAiPatch = useCallback((desc: string) => {
+    setAiPatchBusy(true);
+    setAiPatchError(null);
+    post({ type: 'aiPatch', value: desc });
+  }, []);
+
+  /** Apply an AI-designed patch: map enum strings → indices, clamp floats,
+   *  update the UI state and push everything to the synth engine. */
+  const applyAiPatch = useCallback((p: any) => {
+    const num = (v: any, lo = 0, hi = 1): number | undefined =>
+      typeof v === 'number' && Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : undefined;
+    const idx = (v: any, list: readonly string[]): number | undefined => {
+      if (typeof v !== 'string') return undefined;
+      const lv = v.toLowerCase();
+      const i = list.findIndex(s => s === lv || lv.startsWith(s) || s.startsWith(lv));
+      return i >= 0 ? i : undefined;
+    };
+    const next: Partial<SynthParams> = {};
+    const t = (k: keyof SynthParams, v: number | undefined) => { if (v !== undefined) next[k] = v; };
+    t('oscType', idx(p.oscType, OSC_TYPES));
+    t('wave', num(p.wave));
+    t('timbre', num(p.timbre));
+    t('shape', num(p.shape));
+    t('glide', num(p.glide));
+    t('attack', num(p.attack));
+    t('decay', num(p.decay));
+    t('sustain', num(p.sustain));
+    t('release', num(p.release));
+    t('filterType', idx(p.filterType, ['lp', 'bp', 'hp']));
+    t('cutoff', num(p.cutoff));
+    t('resonance', num(p.resonance));
+    const ef = num(p.envFilter, -1, 1);
+    if (ef !== undefined) next.envFilter = (ef + 1) / 2;
+    t('lfoShape', idx(p.lfoShape, ['sine', 'tri', 'saw', 'square', 'sh']));
+    t('lfoRate', num(p.lfoRate));
+    if (typeof p.lfoSync === 'boolean') next.lfoSync = p.lfoSync ? 1 : 0;
+    t('cycMode', idx(p.cycMode, CYC_MODES));
+    t('cycRise', num(p.cycRise));
+    t('cycFall', num(p.cycFall));
+    t('cycHold', num(p.cycHold));
+    t('cycRiseShape', num(p.cycRiseShape));
+    t('cycFallShape', num(p.cycFallShape));
+    t('cycAmount', num(p.cycAmount));
+    t('arpMode', idx(p.arp, ['off', 'up', 'down', 'updown', 'random', 'order', 'pattern']));
+    const ao = num(p.arpOct, 1, 4);
+    if (ao !== undefined) next.arpOct = Math.round(ao);
+    t('arpDiv', idx(p.arpDiv, ARP_DIVS));
+    t('arpSwing', num(p.arpSwing));
+    t('arpGate', num(p.arpGate));
+    t('arpSpice', num(p.arpSpice));
+    if (typeof p.mono === 'boolean') next.monoMode = p.mono ? 1 : 0;
+    t('chorus', num(p.chorus));
+    t('space', num(p.space));
+    t('volume', num(p.volume));
+
+    setSynthParams(s => {
+      const merged = { ...s, ...next };
+      Object.entries(next).forEach(([k, v]) => post({ type: 'synthParam', key: k, value: v }));
+      return merged;
+    });
+
+    // Matrix routings: [{src, dest, amt}] → 25-cell grid.
+    const cells = Array(25).fill(0);
+    if (Array.isArray(p.matrix)) {
+      for (const r of p.matrix.slice(0, 8)) {
+        const s = idx(r?.src, MATRIX_SRC);
+        const d = idx(r?.dest, MATRIX_DST);
+        const a = num(r?.amt, -1, 1);
+        if (s !== undefined && d !== undefined && a !== undefined) cells[s * 5 + d] = a;
+      }
+    }
+    applyMatrix(cells);
+    setPatchName(typeof p.name === 'string' && p.name.trim() ? p.name.trim() : 'ai patch');
+  }, []);
+  const applyAiPatchRef = useRef(applyAiPatch);
+  applyAiPatchRef.current = applyAiPatch;
 
   // Punch-in FX pads: pointer-down engages, vertical drag rides the amount,
   // release disengages. Each pad remembers its last amount.
@@ -1708,6 +1856,20 @@ function App() {
         setAiHistory(h => [...h, { role: 'error', text }]);
         setAiLoading(false);
       }
+      if (state.aiPatchResult && typeof state.aiPatchResult === 'object') {
+        applyAiPatchRef.current(state.aiPatchResult);
+        setAiPatchBusy(false);
+        setAiPatchError(null);
+      }
+      if (typeof state.aiPatchError === 'string') {
+        setAiPatchError(state.aiPatchError);
+        setAiPatchBusy(false);
+      }
+      if (Array.isArray(state.savedSynthPresets)) {
+        setSynthPresets(state.savedSynthPresets.filter(
+          (p: any) => p && typeof p.name === 'string' && p.params,
+        ));
+      }
       if (typeof state.importedSession === 'string') {
         applyImportedSessionRef.current(state.importedSession);
       }
@@ -1858,7 +2020,10 @@ function App() {
       if (note < 0 || note > 127) return;
       pressedKeys.current.set(key, note);
       post({ type: 'kbdNote', note, on: true });
-      if (engineModeRef.current === 'lyria') selectLyriaScaleRef.current(note);
+      // In the instrument tab keys PLAY the synth — don't re-steer the Lyria scale.
+      if (engineModeRef.current === 'lyria' && mainTabRef.current !== 'instrument') {
+        selectLyriaScaleRef.current(note);
+      }
     };
 
     const handleUp = (e: KeyboardEvent) => {
@@ -2120,6 +2285,20 @@ function App() {
       <div className="jam-app-shell">
         <div className="jam-topbar">
           <div className="jam-topbar-left">
+            <div className="jam-mode-switch jam-main-tabs" aria-label="Main view">
+              <button
+                className={mainTab === 'jam' ? 'is-active' : ''}
+                onClick={() => setMainTab('jam')}
+              >
+                jam
+              </button>
+              <button
+                className={mainTab === 'instrument' ? 'is-active' : ''}
+                onClick={() => setMainTab('instrument')}
+              >
+                instrument
+              </button>
+            </div>
             <ModelSelector
               modelName={modelName}
               localModels={localModels}
@@ -2204,7 +2383,29 @@ function App() {
           </div>
         </div>
 
-        <div className="jam-main-grid">
+        {mainTab === 'instrument' && (
+          <InstrumentPanel
+            synth={synthParams}
+            matrix={synthMatrix}
+            onParam={setSynthParam}
+            onMatrix={setMatrixCell}
+            onDice={() => post({ type: 'synthDice' })}
+            patchName={patchName}
+            onPatchName={setPatchName}
+            presets={synthPresets}
+            factory={FACTORY_PRESETS}
+            onSavePreset={saveSynthPreset}
+            onLoadPreset={loadSynthPreset}
+            onDeletePreset={deleteSynthPreset}
+            octaveOffset={octaveOffset}
+            onOctave={(dir) => (dir < 0 ? handleOctaveDown() : handleOctaveUp())}
+            aiBusy={aiPatchBusy}
+            aiError={aiPatchError}
+            onAiPatch={requestAiPatch}
+          />
+        )}
+
+        <div className={`jam-main-grid${mainTab === 'instrument' ? ' is-tab-hidden' : ''}`}>
           <section className="jam-prompt-panel">
             <div className="jam-prompt-head">
               <div className="jam-prompt-titlebar">
@@ -2935,7 +3136,9 @@ function App() {
               : visualNote;
             if (note >= 0 && note <= 127) {
               post({ type: 'kbdNote', note, on: true });
-              if (engineModeRef.current === 'lyria') selectLyriaScaleFromNote(note);
+              if (engineModeRef.current === 'lyria' && mainTab !== 'instrument') {
+                selectLyriaScaleFromNote(note);
+              }
             }
           }}
           onNoteOff={(visualNote) => {

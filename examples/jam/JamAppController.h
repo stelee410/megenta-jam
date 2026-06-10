@@ -19,12 +19,17 @@
 #include <atomic>
 #include <cmath>
 #include "audio_level_processor.h"
+#include "JamSynth.h"
 
 using magentart::core::RealtimeRunner;
 
 // Shared state between audio/MIDI threads and the UI controller
 struct JamSharedState {
     std::atomic<bool> midiNotes[128] = {};
+
+    // Live-performance synth (Instrument tab). When `synth.active`, incoming
+    // notes route here instead of conditioning the generative engine.
+    JamSynth synth;
 
     static constexpr int VIZ_BUF_SIZE = 8192;
     float vizRing[VIZ_BUF_SIZE] = {};
