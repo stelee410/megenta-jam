@@ -545,8 +545,10 @@ static BOOL isDevServerRunning(void) {
     }
     else if ([type isEqualToString:@"aiPrompt"]) {
         NSString* idea = body[@"value"];
+        NSArray* history = body[@"history"];
         if ([idea isKindOfClass:[NSString class]] && idea.length > 0) {
-            [self handleAiPrompt:idea];
+            [self handleAiPrompt:idea
+                         history:([history isKindOfClass:[NSArray class]] ? history : @[])];
         }
     }
     else if ([type isEqualToString:@"exportSession"]) {
@@ -1147,7 +1149,7 @@ static const int kAudioPromptFrames = 160000; // 10s @ 16kHz
 // Turns a free-form idea (any language) into a concise English music prompt
 // tuned for this engine. Reuses the Lyria API key; runs off the main thread.
 
-- (void)handleAiPrompt:(NSString*)idea {
+- (void)handleAiPrompt:(NSString*)idea history:(NSArray*)history {
     NSString* apiKey = [[NSUserDefaults standardUserDefaults] stringForKey:@"Jam_LyriaApiKey"];
     if (apiKey.length == 0) {
         [self sendStateUpdate:@{@"aiPromptError": @"No API key — set it in the Lyria settings first"}];
@@ -1163,18 +1165,35 @@ static const int kAudioPromptFrames = 160000; // 10s @ 16kHz
 
     NSString* sys = @"You are a prompt engineer for a real-time music generation model. "
                      "Convert the user idea (any language) into ONE concise English music prompt. "
+                     "The chat is multi-turn: if the user asks for an adjustment (e.g. 'make it "
+                     "darker', 'add drums'), refine your PREVIOUS prompt rather than starting over. "
                      "Stack concrete descriptors: genre + instrument/texture + production/mood, "
                      "comma-separated. No tempo or key. Output ONLY the prompt text, lowercase, "
                      "no quotes, no explanation.";
+
+    // Build the messages: system + recent conversation history + the new idea.
+    NSMutableArray* messages = [NSMutableArray array];
+    [messages addObject:@{@"role": @"system", @"content": sys}];
+    for (NSDictionary* m in history) {
+        if (![m isKindOfClass:[NSDictionary class]]) continue;
+        NSString* role = m[@"role"];
+        NSString* text = m[@"text"];
+        if (![text isKindOfClass:[NSString class]] || text.length == 0) continue;
+        if ([role isEqualToString:@"user"]) {
+            [messages addObject:@{@"role": @"user", @"content": text}];
+        } else if ([role isEqualToString:@"ai"]) {
+            [messages addObject:@{@"role": @"assistant", @"content": text}];
+        }
+        // 'error' turns are skipped.
+    }
+    [messages addObject:@{@"role": @"user", @"content": idea}];
+
     NSDictionary* payload = @{
         @"model": @"c-music-express",
         @"max_tokens": @1200,
         @"temperature": @0.8,
         @"stream": @NO,
-        @"messages": @[
-            @{@"role": @"system", @"content": sys},
-            @{@"role": @"user", @"content": idea},
-        ],
+        @"messages": messages,
     };
     NSError* jsonErr = nil;
     NSData* bodyData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:&jsonErr];

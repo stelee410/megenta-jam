@@ -24,6 +24,8 @@ import { Turtle, Rabbit } from 'lucide-react';
 import { VisualLayer, VISUAL_PRESETS, FIRST_IMAGE_PRESET } from './VisualLayer';
 import type { VisualData } from './VisualLayer';
 import { CheatSheet } from './CheatSheet';
+import { ChatPanel } from './ChatPanel';
+import type { ChatMessage } from './ChatPanel';
 import {
   IconButton,
   MenuItem,
@@ -59,6 +61,11 @@ declare global {
 }
 
 const post = (msg: any) => window.webkit?.messageHandlers?.auHost?.postMessage(msg);
+
+// True while an IME (Chinese/Japanese/Korean) is composing — used to suppress
+// Enter so confirming a candidate doesn't accidentally submit/commit.
+const isComposingKey = (e: React.KeyboardEvent): boolean =>
+  e.nativeEvent.isComposing || (e.nativeEvent as KeyboardEvent).keyCode === 229;
 
 // ─── Computer keyboard → MIDI (Ableton Live layout) ──────────────────────────
 // Base row (lower octave): A S D F G H J = C D E F G A B, with W E T Y U as
@@ -357,6 +364,8 @@ function App() {
 
   // XY pad: 'prob' drives temperature/topK, 'filter' drives cutoff/resonance
   const [padMode, setPadMode] = useState<XYPadMode>('prob');
+  // Right panel view: the XY pad, or the Lyria GENERATE controls (cloud only).
+  const [rightView, setRightView] = useState<'xy' | 'gen'>('xy');
   const [padLatch, setPadLatch] = useState(true);
   const [isPadDragging, setIsPadDragging] = useState(false);
   const [filterPadPos, setFilterPadPos] = useState({ x: 0.5, y: 0.5 });
@@ -375,18 +384,21 @@ function App() {
     navigator.clipboard?.writeText(text).catch(() => {});  // best-effort web fallback
   }, []);
 
-  // AI prompt assist: free-form idea → engine-tuned prompt (agentllm / c-music-express).
-  const [aiResult, setAiResult] = useState<string | null>(null);
-  const [aiError, setAiError] = useState<string | null>(null);
+  // AI prompt chat: free-form idea → engine-tuned prompt (agentllm / c-music-express).
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [aiHistory, setAiHistory] = useState<ChatMessage[]>([]);
   const [aiLoading, setAiLoading] = useState(false);
   const generateAiPrompt = useCallback((idea: string) => {
     const t = idea.trim();
     if (!t || aiLoading) return;
-    setAiError(null);
-    setAiResult(null);
+    // Send the recent conversation so follow-ups ("make it darker") have context.
+    // The native side appends this new idea itself; cap to limit tokens.
+    const ctx = aiHistory.slice(-8).map(m => ({ role: m.role, text: m.text }));
+    setAiHistory(h => [...h, { role: 'user', text: t }]);
     setAiLoading(true);
-    post({ type: 'aiPrompt', value: t });
-  }, [aiLoading]);
+    post({ type: 'aiPrompt', value: t, history: ctx });
+  }, [aiLoading, aiHistory]);
+  const clearChat = useCallback(() => setAiHistory([]), []);
 
   // ─── Visual layer (audio-reactive shader) ─────────────────────────────────
   const [visualMode, setVisualMode] = useState<'off' | 'bg' | 'full'>('off');
@@ -413,6 +425,10 @@ function App() {
   // so no session is left open (and billing) while idle.
   const [engineMode, setEngineMode] = useState<'local' | 'lyria'>('local');
   const [lyriaStatus, setLyriaStatus] = useState('idle');
+  // The GEN view only exists in cloud mode; fall back to the XY pad otherwise.
+  useEffect(() => {
+    if (engineMode !== 'lyria') setRightView('xy');
+  }, [engineMode]);
   // Per-channel indicator state for the dual cloud streams: 'off'|'warming'|'playing'.
   const [lyriaChannels, setLyriaChannels] = useState<string[]>(['off', 'off']);
 
@@ -810,6 +826,7 @@ function App() {
     // The Collider-style surface manages its own editing/keyboard handling.
     if (promptMode === 'mix' && mixLayout === 'surface') return;
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (isComposingKey(e)) return; // don't capture keys mid IME composition
 
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -1636,12 +1653,13 @@ function App() {
         setRecordingState(state.recordingState);
       }
       if (typeof state.aiPromptResult === 'string') {
-        setAiResult(state.aiPromptResult);
-        setAiError(null);
+        const text = state.aiPromptResult;
+        setAiHistory(h => [...h, { role: 'ai', text }]);
         setAiLoading(false);
       }
       if (typeof state.aiPromptError === 'string') {
-        setAiError(state.aiPromptError);
+        const text = state.aiPromptError;
+        setAiHistory(h => [...h, { role: 'error', text }]);
         setAiLoading(false);
       }
       if (typeof state.importedSession === 'string') {
@@ -1842,15 +1860,10 @@ function App() {
     { key: 'outGain', label: 'Gain', value: performance.outGain },
   ];
 
-  // Lyria live-steering panel — floats at the top-left of the prompt stage in
-  // cloud mode (keeps the right FX column free for other uses).
-  const lyriaGeneratePanel = engineMode === 'lyria' ? (
-    <div className="jam-lyria-float">
-      <div className="jam-performance-head">
-        <span>GENERATE</span>
-        <span>Lyria</span>
-      </div>
-      <div className="jam-lyria-float-knobs">
+  // Lyria live-steering content — shown in the right panel's GEN tab (cloud mode).
+  const lyriaGenerateContent = (
+    <>
+      <div className="jam-lyria-knobs">
         {([
           { key: 'density', label: 'Density', value: lyriaParams.density },
           { key: 'brightness', label: 'Bright', value: lyriaParams.brightness },
@@ -1901,8 +1914,8 @@ function App() {
           mute drums
         </button>
       </div>
-    </div>
-  ) : null;
+    </>
+  );
 
   // XY pad dot position + readout for the active mode
   const padPos = padMode === 'filter'
@@ -2135,7 +2148,13 @@ function App() {
             >
               Cheats
             </button>
-            <button className="jam-chat-button">Chat</button>
+            <button
+              className={`jam-chat-button ${isChatOpen ? 'is-active' : ''}`}
+              title="AI prompt chat"
+              onClick={() => setIsChatOpen(o => !o)}
+            >
+              Chat
+            </button>
           </div>
         </div>
 
@@ -2287,7 +2306,6 @@ function App() {
                   onExitFull={() => setVisualMode('bg')}
                 />
               )}
-              {lyriaGeneratePanel}
               {(promptMode === 'single' || promptMode === 'solo') && (
                 <div className="jam-single-prompt">
                   <div className="jam-single-kicker">{activeModeLabel}</div>
@@ -2303,7 +2321,7 @@ function App() {
                       onFocus={(e) => autoGrowSingle(e.currentTarget)}
                       onChange={(e) => { setDraftText(e.target.value); setIsPromptEdited(true); autoGrowSingle(e.currentTarget); }}
                       onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
+                        if (e.key === 'Enter' && !e.shiftKey && !isComposingKey(e)) {
                           e.preventDefault();
                           commitDraftText();
                         } else if (e.key === 'Escape') {
@@ -2533,7 +2551,7 @@ function App() {
                         onClick={(e) => e.stopPropagation()}
                         onChange={(e) => { setDraftText(e.target.value); setIsPromptEdited(true); }}
                         onKeyDown={(e) => {
-                          if (e.key === 'Enter') { e.preventDefault(); commitMixEdit(); }
+                          if (e.key === 'Enter' && !isComposingKey(e)) { e.preventDefault(); commitMixEdit(); }
                           else if (e.key === 'Escape') { e.preventDefault(); setDraftText(''); setIsPromptEditing(false); }
                           else if (e.key === 'Tab') {
                             e.preventDefault();
@@ -2593,7 +2611,7 @@ function App() {
                 onBlur={commitBpmText}
                 onKeyDown={(e) => {
                   e.stopPropagation();
-                  if (e.key === 'Enter') {
+                  if (e.key === 'Enter' && !isComposingKey(e)) {
                     commitBpmText();
                     (e.target as HTMLInputElement).blur();
                   }
@@ -2604,59 +2622,80 @@ function App() {
 
             <div className="jam-performance-panel">
               <div className="jam-performance-head">
-                <div className="jam-pad-mode-switch" aria-label="XY pad mode">
-                  <button
-                    className={padMode === 'prob' ? 'is-active' : ''}
-                    onClick={() => setPadMode('prob')}
-                  >
-                    Prob
-                  </button>
-                  <button
-                    className={padMode === 'filter' ? 'is-active' : ''}
-                    onClick={() => setPadMode('filter')}
-                  >
-                    Filter
-                  </button>
+                <div className="jam-pad-mode-switch" aria-label="Right panel view">
+                  {rightView === 'xy' && (
+                    <>
+                      <button
+                        className={padMode === 'prob' ? 'is-active' : ''}
+                        onClick={() => setPadMode('prob')}
+                      >
+                        Prob
+                      </button>
+                      <button
+                        className={padMode === 'filter' ? 'is-active' : ''}
+                        onClick={() => setPadMode('filter')}
+                      >
+                        Filter
+                      </button>
+                    </>
+                  )}
+                  {engineMode === 'lyria' && (
+                    <button
+                      className={`jam-gen-tab ${rightView === 'gen' ? 'is-active' : ''}`}
+                      onClick={() => setRightView(v => (v === 'gen' ? 'xy' : 'gen'))}
+                      title="Toggle XY pad / Lyria GENERATE controls"
+                    >
+                      {rightView === 'gen' ? 'XY Pad' : 'Gen'}
+                    </button>
+                  )}
                 </div>
-                <span>{padReadout}</span>
+                <span>{rightView === 'gen' ? 'Generate' : ''}</span>
               </div>
-              <div
-                ref={xyPadRef}
-                className="jam-xy-pad"
-                style={{
-                  '--xy-x': `${padPos.x * 100}%`,
-                  '--xy-y': `${(1 - padPos.y) * 100}%`,
-                } as React.CSSProperties}
-                onPointerDown={(e) => {
-                  e.currentTarget.setPointerCapture(e.pointerId);
-                  setIsPadDragging(true);
-                  handleXYPointer(e);
-                }}
-                onPointerMove={(e) => {
-                  if (e.buttons !== 1) return;
-                  handleXYPointer(e);
-                }}
-                onPointerUp={handlePadRelease}
-                onPointerCancel={handlePadRelease}
-              >
-                <div className="jam-probability-crosshair-x" />
-                <div className="jam-probability-crosshair-y" />
-                <div
-                  className={`jam-xy-dot${isPadDragging ? '' : ' is-anim'}`}
-                  style={{
-                    left: `${padPos.x * 100}%`,
-                    top: `${(1 - padPos.y) * 100}%`,
-                  }}
-                />
-              </div>
-              <label className="jam-latch-row">
-                <input
-                  type="checkbox"
-                  checked={padLatch}
-                  onChange={(e) => setPadLatch(e.target.checked)}
-                />
-                latch
-              </label>
+
+              {rightView === 'gen' ? (
+                lyriaGenerateContent
+              ) : (
+                <>
+                  <div
+                    ref={xyPadRef}
+                    className="jam-xy-pad"
+                    style={{
+                      '--xy-x': `${padPos.x * 100}%`,
+                      '--xy-y': `${(1 - padPos.y) * 100}%`,
+                    } as React.CSSProperties}
+                    onPointerDown={(e) => {
+                      e.currentTarget.setPointerCapture(e.pointerId);
+                      setIsPadDragging(true);
+                      handleXYPointer(e);
+                    }}
+                    onPointerMove={(e) => {
+                      if (e.buttons !== 1) return;
+                      handleXYPointer(e);
+                    }}
+                    onPointerUp={handlePadRelease}
+                    onPointerCancel={handlePadRelease}
+                  >
+                    <div className="jam-probability-crosshair-x" />
+                    <div className="jam-probability-crosshair-y" />
+                    <div
+                      className={`jam-xy-dot${isPadDragging ? '' : ' is-anim'}`}
+                      style={{
+                        left: `${padPos.x * 100}%`,
+                        top: `${(1 - padPos.y) * 100}%`,
+                      }}
+                    />
+                    <div className="jam-xy-readout">{padReadout}</div>
+                  </div>
+                  <label className="jam-latch-row">
+                    <input
+                      type="checkbox"
+                      checked={padLatch}
+                      onChange={(e) => setPadLatch(e.target.checked)}
+                    />
+                    latch
+                  </label>
+                </>
+              )}
             </div>
 
             <div className="jam-performance-panel jam-fx-panel">
@@ -2884,10 +2923,18 @@ function App() {
         onClose={() => setIsCheatOpen(false)}
         onCopy={copyPromptText}
         onApply={applyCheatPrompt}
-        onAiGenerate={generateAiPrompt}
-        aiResult={aiResult}
-        aiError={aiError}
-        aiLoading={aiLoading}
+      />
+
+      {/* ── AI prompt chat (drawer overlay) ── */}
+      <ChatPanel
+        open={isChatOpen}
+        onClose={() => setIsChatOpen(false)}
+        history={aiHistory}
+        loading={aiLoading}
+        onGenerate={generateAiPrompt}
+        onClear={clearChat}
+        onCopy={copyPromptText}
+        onApply={applyCheatPrompt}
       />
 
       {/* ── Settings Panel (drawer overlay) ── */}

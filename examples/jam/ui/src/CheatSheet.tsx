@@ -146,23 +146,14 @@ export function CheatSheet({
   onClose,
   onCopy,
   onApply,
-  onAiGenerate,
-  aiResult,
-  aiError,
-  aiLoading,
 }: {
   open: boolean;
   onClose: () => void;
   onCopy: (text: string) => void;
   onApply?: (text: string) => void;
-  onAiGenerate?: (idea: string) => void;
-  aiResult?: string | null;
-  aiError?: string | null;
-  aiLoading?: boolean;
 }) {
   const [copied, setCopied] = useState<string | null>(null);
   const [query, setQuery] = useState('');
-  const [idea, setIdea] = useState('');
 
   const copy = (text: string) => {
     onCopy(text);
@@ -201,66 +192,6 @@ export function CheatSheet({
         />
 
         <div className="jam-cheat-body">
-          {onAiGenerate && (
-            <div className="jam-cheat-ai">
-              <div className="jam-cheat-section-title">AI assist</div>
-              <p className="jam-cheat-blurb">
-                Describe what you want in any language — AI turns it into an engine-tuned prompt.
-              </p>
-              <textarea
-                className="jam-cheat-ai-input"
-                placeholder="e.g. 下雨天咖啡馆里的慵懒爵士 / a tense chase scene at night"
-                value={idea}
-                rows={2}
-                onChange={e => setIdea(e.target.value)}
-                onKeyDown={e => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    if (idea.trim() && !aiLoading) onAiGenerate(idea);
-                  }
-                }}
-              />
-              <div className="jam-cheat-ai-row">
-                <button
-                  className="jam-cheat-ai-go"
-                  disabled={!idea.trim() || !!aiLoading}
-                  onClick={() => onAiGenerate(idea)}
-                >
-                  {aiLoading ? 'generating…' : 'generate'}
-                </button>
-              </div>
-              {aiError && <div className="jam-cheat-ai-error">{aiError}</div>}
-              {aiResult && (
-                <div className="jam-cheat-ai-result">
-                  <button
-                    className="jam-cheat-text"
-                    title="Copy prompt"
-                    onClick={() => copy(aiResult)}
-                  >
-                    {aiResult}
-                  </button>
-                  <div className="jam-cheat-actions">
-                    {onApply && (
-                      <button
-                        className="jam-cheat-mini"
-                        title="Use this prompt now"
-                        onClick={() => onApply(aiResult)}
-                      >
-                        use
-                      </button>
-                    )}
-                    <button
-                      className="jam-cheat-mini"
-                      title="Copy to clipboard"
-                      onClick={() => copy(aiResult)}
-                    >
-                      {copied === aiResult ? 'copied' : 'copy'}
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
           {sections.map(section => (
             <div className="jam-cheat-section" key={section.title}>
               <div className="jam-cheat-section-title">{section.title}</div>
