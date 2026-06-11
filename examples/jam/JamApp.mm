@@ -380,6 +380,7 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
     JamSharedState _sharedState;
     AVAudioEngine* _audioEngine;
     AVAudioSourceNode* _sourceNode;
+    AVAudioSourceNodeRenderBlock _renderBlock;
     MIDIClientRef _midiClient;
     MIDIPortRef _midiInputPort;
     MIDIEndpointRef _midiVirtualDest;
@@ -521,13 +522,18 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
         }
     }
 
-    _sourceNode = [[AVAudioSourceNode alloc]
-        initWithFormat:format
-        renderBlock:^OSStatus(BOOL* isSilence, const AudioTimeStamp* timestamp,
-                              AVAudioFrameCount frameCount, AudioBufferList* outputData) {
-        float* outL = (float*)outputData->mBuffers[0].mData;
-        float* outR = (outputData->mNumberBuffers > 1)
-                      ? (float*)outputData->mBuffers[1].mData : outL;
+    _renderBlock = ^OSStatus(BOOL* isSilence, const AudioTimeStamp* timestamp,
+                             AVAudioFrameCount frameCount, AudioBufferList* outputData) {
+        if (frameCount > (AVAudioFrameCount)JamSharedState::kBusMax ||
+            outputData->mNumberBuffers == 0) {
+            *isSilence = YES;
+            return noErr;
+        }
+        // Everything renders into internal busses; the tail of this block
+        // distributes them onto the device channels per the routing masks.
+        float* outL = shared->busL;
+        float* outR = shared->busR;
+        memset(shared->clickBus, 0, frameCount * sizeof(float));
 
         if (useLyria->load(std::memory_order_relaxed)) {
             // Cloud engine: the conductor mixes its two channels (crossfading
@@ -666,8 +672,7 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                         const float c = sinf(shared->clickPhase * 2.0f * (float)M_PI)
                                         * shared->clickEnv * 0.5f;
                         shared->clickEnv *= 0.9988f;   // ~25 ms decay
-                        outL[i] += c;
-                        outR[i] += c;
+                        shared->clickBus[i] += c;
                     }
                 }
                 shared->countInLeft.store(ci, std::memory_order_relaxed);
@@ -834,8 +839,7 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                             const float c = sinf(shared->clickPhase * 2.0f * (float)M_PI)
                                             * shared->clickEnv * 0.4f;
                             shared->clickEnv *= 0.9988f;
-                            l += c;
-                            r += c;
+                            shared->clickBus[i] += c;
                         }
                     }
                     outL[i] += l;
@@ -860,11 +864,47 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
         }
 
         shared->pushAudioSamples(outL, outR, frameCount);
-        return noErr;
-    }];
 
-    [_audioEngine attachNode:_sourceNode];
-    [_audioEngine connect:_sourceNode to:_audioEngine.mainMixerNode format:format];
+        // ── Distribute busses → device channels per the routing masks ──
+        {
+            const int nch = (int)outputData->mNumberBuffers;
+            const uint32_t mMask = shared->mainOutMask.load(std::memory_order_relaxed);
+            const uint32_t cMask = shared->clickOutMask.load(std::memory_order_relaxed);
+            int sel[32];
+            int nSel = 0;
+            for (int c = 0; c < nch && c < 32; ++c) {
+                float* dst = (float*)outputData->mBuffers[c].mData;
+                if (dst) memset(dst, 0, frameCount * sizeof(float));
+                if (mMask & (1u << c)) sel[nSel++] = c;
+            }
+            // Main: selected channels alternate L/R in ascending order;
+            // a single selected channel gets the mono sum.
+            for (int k = 0; k < nSel; ++k) {
+                float* dst = (float*)outputData->mBuffers[sel[k]].mData;
+                if (!dst) continue;
+                if (nSel == 1) {
+                    for (AVAudioFrameCount i = 0; i < frameCount; ++i) {
+                        dst[i] += (outL[i] + outR[i]) * 0.5f;
+                    }
+                } else {
+                    const float* src = (k % 2 == 0) ? outL : outR;
+                    for (AVAudioFrameCount i = 0; i < frameCount; ++i) dst[i] += src[i];
+                }
+            }
+            // Click: mono, added to every selected channel.
+            for (int c = 0; c < nch && c < 32; ++c) {
+                if (!(cMask & (1u << c))) continue;
+                float* dst = (float*)outputData->mBuffers[c].mData;
+                if (!dst) continue;
+                for (AVAudioFrameCount i = 0; i < frameCount; ++i) {
+                    dst[i] += shared->clickBus[i];
+                }
+            }
+        }
+        return noErr;
+    };
+
+    [self connectSourceNodeForCurrentDevice];
 
     // When the output device changes (plug in headphones, switch speakers,
     // (dis)connect Bluetooth), AVAudioEngine stops itself and posts this
@@ -881,30 +921,44 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
     }
 }
 
+// (Re)create the source node sized to the CURRENT output device's channel
+// count, so multichannel interfaces expose every output to the router.
+- (void)connectSourceNodeForCurrentDevice {
+    AVAudioFormat* devFmt = [_audioEngine.outputNode outputFormatForBus:0];
+    UInt32 ch = devFmt.channelCount;
+    if (ch < 2) ch = 2;
+    if (ch > 16) ch = 16;
+    AVAudioFormat* srcFmt = [[AVAudioFormat alloc]
+        initStandardFormatWithSampleRate:48000.0 channels:ch];
+    if (_sourceNode) [_audioEngine detachNode:_sourceNode];
+    _sourceNode = [[AVAudioSourceNode alloc] initWithFormat:srcFmt
+                                                renderBlock:_renderBlock];
+    [_audioEngine attachNode:_sourceNode];
+    [_audioEngine connect:_sourceNode to:_audioEngine.mainMixerNode format:srcFmt];
+    if (devFmt.channelCount >= 2) {
+        [_audioEngine connect:_audioEngine.mainMixerNode
+                           to:_audioEngine.outputNode format:devFmt];
+    }
+    _sharedState.outChannels.store((int)ch, std::memory_order_relaxed);
+    NSLog(@"Jam: source node connected — %u output channels @ %.0f Hz device rate",
+          (unsigned)ch, devFmt.sampleRate);
+}
+
 - (void)handleAudioEngineConfigChange:(NSNotification*)note {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!self->_audioEngine) return;
         if (self->_audioEngine.isRunning) return;  // already recovered
-        NSLog(@"Jam: output device changed — restarting AVAudioEngine");
-        NSError* err = nil;
-        if ([self->_audioEngine startAndReturnError:&err]) {
-            NSLog(@"Jam: AVAudioEngine restarted on new device");
-            return;
-        }
-        // Restart failed: the graph may have been torn down. Reconnect the
-        // source node (fixed 48 kHz; the mixer resamples to the device) and retry.
-        NSLog(@"Jam: restart failed (%@) — reconnecting source node", err);
+        NSLog(@"Jam: output device changed — rebuilding graph for the new device");
         @try {
-            AVAudioFormat* fmt = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:48000.0 channels:2];
-            [self->_audioEngine connect:self->_sourceNode to:self->_audioEngine.mainMixerNode format:fmt];
+            [self connectSourceNodeForCurrentDevice];
         } @catch (NSException* e) {
-            NSLog(@"Jam: source reconnect threw: %@", e);
+            NSLog(@"Jam: graph rebuild threw: %@", e);
         }
-        err = nil;
+        NSError* err = nil;
         if (![self->_audioEngine startAndReturnError:&err]) {
-            NSLog(@"Jam: AVAudioEngine restart retry failed: %@", err);
+            NSLog(@"Jam: AVAudioEngine restart failed: %@", err);
         } else {
-            NSLog(@"Jam: AVAudioEngine restarted after reconnect");
+            NSLog(@"Jam: AVAudioEngine restarted on new device");
         }
     });
 }

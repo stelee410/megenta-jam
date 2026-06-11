@@ -64,6 +64,9 @@ export interface StudioState {
   playhead: { pos: number; len: number };
   countIn: 0 | 4 | 8;         // 预备拍 beats before playback
   click: boolean;             // metronome during playback
+  outChannels: number;        // device output channel count
+  routeMain: number;          // bitmask of channels carrying the main mix
+  routeClick: number;         // bitmask of channels carrying the click
   sepEngine: string;          // 'htdemucs' | 'hpss' | ''
   sepModel: { present: boolean; sources: number; downloading: boolean; pct: number; mb: number };
   error: string | null;
@@ -88,6 +91,7 @@ export const STUDIO_INIT: StudioState = {
   mixer: Array.from({ length: 8 }, () => ({ mute: false, solo: false, gain: 1 })),
   playhead: { pos: 0, len: 0 },
   countIn: 0, click: false,
+  outChannels: 2, routeMain: 0x3, routeClick: 0x3,
   sepEngine: '', sepModel: { present: false, sources: 0, downloading: false, pct: 0, mb: 0 },
   error: null, notice: null,
 };
@@ -172,6 +176,7 @@ export function StudioPanel({
   onTransport,
   onCountIn,
   onClick,
+  onRoute,
   onMix,
   onSeek,
   onImportStem,
@@ -206,6 +211,7 @@ export function StudioPanel({
   onTransport: (action: 'play' | 'pause' | 'restart') => void;
   onCountIn: (beats: 0 | 4 | 8) => void;
   onClick: (on: boolean) => void;
+  onRoute: (patch: { main?: number; click?: number }) => void;
   onMix: (idx: number, patch: { mute?: boolean; solo?: boolean; gain?: number }) => void;
   onSeek: (sec: number) => void;
   onImportStem: (idx: number) => void;
@@ -236,6 +242,7 @@ export function StudioPanel({
   // ✨ AI patch prompt dialog: which lane is being asked, + the user's text.
   const [aiAsk, setAiAsk] = useState<number | null>(null);
   const [aiText, setAiText] = useState('');
+  const [routeOpen, setRouteOpen] = useState(false);
 
   const songOn = s.playMode === 'song';
   const stemsLoaded = s.stems.some(x => x.wave.length > 0 || x.notes > 0 || x.playSrc === 'midi');
@@ -418,6 +425,54 @@ export function StudioPanel({
           >
             ♩ click
           </button>
+          <span className="pgm-route">
+            <button
+              className={`pgm-mini ${(s.routeMain !== 0x3 || s.routeClick !== 0x3) ? 'is-active' : ''}`}
+              onClick={() => setRouteOpen(o => !o)}
+              title="输出路由：主混音和 click 可分别选择设备输出通道（如 click 单独走耳返）"
+            >
+              🔈 路由
+            </button>
+            {routeOpen && (
+              <div className="pgm-route-pop">
+                <div className="pgm-route-head">
+                  <span>输出通道</span>
+                  <span>主输出</span>
+                  <span>CLICK</span>
+                </div>
+                {Array.from({ length: s.outChannels }, (_, c) => (
+                  <div className="pgm-route-row" key={c}>
+                    <span>Output {c + 1}</span>
+                    <input
+                      type="checkbox"
+                      checked={(s.routeMain & (1 << c)) !== 0}
+                      onChange={(e) => {
+                        const next = e.target.checked
+                          ? s.routeMain | (1 << c)
+                          : s.routeMain & ~(1 << c);
+                        if (next !== 0) onRoute({ main: next });
+                      }}
+                    />
+                    <input
+                      type="checkbox"
+                      checked={(s.routeClick & (1 << c)) !== 0}
+                      onChange={(e) => {
+                        const next = e.target.checked
+                          ? s.routeClick | (1 << c)
+                          : s.routeClick & ~(1 << c);
+                        if (next !== 0) onRoute({ click: next });
+                      }}
+                    />
+                  </div>
+                ))}
+                <div className="pgm-route-hint">
+                  主输出按勾选顺序交替 L/R（只选一个 = 单声道）；
+                  click 为单声道，发往所有勾选通道。
+                  {s.outChannels <= 2 ? ' 当前设备只有 2 个输出通道，接多通道声卡后这里会自动列出。' : ''}
+                </div>
+              </div>
+            )}
+          </span>
         </div>
       )}
 

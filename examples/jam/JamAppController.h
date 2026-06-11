@@ -66,6 +66,16 @@ struct JamSharedState {
     std::atomic<int> stemBarPhase{0};      // beat index 0..3 that is a downbeat
     // render-local click synth state:
     float clickPhase = 0.0f, clickEnv = 0.0f, clickFreq = 1000.0f;
+    // Output routing: the main mix and the click can target different device
+    // channels (e.g. main → outs 1/2 to FOH, click → out 3 to the drummer's
+    // ear). Bit c of a mask = device output channel c. The render block
+    // produces internal busses and distributes them per these masks.
+    static constexpr int kBusMax = 8192;
+    std::atomic<int> outChannels{2};            // current device channel count
+    std::atomic<uint32_t> mainOutMask{0x3};     // default: channels 1+2
+    std::atomic<uint32_t> clickOutMask{0x3};
+    float busL[kBusMax] = {}, busR[kBusMax] = {};   // main stereo bus
+    float clickBus[kBusMax] = {};                   // mono click bus
     // Per-stem MIDI lanes: each melodic stem (1..5 — bass, other, vocals,
     // guitar, piano) can switch its playback source between the original
     // audio and a MIDI clip rendered by a dedicated synth instance with a

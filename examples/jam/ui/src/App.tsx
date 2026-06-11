@@ -1979,6 +1979,16 @@ function App() {
         setComposeBusy(false);
         setComposeError(state.aiComposeError);
       }
+      if (typeof state.audioOuts === 'number') {
+        const ch = Math.max(2, Math.min(16, state.audioOuts));
+        setStudio(st => ({
+          ...st,
+          outChannels: ch,
+          // Drop routed bits beyond the new device's channels.
+          routeMain: (st.routeMain & ((1 << ch) - 1)) || 0x3,
+          routeClick: (st.routeClick & ((1 << ch) - 1)) || 0x3,
+        }));
+      }
       if (Array.isArray(state.studioLanes)) {
         const ls = state.studioLanes;
         setStudio(st => ({
@@ -2683,6 +2693,17 @@ function App() {
             onClick={(on) => {
               setStudio(st => ({ ...st, click: on }));
               post({ type: 'studioClick', on });
+            }}
+            onRoute={(patch) => {
+              setStudio(st => {
+                const next = {
+                  ...st,
+                  routeMain: patch.main ?? st.routeMain,
+                  routeClick: patch.click ?? st.routeClick,
+                };
+                post({ type: 'audioRoute', main: next.routeMain, click: next.routeClick });
+                return next;
+              });
             }}
             onMix={studioMix}
             onSeek={studioSeek}

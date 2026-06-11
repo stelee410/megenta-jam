@@ -119,6 +119,7 @@ static BOOL isDevServerRunning(void) {
     std::vector<JamSharedState::AuxEv> _laneEvBuf[8];  // render-thread event lists
     BOOL _lanePatched[8];                 // lane synth patch applied
     NSDictionary* _lanePatchInfo[8];      // chosen patch {name, origin, params, matrix}
+    int _lastPushedOutCh;
     tsf* _sfMaster;                       // master SoundFont (lanes share samples)
     BOOL _sfBusy;                         // download/load in flight
     NSString* _songName;
@@ -247,6 +248,12 @@ static BOOL isDevServerRunning(void) {
 
     // Send MIDI active notes and audio levels every frame
     if (shared) {
+        // Output channel count for the routing UI (pushed when it changes).
+        const int outCh = shared->outChannels.load(std::memory_order_relaxed);
+        if (outCh != _lastPushedOutCh) {
+            _lastPushedOutCh = outCh;
+            stateUpdate[@"audioOuts"] = @(outCh);
+        }
         NSMutableArray* notes = [NSMutableArray array];
         for (int i = 0; i < 128; i++) {
             if (shared->midiNotes[i].load(std::memory_order_relaxed)) {
@@ -776,6 +783,20 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
             } else {   // pause
                 sh->stemActive.store(false, std::memory_order_relaxed);
                 sh->countInLeft.store(0, std::memory_order_relaxed);
+            }
+        }
+    }
+    else if ([type isEqualToString:@"audioRoute"]) {
+        NSNumber* main = body[@"main"];
+        NSNumber* click = body[@"click"];
+        if (self.sharedState) {
+            if ([main isKindOfClass:[NSNumber class]] && main.unsignedIntValue != 0) {
+                self.sharedState->mainOutMask.store(main.unsignedIntValue,
+                                                    std::memory_order_relaxed);
+            }
+            if ([click isKindOfClass:[NSNumber class]] && click.unsignedIntValue != 0) {
+                self.sharedState->clickOutMask.store(click.unsignedIntValue,
+                                                     std::memory_order_relaxed);
             }
         }
     }
