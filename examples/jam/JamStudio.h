@@ -55,6 +55,101 @@ inline float medianOf(float* tmp, int n) {
 
 // ── Analysis ─────────────────────────────────────────────────────────────────
 
+// ── Beat grid: refined BPM + first-beat offset + bar (downbeat) phase ──
+// Comb folding of the onset envelope: the right tempo folds all beats into a
+// narrow phase bin; wrong tempos smear. Sub-BPM precision matters — a 0.3%
+// error drifts the click ~half a beat over a 3-minute song.
+struct BeatGrid {
+    float bpm = 120.0f;
+    double offsetSec = 0.0;   // time of the first beat
+    int barPhase = 0;         // beat index (0..3) after offset that is a downbeat
+};
+
+inline BeatGrid beatGrid(const float* mono, long n, float bpmHint) {
+    BeatGrid out;
+    out.bpm = (bpmHint >= 40.0f && bpmHint <= 300.0f) ? bpmHint : 120.0f;
+    const int hop = 512;
+    const float fps = kSR / (float)hop;
+    const long frames = n / hop;
+    if (frames < 400) return out;
+
+    // Onset envelope (same low-band energy flux as analyze()).
+    std::vector<float> env(frames, 0.0f);
+    {
+        float lp = 0.0f, prevE = 0.0f;
+        for (long f = 0; f < frames; ++f) {
+            float acc = 0.0f;
+            const float* x = mono + f * hop;
+            for (int i = 0; i < hop; ++i) {
+                lp += 0.026f * (x[i] - lp);
+                acc += lp * lp;
+            }
+            const float e = acc / hop;
+            env[f] = std::max(0.0f, e - prevE);
+            prevE = e;
+        }
+    }
+
+    // Comb search around the hint.
+    double bestScore = -1.0, bestP = 60.0 * fps / out.bpm;
+    double bestBin = 0.0;
+    std::vector<double> bins;
+    for (double bpm = out.bpm * 0.92; bpm <= out.bpm * 1.08; bpm += 0.02) {
+        const double P = 60.0 * fps / bpm;
+        const int nb = (int)P;
+        if (nb < 8) continue;
+        bins.assign(nb, 0.0);
+        for (long f = 0; f < frames; ++f) {
+            int b = (int)std::fmod((double)f, P);
+            if (b >= nb) b = nb - 1;
+            bins[b] += env[f];
+        }
+        double total = 1e-9, peak = 0.0;
+        int bi = 0;
+        for (int b = 0; b < nb; ++b) total += bins[b];
+        for (int b = 0; b < nb; ++b) {
+            const double v = bins[(b + nb - 1) % nb] + bins[b] + bins[(b + 1) % nb];
+            if (v > peak) { peak = v; bi = b; }
+        }
+        const double score = peak / total;
+        if (score > bestScore) {
+            bestScore = score;
+            bestP = P;
+            // Parabolic refinement of the peak bin.
+            const double y0 = bins[(bi + nb - 1) % nb], y1 = bins[bi],
+                         y2 = bins[(bi + 1) % nb];
+            const double den = y0 - 2 * y1 + y2;
+            bestBin = bi + ((std::fabs(den) > 1e-12) ? 0.5 * (y0 - y2) / den : 0.0);
+        }
+    }
+    out.bpm = (float)(60.0 * fps / bestP);
+    // +1.5 frames: the energy-flux peak sits slightly before the perceptual
+    // beat (envelope smoothing); measured ~25 ms early on synthetic clicks.
+    out.offsetSec = std::max(0.0, (bestBin + 1.5) / fps);
+
+    // Bar phase: which of the 4 beat positions carries the most onset energy
+    // when folded at the bar period (kick-heavy downbeats win).
+    {
+        const double P4 = bestP * 4.0;
+        double bestK = 0.0;
+        int k0 = 0;
+        for (int k = 0; k < 4; ++k) {
+            const double phase = std::fmod(bestBin + k * bestP, P4);
+            double acc = 0.0;
+            for (long f = 0; f < frames; ++f) {
+                double d = std::fmod((double)f - phase, P4);
+                if (d < 0) d += P4;
+                if (d < 1.5 || d > P4 - 1.5) acc += env[f];
+            }
+            if (acc > bestK) { bestK = acc; k0 = k; }
+        }
+        // The k0-th beat after the offset is a downbeat → normalize so accent
+        // hits when (beatIndex % 4) == barPhase.
+        out.barPhase = k0 % 4;
+    }
+    return out;
+}
+
 inline Analysis analyze(const float* mono, long n) {
     Analysis out;
     if (n < (long)kSR * 8) return out;

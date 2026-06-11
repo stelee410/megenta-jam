@@ -32,8 +32,74 @@ import {
 } from './InstrumentPanel';
 import type { SynthParams, SynthPreset } from './InstrumentPanel';
 import { FACTORY_PRESETS } from './SynthPresets';
-import { StudioPanel, STUDIO_INIT } from './StudioPanel';
+import { StudioPanel, STUDIO_INIT, GM_FAMILIES } from './StudioPanel';
 import type { StudioState } from './StudioPanel';
+
+/** Convert an AI patch (string enums, ±1 envFilter, {src,dest,amt} matrix)
+ *  into numeric SynthParams + a 25-cell matrix. Shared by the Instrument tab
+ *  and the per-stem MIDI lane patch designer. */
+function aiPatchToNumeric(p: any): {
+  params: Partial<SynthParams>; matrix: number[]; name: string;
+} {
+  const num = (v: any, lo = 0, hi = 1): number | undefined =>
+    typeof v === 'number' && Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : undefined;
+  const idx = (v: any, list: readonly string[]): number | undefined => {
+    if (typeof v !== 'string') return undefined;
+    const lv = v.toLowerCase();
+    const i = list.findIndex(s => s === lv || lv.startsWith(s) || s.startsWith(lv));
+    return i >= 0 ? i : undefined;
+  };
+  const next: Partial<SynthParams> = {};
+  const t = (k: keyof SynthParams, v: number | undefined) => { if (v !== undefined) next[k] = v; };
+  t('oscType', idx(p.oscType, OSC_TYPES));
+  t('wave', num(p.wave));
+  t('timbre', num(p.timbre));
+  t('shape', num(p.shape));
+  t('glide', num(p.glide));
+  t('attack', num(p.attack));
+  t('decay', num(p.decay));
+  t('sustain', num(p.sustain));
+  t('release', num(p.release));
+  t('filterType', idx(p.filterType, ['lp', 'bp', 'hp']));
+  t('cutoff', num(p.cutoff));
+  t('resonance', num(p.resonance));
+  const ef = num(p.envFilter, -1, 1);
+  if (ef !== undefined) next.envFilter = (ef + 1) / 2;
+  t('lfoShape', idx(p.lfoShape, ['sine', 'tri', 'saw', 'square', 'sh']));
+  t('lfoRate', num(p.lfoRate));
+  if (typeof p.lfoSync === 'boolean') next.lfoSync = p.lfoSync ? 1 : 0;
+  t('cycMode', idx(p.cycMode, CYC_MODES));
+  t('cycRise', num(p.cycRise));
+  t('cycFall', num(p.cycFall));
+  t('cycHold', num(p.cycHold));
+  t('cycRiseShape', num(p.cycRiseShape));
+  t('cycFallShape', num(p.cycFallShape));
+  t('cycAmount', num(p.cycAmount));
+  t('arpMode', idx(p.arp, ['off', 'up', 'down', 'updown', 'random', 'order', 'pattern']));
+  const ao = num(p.arpOct, 1, 4);
+  if (ao !== undefined) next.arpOct = Math.round(ao);
+  t('arpDiv', idx(p.arpDiv, ARP_DIVS));
+  t('arpSwing', num(p.arpSwing));
+  t('arpGate', num(p.arpGate));
+  t('arpSpice', num(p.arpSpice));
+  if (typeof p.mono === 'boolean') next.monoMode = p.mono ? 1 : 0;
+  t('chorus', num(p.chorus));
+  t('space', num(p.space));
+  t('volume', num(p.volume));
+
+  // Matrix routings: [{src, dest, amt}] → 25-cell grid.
+  const cells = Array(25).fill(0);
+  if (Array.isArray(p.matrix)) {
+    for (const r of p.matrix.slice(0, 8)) {
+      const s = idx(r?.src, MATRIX_SRC);
+      const d = idx(r?.dest, MATRIX_DST);
+      const a = num(r?.amt, -1, 1);
+      if (s !== undefined && d !== undefined && a !== undefined) cells[s * 5 + d] = a;
+    }
+  }
+  const name = typeof p.name === 'string' && p.name.trim() ? p.name.trim() : 'ai patch';
+  return { params: next, matrix: cells, name };
+}
 import {
   IconButton,
   MenuItem,
@@ -398,6 +464,8 @@ function App() {
 
   // ─── PGM studio: song → stems → model covers → packaged show program ──────
   const [studio, setStudio] = useState<StudioState>(STUDIO_INIT);
+  const studioRef = useRef(studio);
+  studioRef.current = studio;
   const studioSongToggle = useCallback((on: boolean) => {
     setStudio(st => ({ ...st, playMode: on ? 'song' : 'none' }));
     post({ type: 'studioPreview', index: -1, source: 'song', on });
@@ -472,6 +540,24 @@ function App() {
   // AI patch designer state
   const [aiPatchBusy, setAiPatchBusy] = useState(false);
   const [aiPatchError, setAiPatchError] = useState<string | null>(null);
+  // PGM lane targeted by an in-flight AI patch request (null = instrument tab)
+  const [aiLaneBusy, setAiLaneBusy] = useState<number | null>(null);
+  const aiLaneBusyRef = useRef<number | null>(null);
+  aiLaneBusyRef.current = aiLaneBusy;
+  // Open piano-roll clip (MIDI editor); notes arrive via the studioClip push.
+  const [studioClip, setStudioClip] =
+    useState<{ index: number; notes: [number, number, number, number][] } | null>(null);
+  const studioClipRef = useRef(studioClip);
+  studioClipRef.current = studioClip;
+  // AI MIDI composition (piano-roll ✨ 写MIDI)
+  const [composeBusy, setComposeBusy] = useState(false);
+  const [composeResult, setComposeResult] = useState<{
+    seq: number; mode: 'all' | 'continue';
+    notes: [number, number, number, number][];
+  } | null>(null);
+  const composeModeRef = useRef<'all' | 'continue'>('all');
+  const composeSeqRef = useRef(0);
+  const [composeError, setComposeError] = useState<string | null>(null);
   const requestAiPatch = useCallback((desc: string) => {
     setAiPatchBusy(true);
     setAiPatchError(null);
@@ -481,70 +567,14 @@ function App() {
   /** Apply an AI-designed patch: map enum strings → indices, clamp floats,
    *  update the UI state and push everything to the synth engine. */
   const applyAiPatch = useCallback((p: any) => {
-    const num = (v: any, lo = 0, hi = 1): number | undefined =>
-      typeof v === 'number' && Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : undefined;
-    const idx = (v: any, list: readonly string[]): number | undefined => {
-      if (typeof v !== 'string') return undefined;
-      const lv = v.toLowerCase();
-      const i = list.findIndex(s => s === lv || lv.startsWith(s) || s.startsWith(lv));
-      return i >= 0 ? i : undefined;
-    };
-    const next: Partial<SynthParams> = {};
-    const t = (k: keyof SynthParams, v: number | undefined) => { if (v !== undefined) next[k] = v; };
-    t('oscType', idx(p.oscType, OSC_TYPES));
-    t('wave', num(p.wave));
-    t('timbre', num(p.timbre));
-    t('shape', num(p.shape));
-    t('glide', num(p.glide));
-    t('attack', num(p.attack));
-    t('decay', num(p.decay));
-    t('sustain', num(p.sustain));
-    t('release', num(p.release));
-    t('filterType', idx(p.filterType, ['lp', 'bp', 'hp']));
-    t('cutoff', num(p.cutoff));
-    t('resonance', num(p.resonance));
-    const ef = num(p.envFilter, -1, 1);
-    if (ef !== undefined) next.envFilter = (ef + 1) / 2;
-    t('lfoShape', idx(p.lfoShape, ['sine', 'tri', 'saw', 'square', 'sh']));
-    t('lfoRate', num(p.lfoRate));
-    if (typeof p.lfoSync === 'boolean') next.lfoSync = p.lfoSync ? 1 : 0;
-    t('cycMode', idx(p.cycMode, CYC_MODES));
-    t('cycRise', num(p.cycRise));
-    t('cycFall', num(p.cycFall));
-    t('cycHold', num(p.cycHold));
-    t('cycRiseShape', num(p.cycRiseShape));
-    t('cycFallShape', num(p.cycFallShape));
-    t('cycAmount', num(p.cycAmount));
-    t('arpMode', idx(p.arp, ['off', 'up', 'down', 'updown', 'random', 'order', 'pattern']));
-    const ao = num(p.arpOct, 1, 4);
-    if (ao !== undefined) next.arpOct = Math.round(ao);
-    t('arpDiv', idx(p.arpDiv, ARP_DIVS));
-    t('arpSwing', num(p.arpSwing));
-    t('arpGate', num(p.arpGate));
-    t('arpSpice', num(p.arpSpice));
-    if (typeof p.mono === 'boolean') next.monoMode = p.mono ? 1 : 0;
-    t('chorus', num(p.chorus));
-    t('space', num(p.space));
-    t('volume', num(p.volume));
-
+    const { params: next, matrix: cells, name } = aiPatchToNumeric(p);
     setSynthParams(s => {
       const merged = { ...s, ...next };
       Object.entries(next).forEach(([k, v]) => post({ type: 'synthParam', key: k, value: v }));
       return merged;
     });
-
-    // Matrix routings: [{src, dest, amt}] → 25-cell grid.
-    const cells = Array(25).fill(0);
-    if (Array.isArray(p.matrix)) {
-      for (const r of p.matrix.slice(0, 8)) {
-        const s = idx(r?.src, MATRIX_SRC);
-        const d = idx(r?.dest, MATRIX_DST);
-        const a = num(r?.amt, -1, 1);
-        if (s !== undefined && d !== undefined && a !== undefined) cells[s * 5 + d] = a;
-      }
-    }
     applyMatrix(cells);
-    setPatchName(typeof p.name === 'string' && p.name.trim() ? p.name.trim() : 'ai patch');
+    setPatchName(name);
   }, []);
   const applyAiPatchRef = useRef(applyAiPatch);
   applyAiPatchRef.current = applyAiPatch;
@@ -1895,13 +1925,88 @@ function App() {
         setAiLoading(false);
       }
       if (state.aiPatchResult && typeof state.aiPatchResult === 'object') {
-        applyAiPatchRef.current(state.aiPatchResult);
+        const p = state.aiPatchResult;
+        if (typeof p._lane === 'number' && p._lane >= 1 && p._lane <= 5) {
+          // AI patch for a PGM MIDI lane: convert and ship the full patch to
+          // the lane synth (and into the next PGM package).
+          const { params, matrix, name } = aiPatchToNumeric(p);
+          post({
+            type: 'lanePatch', index: p._lane, name, origin: 'ai',
+            params: { ...DEFAULT_SYNTH, ...params }, matrix,
+          });
+          setAiLaneBusy(null);
+          setStudio(st => ({ ...st, notice: `✨ ${st.stems[p._lane]?.name}: ${name}` }));
+          window.setTimeout(() => setStudio(st => ({ ...st, notice: null })), 2600);
+        } else {
+          applyAiPatchRef.current(p);
+        }
         setAiPatchBusy(false);
         setAiPatchError(null);
       }
       if (typeof state.aiPatchError === 'string') {
         setAiPatchError(state.aiPatchError);
         setAiPatchBusy(false);
+        setAiLaneBusy(null);
+        if (aiLaneBusyRef.current !== null) {
+          const msg = state.aiPatchError;
+          setStudio(st => ({ ...st, error: msg }));
+          window.setTimeout(() => setStudio(st => ({ ...st, error: null })), 3600);
+        }
+      }
+      if (state.studioClip && typeof state.studioClip === 'object') {
+        const c = state.studioClip;
+        // Only honor the push if the editor is waiting for this lane.
+        if (studioClipRef.current?.index === Number(c.index)) {
+          setStudioClip({
+            index: Number(c.index),
+            notes: Array.isArray(c.notes) ? c.notes : [],
+          });
+        }
+      }
+      if (state.aiComposeResult && typeof state.aiComposeResult === 'object') {
+        const r = state.aiComposeResult;
+        setComposeBusy(false);
+        setComposeError(null);
+        if (Array.isArray(r.notes)) {
+          setComposeResult({
+            seq: ++composeSeqRef.current,
+            mode: composeModeRef.current,
+            notes: r.notes,
+          });
+        }
+      }
+      if (typeof state.aiComposeError === 'string') {
+        setComposeBusy(false);
+        setComposeError(state.aiComposeError);
+      }
+      if (Array.isArray(state.studioLanes)) {
+        const ls = state.studioLanes;
+        setStudio(st => ({
+          ...st,
+          stems: st.stems.map((x, i) => {
+            const l = ls[i];
+            if (!l || typeof l !== 'object') return x;
+            return {
+              ...x,
+              engine: Number(l.engine) === 1 ? 'sf2' as const : 'syn' as const,
+              sfProgram: Number(l.program ?? 0),
+              fxReverb: Number(l.reverb ?? 0),
+              fxEcho: Number(l.echo ?? 0),
+            };
+          }),
+        }));
+      }
+      if (Array.isArray(state.studioPatches)) {
+        const ps = state.studioPatches;
+        setStudio(st => ({
+          ...st,
+          stems: st.stems.map((x, i) => ({
+            ...x,
+            patch: ps[i] && typeof ps[i] === 'object' && typeof ps[i].name === 'string'
+              ? { name: String(ps[i].name), origin: String(ps[i].origin ?? 'user') }
+              : null,
+          })),
+        }));
       }
       if (Array.isArray(state.savedSynthPresets)) {
         setSynthPresets(state.savedSynthPresets.filter(
@@ -1976,6 +2081,20 @@ function App() {
           busy: stage !== 'ready',
         }));
       }
+      if (Array.isArray(state.studioChords)) {
+        const chords = state.studioChords;
+        setStudio(st => ({ ...st, chords }));
+      }
+      if (Array.isArray(state.studioSources)) {
+        const src = state.studioSources;
+        setStudio(st => ({
+          ...st,
+          stems: st.stems.map((x, i) => ({
+            ...x,
+            playSrc: Number(src[i] ?? 0) === 1 ? 'midi' as const : 'audio' as const,
+          })),
+        }));
+      }
       if (state.studioNotes && typeof state.studioNotes === 'object') {
         const { index, count, ribbon } = state.studioNotes;
         setStudio(st => ({
@@ -2038,16 +2157,36 @@ function App() {
       if (e.defaultPrevented) return;
       if (document.activeElement instanceof HTMLInputElement || document.activeElement instanceof HTMLTextAreaElement) return;
       if (promptSurfaceRef.current?.contains(document.activeElement)) return;
-      if (e.key === ' ') { e.preventDefault(); togglePlay(); }
+      if (e.key === ' ') {
+        e.preventDefault();
+        if (mainTab === 'pgm') {
+          // PGM console: space drives the stem transport, not the jam engine.
+          const st = studioRef.current;
+          if (st.stems.some(x => x.wave.length > 0) || st.playMode === 'stems') {
+            studioTransport(st.playMode === 'stems' && st.playing ? 'pause' : 'play');
+          }
+        } else {
+          togglePlay();
+        }
+      }
       if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
         e.preventDefault();
-        const step = e.shiftKey ? 0.1 : 0.02;
-        handleDeckBFaderChange(deckFader + (e.key === 'ArrowRight' ? step : -step));
+        if (mainTab === 'pgm') {
+          // Nudge the PGM playhead ±2 s (shift = ±10 s).
+          const st = studioRef.current;
+          if (st.playhead.len > 0) {
+            const step = (e.shiftKey ? 10 : 2) * (e.key === 'ArrowRight' ? 1 : -1);
+            studioSeek(Math.max(0, Math.min(st.playhead.len, st.playhead.pos + step)));
+          }
+        } else {
+          const step = e.shiftKey ? 0.1 : 0.02;
+          handleDeckBFaderChange(deckFader + (e.key === 'ArrowRight' ? step : -step));
+        }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isPlaying, deckFader]);
+  }, [isPlaying, deckFader, mainTab, studioTransport, studioSeek]);
 
   // ─── BPM lock: metronome pulse + prompt re-send ───────────────────────────
 
@@ -2537,10 +2676,126 @@ function App() {
             onSeparate={() => post({ type: 'studioSeparate' })}
             onSongToggle={studioSongToggle}
             onTransport={studioTransport}
+            onCountIn={(beats) => {
+              setStudio(st => ({ ...st, countIn: beats }));
+              post({ type: 'studioCountIn', beats });
+            }}
+            onClick={(on) => {
+              setStudio(st => ({ ...st, click: on }));
+              post({ type: 'studioClick', on });
+            }}
             onMix={studioMix}
             onSeek={studioSeek}
             onImportStem={(i) => post({ type: 'studioImportStem', index: i })}
             onTranscribe={(i) => post({ type: 'studioTranscribe', index: i })}
+            onDetectChords={() => post({ type: 'studioDetectChords' })}
+            onLaneSource={(idx, src) => {
+              post({ type: 'laneSource', index: idx, source: src === 'midi' ? 1 : 0 });
+            }}
+            patchOptions={[
+              ...synthPresets.map(p => ({ name: p.name, category: '我的音色' })),
+              ...FACTORY_PRESETS.map(p => ({ name: p.name, category: p.category })),
+            ]}
+            onLanePatch={(idx, name) => {
+              const p = synthPresets.find(x => x.name === name)
+                     ?? FACTORY_PRESETS.find(x => x.name === name);
+              if (!p) return;
+              post({
+                type: 'lanePatch', index: idx, name: p.name, origin: 'factory',
+                params: { ...DEFAULT_SYNTH, ...p.params },
+                matrix: Array.isArray(p.matrix) && p.matrix.length === 25
+                  ? p.matrix : Array(25).fill(0),
+              });
+            }}
+            onLaneAiPatch={(idx, userText) => {
+              const role: Record<number, string> = {
+                1: 'bass — a mono stage bass that locks tight with the kick',
+                2: 'harmonic backing — a wide warm pad that fills the mids without masking vocals',
+                3: 'vocal melody substitute — an expressive mono lead with vibrato',
+                4: 'guitar — a plucked/strummed character with quick decay',
+                5: 'piano/keys — percussive keys with a clean attack',
+              };
+              let ctx = `Song: "${studio.name}", key ${studio.key || 'unknown'}, ` +
+                `${studio.bpm || '?'} BPM. Design a patch for the ` +
+                `${studio.stems[idx]?.name} stem of this live show: ${role[idx]}. ` +
+                `It must sit in a live mix alongside the original stems.`;
+              if (userText) {
+                ctx += ` THE USER'S OWN SOUND REQUEST (takes priority over the ` +
+                  `role defaults above): ${userText}`;
+              }
+              setAiLaneBusy(idx);
+              post({ type: 'aiPatch', value: ctx, lane: idx });
+            }}
+            aiLaneBusy={aiLaneBusy}
+            onLaneEngine={(idx, engine) => {
+              // Optimistic toggle; native confirms via studioLanes.
+              setStudio(st => ({
+                ...st,
+                stems: st.stems.map((x, i) => i === idx ? { ...x, engine } : x),
+              }));
+              post({ type: 'laneEngine', index: idx, engine: engine === 'sf2' ? 1 : 0 });
+            }}
+            onLaneSfProgram={(idx, program) => {
+              setStudio(st => ({
+                ...st,
+                stems: st.stems.map((x, i) => i === idx ? { ...x, sfProgram: program } : x),
+              }));
+              post({ type: 'laneSfProgram', index: idx, program });
+            }}
+            onLaneFx={(idx, patch) => {
+              setStudio(st => ({
+                ...st,
+                stems: st.stems.map((x, i) => i === idx
+                  ? {
+                      ...x,
+                      fxReverb: patch.reverb ?? x.fxReverb,
+                      fxEcho: patch.echo ?? x.fxEcho,
+                    }
+                  : x),
+              }));
+              post({ type: 'laneFx', index: idx, ...patch });
+            }}
+            onLaneClear={(idx) => post({ type: 'laneClear', index: idx })}
+            clip={studioClip}
+            onClipOpen={(idx) => {
+              setStudioClip({ index: idx, notes: [] });   // open; notes arrive async
+              post({ type: 'laneClipGet', index: idx });
+            }}
+            onClipApply={(idx, notes) => {
+              post({ type: 'laneClipSet', index: idx, notes });
+            }}
+            onClipClose={() => setStudioClip(null)}
+            onClipAiCompose={(idx, prompt, mode) => {
+              const st = studioRef.current;
+              const beat = 60 / Math.max(40, st.bpm || 120);
+              const toBeat = (sec: number) => (sec / beat).toFixed(1);
+              const stem = st.stems[idx];
+              const instrument = stem?.engine === 'sf2'
+                ? GM_FAMILIES[Math.floor(stem.sfProgram / 8)]?.[1][stem.sfProgram % 8] ?? 'synth'
+                : (stem?.patch?.name ?? `${stem?.name} synth patch`);
+              const sections = st.sections.map(sec =>
+                `${sec.label} beats ${toBeat(sec.start)}-${toBeat(sec.end)}`).join(', ');
+              const chordLine = st.chords.filter(c => !c.none).map(c =>
+                `${toBeat(c.start)}:${c.label}`).join(' ');
+              let ctx =
+                `Song: "${st.name}", key ${st.key || 'unknown'}, ${st.bpm || 120} BPM, ` +
+                `total ${toBeat(st.duration)} beats (4/4).\n` +
+                `Sections: ${sections || 'unknown'}.\n` +
+                `Chords (beat:label): ${chordLine || 'none detected'}.\n` +
+                `Instrument: ${instrument} (lane "${stem?.name}").\n`;
+              if (mode === 'continue') {
+                ctx += `CONTINUE MODE: write only notes with start_beat >= ` +
+                  `${toBeat(st.playhead.pos)} (the current playhead).\n`;
+              }
+              ctx += `User request: ${prompt || '为这条轨写一段合适的乐句'}`;
+              composeModeRef.current = mode;
+              setComposeBusy(true);
+              setComposeError(null);
+              post({ type: 'aiCompose', value: ctx, lane: idx });
+            }}
+            composeBusy={composeBusy}
+            composeError={composeError}
+            composeResult={composeResult}
             onPackage={() => post({ type: 'studioPackage' })}
             onSepDownload={() => post({ type: 'studioSepDownload' })}
             onSepPick={() => post({ type: 'studioSepPick' })}

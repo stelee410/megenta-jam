@@ -20,6 +20,10 @@
  * A/B each cover against the original, and package everything as a live PGM.
  */
 
+import React, { useState } from 'react';
+import { MidiEditor } from './MidiEditor';
+import type { ClipNote } from './MidiEditor';
+
 export interface StudioSection {
   start: number;
   end: number;
@@ -33,6 +37,12 @@ export interface StudioStem {
   source: string;   // '' | 'neural' | 'hpss' | 'imported'
   notes: number;                       // transcription note count (0 = none)
   ribbon: Array<[number, number, number]>;   // [startSec, endSec, pitch]
+  playSrc: 'audio' | 'midi';           // playback source for this lane
+  patch: { name: string; origin: string } | null;  // lane synth patch
+  engine: 'syn' | 'sf2';               // instrument engine
+  sfProgram: number;                   // GM program (SF2 engine)
+  fxReverb: number;                    // lane insert FX 0..1
+  fxEcho: number;
 }
 
 export interface StudioState {
@@ -49,8 +59,11 @@ export interface StudioState {
   busy: boolean;
   playMode: 'none' | 'song' | 'stems';
   playing: boolean;
+  chords: Array<{ start: number; end: number; label: string; none?: boolean }>;
   mixer: { mute: boolean; solo: boolean; gain: number }[];
   playhead: { pos: number; len: number };
+  countIn: 0 | 4 | 8;         // 预备拍 beats before playback
+  click: boolean;             // metronome during playback
   sepEngine: string;          // 'htdemucs' | 'hpss' | ''
   sepModel: { present: boolean; sources: number; downloading: boolean; pct: number; mb: number };
   error: string | null;
@@ -61,19 +74,43 @@ export const STUDIO_INIT: StudioState = {
   loaded: false, name: '', duration: 0, bpm: 0, key: '',
   sections: [], songWave: [],
   stems: [
-    { name: 'drums', wave: [], source: '', notes: 0, ribbon: [] },
-    { name: 'bass', wave: [], source: '', notes: 0, ribbon: [] },
-    { name: 'other', wave: [], source: '', notes: 0, ribbon: [] },
-    { name: 'vocals', wave: [], source: '', notes: 0, ribbon: [] },
-    { name: 'guitar', wave: [], source: '', notes: 0, ribbon: [] },
-    { name: 'piano', wave: [], source: '', notes: 0, ribbon: [] },
+    { name: 'drums', wave: [], source: '', notes: 0, ribbon: [], playSrc: 'audio', patch: null, engine: 'syn', sfProgram: 0, fxReverb: 0, fxEcho: 0 },
+    { name: 'bass', wave: [], source: '', notes: 0, ribbon: [], playSrc: 'audio', patch: null, engine: 'syn', sfProgram: 0, fxReverb: 0, fxEcho: 0 },
+    { name: 'other', wave: [], source: '', notes: 0, ribbon: [], playSrc: 'audio', patch: null, engine: 'syn', sfProgram: 0, fxReverb: 0, fxEcho: 0 },
+    { name: 'vocals', wave: [], source: '', notes: 0, ribbon: [], playSrc: 'audio', patch: null, engine: 'syn', sfProgram: 0, fxReverb: 0, fxEcho: 0 },
+    { name: 'guitar', wave: [], source: '', notes: 0, ribbon: [], playSrc: 'audio', patch: null, engine: 'syn', sfProgram: 0, fxReverb: 0, fxEcho: 0 },
+    { name: 'piano', wave: [], source: '', notes: 0, ribbon: [], playSrc: 'audio', patch: null, engine: 'syn', sfProgram: 0, fxReverb: 0, fxEcho: 0 },
+    { name: 'aux1', wave: [], source: '', notes: 0, ribbon: [], playSrc: 'audio', patch: null, engine: 'syn', sfProgram: 40, fxReverb: 0, fxEcho: 0 },
+    { name: 'aux2', wave: [], source: '', notes: 0, ribbon: [], playSrc: 'audio', patch: null, engine: 'syn', sfProgram: 40, fxReverb: 0, fxEcho: 0 },
   ],
   stage: '', pct: 0, busy: false, playMode: 'none', playing: false,
-  mixer: Array.from({ length: 6 }, () => ({ mute: false, solo: false, gain: 1 })),
+  chords: [],
+  mixer: Array.from({ length: 8 }, () => ({ mute: false, solo: false, gain: 1 })),
   playhead: { pos: 0, len: 0 },
+  countIn: 0, click: false,
   sepEngine: '', sepModel: { present: false, sources: 0, downloading: false, pct: 0, mb: 0 },
   error: null, notice: null,
 };
+
+/** GM program names, grouped by family (index = program 0..127). */
+export const GM_FAMILIES: Array<[string, string[]]> = [
+  ['钢琴', ['Grand Piano', 'Bright Piano', 'Electric Grand', 'Honky-Tonk', 'E.Piano 1', 'E.Piano 2', 'Harpsichord', 'Clavinet']],
+  ['色彩打击', ['Celesta', 'Glockenspiel', 'Music Box', 'Vibraphone', 'Marimba', 'Xylophone', 'Tubular Bells', 'Dulcimer']],
+  ['风琴', ['Drawbar Organ', 'Percussive Organ', 'Rock Organ', 'Church Organ', 'Reed Organ', 'Accordion', 'Harmonica', 'Tango Accordion']],
+  ['吉他', ['Nylon Guitar', 'Steel Guitar', 'Jazz Guitar', 'Clean Guitar', 'Muted Guitar', 'Overdrive Guitar', 'Distortion Guitar', 'Guitar Harmonics']],
+  ['贝斯', ['Acoustic Bass', 'Finger Bass', 'Pick Bass', 'Fretless Bass', 'Slap Bass 1', 'Slap Bass 2', 'Synth Bass 1', 'Synth Bass 2']],
+  ['弦乐', ['Violin', 'Viola', 'Cello', 'Contrabass', 'Tremolo Strings', 'Pizzicato', 'Harp', 'Timpani']],
+  ['合奏', ['String Ens 1', 'String Ens 2', 'Synth Strings 1', 'Synth Strings 2', 'Choir Aahs', 'Voice Oohs', 'Synth Voice', 'Orchestra Hit']],
+  ['铜管', ['Trumpet', 'Trombone', 'Tuba', 'Muted Trumpet', 'French Horn', 'Brass Section', 'Synth Brass 1', 'Synth Brass 2']],
+  ['簧管', ['Soprano Sax', 'Alto Sax', 'Tenor Sax', 'Baritone Sax', 'Oboe', 'English Horn', 'Bassoon', 'Clarinet']],
+  ['笛', ['Piccolo', 'Flute', 'Recorder', 'Pan Flute', 'Blown Bottle', 'Shakuhachi', 'Whistle', 'Ocarina']],
+  ['合成主音', ['Lead Square', 'Lead Saw', 'Lead Calliope', 'Lead Chiff', 'Lead Charang', 'Lead Voice', 'Lead Fifths', 'Lead Bass+Lead']],
+  ['合成铺底', ['Pad New Age', 'Pad Warm', 'Pad Polysynth', 'Pad Choir', 'Pad Bowed', 'Pad Metallic', 'Pad Halo', 'Pad Sweep']],
+  ['合成效果', ['FX Rain', 'FX Soundtrack', 'FX Crystal', 'FX Atmosphere', 'FX Brightness', 'FX Goblins', 'FX Echoes', 'FX Sci-Fi']],
+  ['民族', ['Sitar', 'Banjo', 'Shamisen', 'Koto', 'Kalimba', 'Bagpipe', 'Fiddle', 'Shanai']],
+  ['打击', ['Tinkle Bell', 'Agogo', 'Steel Drums', 'Woodblock', 'Taiko', 'Melodic Tom', 'Synth Drum', 'Reverse Cymbal']],
+  ['音效', ['Fret Noise', 'Breath Noise', 'Seashore', 'Bird Tweet', 'Telephone', 'Helicopter', 'Applause', 'Gunshot']],
+];
 
 const SECTION_COLORS: Record<string, string> = {
   break: 'rgba(111, 179, 255, 0.45)',
@@ -99,16 +136,18 @@ function Wave({ data, color }: { data: number[]; color: string }) {
 }
 
 /** Mini piano-roll: transcribed notes as pitch-positioned blocks. */
-function NoteRibbon({ ribbon, duration }: {
+function NoteRibbon({ ribbon, duration, main }: {
   ribbon: Array<[number, number, number]>;
   duration: number;
+  main?: boolean;   // render as the lane's primary visual (waveform slot)
 }) {
   if (!ribbon.length || duration <= 0) return null;
   const lo = Math.min(...ribbon.map(r => r[2]));
   const hi = Math.max(...ribbon.map(r => r[2]));
   const span = Math.max(1, hi - lo);
   return (
-    <svg className="pgm-ribbon" viewBox="0 0 480 26" preserveAspectRatio="none">
+    <svg className={`pgm-ribbon ${main ? 'is-main' : ''}`}
+         viewBox="0 0 480 26" preserveAspectRatio="none">
       {ribbon.map(([t0, t1, p], i) => (
         <rect
           key={i}
@@ -131,10 +170,30 @@ export function StudioPanel({
   onSeparate,
   onSongToggle,
   onTransport,
+  onCountIn,
+  onClick,
   onMix,
   onSeek,
   onImportStem,
   onTranscribe,
+  onDetectChords,
+  onLaneSource,
+  patchOptions,
+  onLanePatch,
+  onLaneAiPatch,
+  aiLaneBusy,
+  onLaneEngine,
+  onLaneSfProgram,
+  onLaneFx,
+  onLaneClear,
+  clip,
+  onClipOpen,
+  onClipApply,
+  onClipClose,
+  onClipAiCompose,
+  composeBusy,
+  composeError,
+  composeResult,
   onPackage,
   onSepDownload,
   onSepPick,
@@ -145,17 +204,41 @@ export function StudioPanel({
   onSeparate: () => void;
   onSongToggle: (on: boolean) => void;
   onTransport: (action: 'play' | 'pause' | 'restart') => void;
+  onCountIn: (beats: 0 | 4 | 8) => void;
+  onClick: (on: boolean) => void;
   onMix: (idx: number, patch: { mute?: boolean; solo?: boolean; gain?: number }) => void;
   onSeek: (sec: number) => void;
   onImportStem: (idx: number) => void;
   onTranscribe: (idx: number) => void;
+  onDetectChords: () => void;
+  onLaneSource: (idx: number, src: 'audio' | 'midi') => void;
+  patchOptions: { name: string; category: string }[];
+  onLanePatch: (idx: number, name: string) => void;
+  onLaneAiPatch: (idx: number, userText: string) => void;
+  aiLaneBusy: number | null;
+  onLaneEngine: (idx: number, engine: 'syn' | 'sf2') => void;
+  onLaneSfProgram: (idx: number, program: number) => void;
+  onLaneFx: (idx: number, patch: { reverb?: number; echo?: number }) => void;
+  onLaneClear: (idx: number) => void;
+  clip: { index: number; notes: ClipNote[] } | null;   // open piano-roll clip
+  onClipOpen: (idx: number) => void;
+  onClipApply: (idx: number, notes: ClipNote[]) => void;
+  onClipClose: () => void;
+  onClipAiCompose: (idx: number, prompt: string, mode: 'all' | 'continue') => void;
+  composeBusy: boolean;
+  composeError: string | null;
+  composeResult: { seq: number; mode: 'all' | 'continue'; notes: ClipNote[] } | null;
   onPackage: () => void;
   onSepDownload: () => void;
   onSepPick: () => void;
 }) {
   const s = studio;
+  // ✨ AI patch prompt dialog: which lane is being asked, + the user's text.
+  const [aiAsk, setAiAsk] = useState<number | null>(null);
+  const [aiText, setAiText] = useState('');
+
   const songOn = s.playMode === 'song';
-  const stemsLoaded = s.stems.some(x => x.wave.length > 0);
+  const stemsLoaded = s.stems.some(x => x.wave.length > 0 || x.notes > 0 || x.playSrc === 'midi');
   const transportOn = s.playMode === 'stems';
   const mmss = (t: number) =>
     `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
@@ -265,6 +348,16 @@ export function StudioPanel({
               ✂ Separate
             </button>
           )}
+          {s.loaded && (
+            <button
+              className="freak-soft"
+              onClick={onDetectChords}
+              disabled={s.busy}
+              title="识别和弦进行（无鼓分轨混音上的 chroma + HMM）"
+            >
+              ♪ Chords
+            </button>
+          )}
           <button
             className="freak-soft is-lit"
             onClick={onPackage}
@@ -307,6 +400,24 @@ export function StudioPanel({
             {mmss(transportOn ? s.playhead.pos : 0)}
             <small> / {mmss(transportOn ? s.playhead.len : s.duration)}</small>
           </span>
+          <span className="pgm-srcswitch" title="预备拍：播放前先打 N 拍 click 再进歌">
+            {([0, 4, 8] as const).map(b => (
+              <button
+                key={b}
+                className={s.countIn === b ? 'is-on' : ''}
+                onClick={() => onCountIn(b)}
+              >
+                {b === 0 ? '无预备' : `${b}拍`}
+              </button>
+            ))}
+          </span>
+          <button
+            className={`pgm-mini ${s.click ? 'is-active is-midi' : ''}`}
+            onClick={() => onClick(!s.click)}
+            title="节拍器：播放中按歌曲 BPM 出 click（每 4 拍重音）"
+          >
+            ♩ click
+          </button>
         </div>
       )}
 
@@ -356,14 +467,150 @@ export function StudioPanel({
             </div>
           </div>
 
+          {/* ── Chord chart lane ── */}
+          {s.chords.length > 0 && (() => {
+            const chordDur =
+              s.duration > 0 ? s.duration : Math.max(1, s.chords[s.chords.length - 1].end);
+            const named = s.chords.filter(c => !c.none);
+            return (
+              <div className="pgm-lane pgm-chordlane">
+                <div className="pgm-lane-head">
+                  <span className="pgm-lane-name">CHORDS</span>
+                  <span className="pgm-chip is-neural">
+                    {named.length} 段{s.key ? ` · ${s.key}` : ''}
+                  </span>
+                </div>
+                <div className="pgm-chordbar">
+                  {s.chords.map((c, i) => (
+                    <div
+                      key={i}
+                      className={`pgm-chord ${c.none ? 'is-none' : ''}`}
+                      style={{
+                        left: `${(c.start / chordDur) * 100}%`,
+                        width: `${((c.end - c.start) / chordDur) * 100}%`,
+                      }}
+                      title={`${c.label} ${mmss(c.start)}–${mmss(c.end)}`}
+                    >
+                      {c.label}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+
           {/* ── Stem lanes (always visible — import third-party stems anywhere) ── */}
           {s.stems.map((stem, i) => (
-            <div className={`pgm-lane ${!stem.wave.length ? 'is-empty' : ''}`} key={stem.name}>
+            <div
+              className={`pgm-lane ${!stem.wave.length && !stem.notes && stem.playSrc !== 'midi' ? 'is-empty' : ''} ${stem.playSrc === 'midi' ? 'is-midi-src' : ''}`}
+              key={stem.name}
+            >
               <div className="pgm-lane-head">
                 <span className="pgm-lane-name">{stem.name.toUpperCase()}</span>
                 {stem.source === 'imported' && <span className="pgm-chip is-neural">ext</span>}
+                {i > 0 && (stem.wave.length > 0 || stem.notes > 0 || s.chords.length > 0 || i >= 6) && (
+                  <span className="pgm-srcswitch" title="该轨播放源：原始音频 / MIDI 合成器（同一推子控制音量）">
+                    <button
+                      className={stem.playSrc === 'audio' ? 'is-on' : ''}
+                      onClick={() => onLaneSource(i, 'audio')}
+                    >
+                      WAV
+                    </button>
+                    <button
+                      className={stem.playSrc === 'midi' ? 'is-on is-midi' : ''}
+                      onClick={() => onLaneSource(i, 'midi')}
+                      title={stem.notes > 0
+                        ? 'MIDI 转录由该轨专属合成器演奏'
+                        : '无转录时自动用和弦生成本轨风格乐句'}
+                    >
+                      MIDI
+                    </button>
+                  </span>
+                )}
+                {i > 0 && stem.playSrc === 'midi' && (
+                  <span className="pgm-patchpick">
+                    <span className="pgm-srcswitch" title="乐器引擎：MicroFreak 合成器 / GM 采样音色库">
+                      <button
+                        className={stem.engine === 'syn' ? 'is-on' : ''}
+                        onClick={() => onLaneEngine(i, 'syn')}
+                      >
+                        SYN
+                      </button>
+                      <button
+                        className={stem.engine === 'sf2' ? 'is-on is-midi' : ''}
+                        onClick={() => onLaneEngine(i, 'sf2')}
+                        title="GM 音色库（首次切换自动下载 ~31MB）"
+                      >
+                        SF2
+                      </button>
+                    </span>
+                    {stem.engine === 'sf2' ? (
+                      <select
+                        value={stem.sfProgram}
+                        onChange={(e) => onLaneSfProgram(i, Number(e.target.value))}
+                        title="GM 音色（128 个乐器）"
+                      >
+                        {GM_FAMILIES.map(([fam, names], fi) => (
+                          <optgroup key={fam} label={fam}>
+                            {names.map((nm, ni) => (
+                              <option key={nm} value={fi * 8 + ni}>{nm}</option>
+                            ))}
+                          </optgroup>
+                        ))}
+                      </select>
+                    ) : (
+                      <>
+                        <select
+                          value={stem.patch?.name ?? ''}
+                          onChange={(e) => { if (e.target.value) onLanePatch(i, e.target.value); }}
+                          title="该轨 MIDI 合成器音色（与 instrument 页同一套 patch）"
+                        >
+                          <option value="" disabled>
+                            {stem.patch ? stem.patch.name : '默认音色'}
+                          </option>
+                          {[...new Set(patchOptions.map(p => p.category))].map(cat => (
+                            <optgroup key={cat} label={cat}>
+                              {patchOptions.filter(p => p.category === cat).map(p => (
+                                <option key={p.name} value={p.name}>{p.name}</option>
+                              ))}
+                            </optgroup>
+                          ))}
+                        </select>
+                        {stem.patch?.origin === 'ai' && (
+                          <span className="pgm-chip is-ai" title="AI 设计的音色（随 PGM 打包）">ai</span>
+                        )}
+                        <button
+                          className={`pgm-mini is-ai ${aiLaneBusy === i ? 'is-busy' : ''}`}
+                          onClick={() => { setAiAsk(i); setAiText(''); }}
+                          disabled={aiLaneBusy !== null}
+                          title="让 AI 按本轨角色 + 歌曲调性/BPM 设计音色（可自己描述，patch 值会打包进 PGM）"
+                        >
+                          {aiLaneBusy === i ? '…' : '✨ AI'}
+                        </button>
+                      </>
+                    )}
+                    <span className="pgm-lanefx" title="本轨效果">
+                      <label title={`混响 ${Math.round(stem.fxReverb * 100)}%`}>
+                        R
+                        <input
+                          type="range" min={0} max={1} step={0.01}
+                          value={stem.fxReverb}
+                          onChange={(e) => onLaneFx(i, { reverb: Number(e.target.value) })}
+                        />
+                      </label>
+                      <label title={`回声 ${Math.round(stem.fxEcho * 100)}%（附点八分，BPM 同步）`}>
+                        E
+                        <input
+                          type="range" min={0} max={1} step={0.01}
+                          value={stem.fxEcho}
+                          onChange={(e) => onLaneFx(i, { echo: Number(e.target.value) })}
+                        />
+                      </label>
+                    </span>
+                  </span>
+                )}
                 <div className="pgm-lane-actions">
-                  {stem.wave.length > 0 && (
+                  {(stem.wave.length > 0 || stem.notes > 0 || stem.playSrc === 'midi') && (
                     <>
                       <button
                         className={`pgm-ms ${s.mixer[i].mute ? 'is-mute' : ''}`}
@@ -404,6 +651,18 @@ export function StudioPanel({
                   {stem.notes > 0 && (
                     <span className="pgm-chip is-midi">{stem.notes}♪</span>
                   )}
+                  {i > 0 && (stem.notes > 0 || stem.playSrc === 'midi' || i >= 6) && (
+                    <button
+                      className="pgm-mini is-midi"
+                      onClick={() => onClipOpen(i)}
+                      disabled={s.busy}
+                      title={i >= 6 && !stem.notes
+                        ? '打开钢琴卷写 MIDI（手写或 ✨ AI 生成）'
+                        : '打开钢琴卷 MIDI 编辑器（也可双击轨道）'}
+                    >
+                      ✎
+                    </button>
+                  )}
                   <button
                     className="pgm-mini"
                     onClick={() => onImportStem(i)}
@@ -412,14 +671,44 @@ export function StudioPanel({
                   >
                     ⬆ {stem.wave.length ? 'replace' : 'import'}
                   </button>
+                  {i >= 6 && (
+                    <button
+                      className="pgm-mini is-del"
+                      onClick={() => onLaneClear(i)}
+                      disabled={s.busy}
+                      title="清空这条 AUX 轨（音频/MIDI/音色/FX 全部移除）"
+                    >
+                      ✕
+                    </button>
+                  )}
                 </div>
               </div>
-              <div className="pgm-wave-wrap" {...seekHandlers}>
-                <Wave data={stem.wave} color="rgba(111, 179, 255, 0.8)" />
-                {playhead(transportOn && stem.wave.length > 0, i === 0)}
+              <div
+                className="pgm-wave-wrap"
+                {...seekHandlers}
+                onDoubleClick={() => {
+                  if (i > 0 && (stem.notes > 0 || stem.playSrc === 'midi' || i >= 6)) onClipOpen(i);
+                }}
+                title={stem.wave.length === 0 && stem.ribbon.length > 0
+                  ? '双击打开钢琴卷 MIDI 编辑器' : undefined}
+              >
+                {stem.wave.length > 0 ? (
+                  <Wave data={stem.wave} color="rgba(111, 179, 255, 0.8)" />
+                ) : stem.ribbon.length > 0 ? (
+                  <NoteRibbon ribbon={stem.ribbon} duration={s.duration} main />
+                ) : (
+                  <Wave data={stem.wave} color="rgba(111, 179, 255, 0.8)" />
+                )}
+                {playhead(transportOn && (stem.wave.length > 0 || stem.ribbon.length > 0),
+                          i === 0)}
               </div>
-              {stem.ribbon.length > 0 && (
-                <NoteRibbon ribbon={stem.ribbon} duration={s.duration} />
+              {stem.wave.length > 0 && stem.ribbon.length > 0 && (
+                <div
+                  onDoubleClick={() => { if (i > 0) onClipOpen(i); }}
+                  title="双击打开钢琴卷 MIDI 编辑器"
+                >
+                  <NoteRibbon ribbon={stem.ribbon} duration={s.duration} />
+                </div>
               )}
             </div>
           ))}
@@ -431,11 +720,73 @@ export function StudioPanel({
 
           <p className="pgm-hint">
             顶部 ▶/⏸/⟲ 总控播放，各轨 M=静音 S=独奏 + 音量推子，
-            点击/拖动波形跳转进度；♪ MIDI 在本机转录该轨（Basic Pitch），
+            点击/拖动波形跳转进度；WAV/MIDI 切换该轨播放源（MIDI 由该轨
+            专属合成器演奏：bass=贝斯 / other=铺底 / vocals=lead /
+            guitar=拨弦 / piano=键盘，无转录时按和弦自动生成乐句）；
+            双击 MIDI 轨或 ✎ 打开钢琴卷精修（和弦参考 + 不协调音标红 +
+            ✨ 一键优化）；♪ MIDI 在本机转录该轨（Basic Pitch），
             ⬆ replace 可换第三方分轨 → ◈ Package PGM 导出
             （program.json + song.wav + stems/*.wav + midi/*.mid）。
           </p>
         </>
+      )}
+
+      {/* ✨ AI patch prompt dialog */}
+      {aiAsk !== null && (
+        <div className="pgm-aiask-overlay" onPointerDown={(e) => {
+          if (e.target === e.currentTarget) setAiAsk(null);
+        }}>
+          <div className="pgm-aiask">
+            <div className="pgm-aiask-title">
+              ✨ 为 {s.stems[aiAsk]?.name.toUpperCase()} 轨设计音色
+            </div>
+            <textarea
+              autoFocus
+              value={aiText}
+              onChange={(e) => setAiText(e.target.value)}
+              placeholder="描述想要的音色（可留空，自动按轨道角色 + 歌曲调性/BPM 设计）&#10;例：温暖的模拟贝斯，带一点滑音和轻微失真"
+              rows={3}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                  onLaneAiPatch(aiAsk, aiText.trim());
+                  setAiAsk(null);
+                } else if (e.key === 'Escape') { setAiAsk(null); }
+                e.stopPropagation();
+              }}
+            />
+            <div className="pgm-aiask-actions">
+              <button onClick={() => setAiAsk(null)}>取消</button>
+              <button
+                className="is-go"
+                onClick={() => { onLaneAiPatch(aiAsk, aiText.trim()); setAiAsk(null); }}
+              >
+                ✨ 生成（⌘↵）
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {clip && (
+        <MidiEditor
+          laneName={s.stems[clip.index]?.name ?? 'lane'}
+          patchName={s.stems[clip.index]?.patch?.name ?? null}
+          notes={clip.notes}
+          chords={s.chords}
+          keyStr={s.key}
+          bpm={s.bpm}
+          duration={s.duration}
+          playPos={transportOn ? s.playhead.pos : 0}
+          playing={transportOn && s.playing}
+          onApply={(notes) => onClipApply(clip.index, notes)}
+          onClose={onClipClose}
+          onSeek={onSeek}
+          onToggle={() => onTransport(transportOn && s.playing ? 'pause' : 'play')}
+          onAiCompose={(prompt, mode) => onClipAiCompose(clip.index, prompt, mode)}
+          composeBusy={composeBusy}
+          composeError={composeError}
+          composeResult={composeResult}
+        />
       )}
     </div>
   );

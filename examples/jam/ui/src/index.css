@@ -3490,3 +3490,405 @@ html[data-theme="famicom"] .pgm .pgm-mini, html[data-theme="famicom"] .pgm .pgm-
   border-radius: 5px;
   background: rgba(0, 0, 0, 0.3);
 }
+
+/* ── PGM chord chart + AUX lane ── */
+.pgm-chordbar {
+  position: relative;
+  height: 32px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  overflow: hidden;
+}
+.pgm-chordlane { border-color: rgba(117, 235, 199, 0.25); }
+.pgm-chordlane .pgm-lane-name { color: #75ebc7; }
+.pgm-chord {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  border-radius: 4px;
+  background: rgba(117, 235, 199, 0.22);
+  border: 1px solid rgba(117, 235, 199, 0.35);
+  color: #75ebc7;
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.pgm-chord.is-none {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.3);
+}
+/* Per-lane playback source switch (WAV / MIDI) */
+.pgm-srcswitch {
+  display: inline-flex;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 5px;
+  overflow: hidden;
+  margin-left: 6px;
+}
+.pgm-srcswitch button {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.45);
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  padding: 2px 7px;
+  cursor: pointer;
+}
+.pgm-srcswitch button + button { border-left: 1px solid rgba(255, 255, 255, 0.12); }
+.pgm-srcswitch button.is-on {
+  background: rgba(255, 255, 255, 0.16);
+  color: #e8e8ea;
+}
+.pgm-srcswitch button.is-on.is-midi {
+  background: rgba(248, 211, 92, 0.22);
+  color: #f8d35c;
+}
+.pgm-lane.is-midi-src { border-color: rgba(248, 211, 92, 0.35); }
+.pgm-lane.is-midi-src .pgm-lane-name { color: #f8d35c; }
+
+/* Lane synth patch picker + AI designer */
+.pgm-patchpick {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  min-width: 0;
+}
+.pgm-patchpick select {
+  appearance: none;
+  max-width: 130px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(248, 211, 92, 0.3);
+  border-radius: 5px;
+  color: #f8d35c;
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 9px;
+  padding: 2px 6px;
+  cursor: pointer;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.pgm-chip.is-ai {
+  background: rgba(186, 130, 255, 0.18);
+  border-color: rgba(186, 130, 255, 0.4);
+  color: #ba82ff;
+}
+.pgm-mini.is-ai { color: #ba82ff; border-color: rgba(186, 130, 255, 0.35); }
+.pgm-mini.is-ai.is-busy { opacity: 0.6; }
+
+/* ── Piano-roll MIDI editor ── */
+.midiedit-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(0, 0, 0, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+}
+.midiedit {
+  display: flex;
+  flex-direction: column;
+  width: min(1280px, 96vw);
+  max-height: 90vh;
+  background: #161618;
+  border: 1px solid rgba(248, 211, 92, 0.3);
+  border-radius: 12px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  overflow: hidden;
+}
+.midiedit-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.midiedit-title {
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  color: #f8d35c;
+  letter-spacing: 0.04em;
+}
+.midiedit-title small { color: rgba(255, 255, 255, 0.45); font-weight: 400; }
+.midiedit-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.55);
+}
+.midiedit-legend i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  margin-left: 8px;
+}
+.midiedit-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.midiedit-actions button {
+  appearance: none;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  color: #e8e8ea;
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.midiedit-actions button:hover { background: rgba(255, 255, 255, 0.14); }
+.midiedit-actions button.is-ai {
+  color: #ba82ff;
+  border-color: rgba(186, 130, 255, 0.4);
+}
+.midiedit-time {
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.6);
+  min-width: 36px;
+  text-align: center;
+}
+.midiedit-body {
+  display: flex;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+.midiedit-keys {
+  flex: 0 0 38px;
+  border-right: 1px solid rgba(255, 255, 255, 0.1);
+  background: #1b1b1e;
+  box-sizing: border-box;
+}
+.midiedit-key {
+  font-size: 8px;
+  color: rgba(255, 255, 255, 0.5);
+  padding-left: 5px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  box-sizing: border-box;
+  background: rgba(255, 255, 255, 0.05);
+}
+.midiedit-key.is-black { background: rgba(0, 0, 0, 0.45); }
+.midiedit-scroll {
+  flex: 1;
+  overflow-x: auto;
+  overflow-y: hidden;
+  position: relative;
+}
+.midiedit-ruler {
+  position: relative;
+  background: rgba(0, 0, 0, 0.4);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  cursor: ew-resize;
+  user-select: none;
+}
+.midiedit-ruler span {
+  position: absolute;
+  top: 1px;
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.4);
+  padding-left: 3px;
+  border-left: 1px solid rgba(255, 255, 255, 0.18);
+  height: 100%;
+  pointer-events: none;
+}
+.midiedit-svg {
+  display: block;
+  background: #0f0f11;
+  max-width: none;   /* shared.css clamps svg to 100% — the roll must overflow */
+}
+.midiedit-svg text {
+  fill: #75ebc7;
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 9px;
+  font-weight: 700;
+  pointer-events: none;
+}
+.midiedit-chordseg {
+  fill: rgba(117, 235, 199, 0.1);
+  stroke: rgba(117, 235, 199, 0.3);
+}
+.midiedit-note { cursor: grab; }
+.midiedit-note:active { cursor: grabbing; }
+.midiedit-ph { cursor: ew-resize; }
+.midiedit-legend.is-report { color: #75ebc7; }
+
+/* Lane insert FX mini-sliders */
+.pgm-lanefx {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 4px;
+}
+.pgm-lanefx label {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 9px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.5);
+}
+.pgm-lanefx input[type="range"] {
+  width: 44px;
+  height: 3px;
+  accent-color: #f8d35c;
+}
+
+/* ✨ AI patch prompt dialog */
+.pgm-aiask-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 210;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.pgm-aiask {
+  width: min(460px, 92vw);
+  background: #1b1b1e;
+  border: 1px solid rgba(186, 130, 255, 0.4);
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.pgm-aiask-title {
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  color: #ba82ff;
+}
+.pgm-aiask textarea {
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  color: #e8e8ea;
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 8px 10px;
+  resize: vertical;
+  outline: none;
+}
+.pgm-aiask textarea:focus { border-color: rgba(186, 130, 255, 0.5); }
+.pgm-aiask-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.pgm-aiask-actions button {
+  appearance: none;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 7px;
+  color: #e8e8ea;
+  font-size: 11px;
+  padding: 5px 14px;
+  cursor: pointer;
+}
+.pgm-aiask-actions button.is-go {
+  background: rgba(186, 130, 255, 0.18);
+  border-color: rgba(186, 130, 255, 0.45);
+  color: #ba82ff;
+}
+.midiedit-hint {
+  padding: 6px 14px;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.4);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* ✨ AI compose panel inside the piano roll */
+.midiedit-ai {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+  padding: 10px 14px;
+  border-top: 1px solid rgba(186, 130, 255, 0.25);
+  background: rgba(186, 130, 255, 0.05);
+}
+.midiedit-ai textarea {
+  flex: 1;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  color: #e8e8ea;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 7px 10px;
+  resize: none;
+  outline: none;
+}
+.midiedit-ai textarea:focus { border-color: rgba(186, 130, 255, 0.5); }
+.midiedit-ai-actions {
+  display: flex;
+  gap: 6px;
+}
+.midiedit-ai-actions button {
+  appearance: none;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 7px;
+  color: #e8e8ea;
+  font-size: 11px;
+  padding: 6px 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.midiedit-ai-actions button.is-go {
+  background: rgba(186, 130, 255, 0.18);
+  border-color: rgba(186, 130, 255, 0.45);
+  color: #ba82ff;
+}
+
+/* AUX lane management */
+.pgm-addaux {
+  appearance: none;
+  align-self: flex-start;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px dashed rgba(255, 255, 255, 0.25);
+  border-radius: 8px;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 11px;
+  padding: 6px 14px;
+  cursor: pointer;
+}
+.pgm-addaux:hover { background: rgba(255, 255, 255, 0.1); color: #e8e8ea; }
+.pgm-mini.is-del { color: #ff5f78; border-color: rgba(255, 95, 120, 0.35); }
+
+.midiedit-legend.is-busy {
+  color: #ba82ff;
+  animation: midiedit-pulse 1.2s ease-in-out infinite;
+}
+.midiedit-legend.is-error { color: #ff5f78; }
+@keyframes midiedit-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+/* MIDI-only lane: notes fill the waveform slot */
+.pgm-ribbon.is-main {
+  height: 44px;
+  margin-top: 0;
+}

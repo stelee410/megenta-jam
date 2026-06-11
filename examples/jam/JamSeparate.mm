@@ -55,7 +55,9 @@ static BOOL decodeAt(NSURL* url, double sr, std::vector<float>& L, std::vector<f
     std::vector<float> bufL(chunk), bufR(chunk);
     L.clear(); R.clear();
     while ((long)L.size() < maxFrames) {
-        AudioBufferList abl;
+        // AudioBufferList has storage for ONE buffer; allocate room for two.
+        struct { AudioBufferList list; AudioBuffer extra; } ablMem = {};
+        AudioBufferList& abl = ablMem.list;
         abl.mNumberBuffers = 2;
         abl.mBuffers[0] = {1, chunk * 4, bufL.data()};
         abl.mBuffers[1] = {1, chunk * 4, bufR.data()};

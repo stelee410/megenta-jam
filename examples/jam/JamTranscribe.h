@@ -38,3 +38,7 @@ BOOL JamTranscribe(NSString* modelPath,
 
 /// Write notes as a single-track Standard MIDI File (type 0) at `bpm`.
 BOOL JamWriteMidi(NSURL* url, const std::vector<JamNote>& notes, double bpm);
+
+/// Parse a Standard MIDI File (type 0/1, tempo-map aware) back into notes,
+/// sorted by start time. Returns NO if the file is unreadable or empty.
+BOOL JamReadMidi(NSURL* url, std::vector<JamNote>& outNotes);

@@ -20,11 +20,16 @@
 #include <cmath>
 #include "audio_level_processor.h"
 #include "JamSynth.h"
+#include "JamLaneFx.h"
 
 using magentart::core::RealtimeRunner;
 
 // Shared state between audio/MIDI threads and the UI controller
 struct JamSharedState {
+    static constexpr int kStems = 8;                   // 6 separated + 2 AUX
+    static constexpr int kMidiLanes = 7;               // stems 1..7
+    static constexpr int kLaneBlockMax = 4096;
+
     std::atomic<bool> midiNotes[128] = {};
 
     // Live-performance synth (Instrument tab). When `synth.active`, incoming
@@ -42,15 +47,58 @@ struct JamSharedState {
     std::atomic<bool> prevActive{false};
     // Stem mixer (PGM console): the render thread sums the loaded stems with
     // per-stem gain + mute/solo, driven by a master transport.
-    std::atomic<const int16_t*> stemBuf[6] = {};
+    std::atomic<const int16_t*> stemBuf[kStems] = {};
     std::atomic<long> stemLen{0};
     std::atomic<long> stemPos{0};
     std::atomic<int> stemMask{0};          // legacy (unused by the mixer)
     std::atomic<bool> stemActive{false};   // transport: playing
-    std::atomic<float> stemGain[6] = {{1}, {1}, {1}, {1}, {1}, {1}};
+    std::atomic<float> stemGain[kStems] = {{1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}};
     std::atomic<int> stemMuteMask{0};
     std::atomic<int> stemSoloMask{0};
-    float stemSmoothG[6] = {};             // render-thread gain smoothing
+    float stemSmoothG[kStems] = {};             // render-thread gain smoothing
+    // Count-in (预备拍) + click metronome for the stem transport.
+    std::atomic<int> countInBeats{0};      // setting: 0 / 4 / 8 beats
+    std::atomic<long> countInLeft{0};      // samples remaining before playback
+    std::atomic<long> countInTotal{0};
+    std::atomic<bool> clickOn{false};      // metronome during playback
+    std::atomic<float> stemBpm{120.0f};    // song tempo driving click/count-in
+    std::atomic<long> stemBeatOff{0};      // first-beat offset (samples)
+    std::atomic<int> stemBarPhase{0};      // beat index 0..3 that is a downbeat
+    // render-local click synth state:
+    float clickPhase = 0.0f, clickEnv = 0.0f, clickFreq = 1000.0f;
+    // Per-stem MIDI lanes: each melodic stem (1..5 — bass, other, vocals,
+    // guitar, piano) can switch its playback source between the original
+    // audio and a MIDI clip rendered by a dedicated synth instance with a
+    // stem-appropriate patch. All instances render serially on the audio
+    // thread, clocked by the stem transport — construction-level sync.
+    // Drums (0) stay audio-only (pitch transcription doesn't apply).
+    struct AuxEv { long sample; uint8_t note; uint8_t vel; bool on; };
+    JamSynth laneSynth[kMidiLanes];
+    std::atomic<uint8_t> stemSource[kStems] = {};      // 0 = audio, 1 = MIDI
+    std::atomic<const AuxEv*> laneEv[kMidiLanes] = {};
+    std::atomic<long> laneCount[kMidiLanes] = {};
+    std::atomic<uint32_t> laneGen[kMidiLanes] = {};
+    // SF2 sample engine (TinySoundFont): each lane may switch from the
+    // MicroFreak synth to a GM SoundFont program. laneSf holds a tsf*
+    // (opaque here); instances share the master font's sample data and are
+    // published once fully initialized — never freed while playing.
+    std::atomic<int> laneEngine[kMidiLanes] = {};      // 0 = synth, 1 = SF2
+    std::atomic<void*> laneSf[kMidiLanes] = {};        // tsf* per lane
+    std::atomic<int> laneSfProgram[kMidiLanes] = {};   // GM program 0..127
+    JamLaneFx laneFx[kMidiLanes];                      // per-lane echo/reverb
+    // render-thread local:
+    long laneCursor[kMidiLanes] = {};
+    uint32_t laneGenSeen[kMidiLanes] = {};
+    int laneEngineSeen[kMidiLanes] = {};
+    int laneSfProgApplied[kMidiLanes] = {-1, -1, -1, -1, -1, -1, -1};
+    long laneLastPos = -1;
+    bool laneHeld[kMidiLanes][128] = {};
+    long laneTail[kMidiLanes] = {};                    // keep rendering for FX tails
+    float laneSmoothG[kMidiLanes] = {};                // de-click gain smoothing
+    float laneBufL[kMidiLanes][kLaneBlockMax] = {};    // per-lane synth scratch
+    float laneBufR[kMidiLanes][kLaneBlockMax] = {};
+    float laneSfTmp[kLaneBlockMax * 2] = {};           // unweaved SF2 scratch
+
     // Take recorder: captures the raw generative-engine output (pre-FX) while
     // armed, so a cover take can be A/B'd against the original stem.
     std::atomic<float*> recL{nullptr};

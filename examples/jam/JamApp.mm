@@ -26,6 +26,7 @@
 #import "../common/objc/MagentaSettings.h"
 #include <magentart/realtime_runner.h>
 #include "../common/cpp/magenta_paths.h"
+#include "vendor/tsf/tsf.h"
 
 using magentart::core::RealtimeRunner;
 
@@ -642,25 +643,176 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
             }
         }
 
+        // Count-in (预备拍): play N click beats before the transport rolls.
+        // While samples remain, the sequencer and mixer below stay idle.
+        {
+            long ci = shared->countInLeft.load(std::memory_order_relaxed);
+            if (ci > 0 && shared->stemActive.load(std::memory_order_relaxed)) {
+                const float bpm = shared->stemBpm.load(std::memory_order_relaxed);
+                const long B = (long)(60.0 / ((bpm < 40 || bpm > 300) ? 120.0 : bpm)
+                                      * 48000.0);
+                const long total = shared->countInTotal.load(std::memory_order_relaxed);
+                for (AVAudioFrameCount i = 0; i < frameCount && ci > 0; ++i, --ci) {
+                    const long played = total - ci;
+                    if (played % B == 0) {
+                        shared->clickEnv = 1.0f;
+                        shared->clickPhase = 0.0f;
+                        // Accent the first beat of each group of 4.
+                        shared->clickFreq = ((played / B) % 4 == 0) ? 1760.0f : 1175.0f;
+                    }
+                    if (shared->clickEnv > 0.0005f) {
+                        shared->clickPhase += shared->clickFreq / 48000.0f;
+                        if (shared->clickPhase >= 1.0f) shared->clickPhase -= 1.0f;
+                        const float c = sinf(shared->clickPhase * 2.0f * (float)M_PI)
+                                        * shared->clickEnv * 0.5f;
+                        shared->clickEnv *= 0.9988f;   // ~25 ms decay
+                        outL[i] += c;
+                        outR[i] += c;
+                    }
+                }
+                shared->countInLeft.store(ci, std::memory_order_relaxed);
+            }
+        }
+
+        // Per-stem MIDI lane sequencers: fire each lane's clip events against
+        // the stem transport into that lane's synth instance. Flush hanging
+        // notes on stop/seek/clip-swap/source-switch.
+        {
+            const bool act = shared->stemActive.load(std::memory_order_relaxed) &&
+                             shared->countInLeft.load(std::memory_order_relaxed) <= 0;
+            const long pos = shared->stemPos.load(std::memory_order_relaxed);
+            const long len = shared->stemLen.load(std::memory_order_relaxed);
+            const bool moved = (pos != shared->laneLastPos);
+            const float bpm = shared->fxTempo.load(std::memory_order_relaxed);
+            for (int k = 0; k < JamSharedState::kMidiLanes; ++k) {
+                const int t = k + 1;                       // lane k ↔ stem t
+                JamSynth& syn = shared->laneSynth[k];
+                const int engine = shared->laneEngine[k].load(std::memory_order_relaxed);
+                tsf* sf = (tsf*)shared->laneSf[k].load(std::memory_order_acquire);
+                const bool sfMode = (engine == 1) && sf;
+                const bool midiMode =
+                    shared->stemSource[t].load(std::memory_order_relaxed) == 1;
+                const JamSharedState::AuxEv* evs =
+                    shared->laneEv[k].load(std::memory_order_acquire);
+                const long cnt = shared->laneCount[k].load(std::memory_order_relaxed);
+                const bool playing = act && midiMode && evs && cnt > 0;
+                const uint32_t gen = shared->laneGen[k].load(std::memory_order_relaxed);
+                const bool jumped = moved || (gen != shared->laneGenSeen[k]);
+                const bool engineSwitched = engine != shared->laneEngineSeen[k];
+                if (!playing || jumped || engineSwitched) {
+                    // Release everything on BOTH engines (cheap when empty).
+                    for (int nn = 0; nn < 128; ++nn) {
+                        if (shared->laneHeld[k][nn]) {
+                            syn.pushNote((uint8_t)nn, 0, false);
+                            if (sf) tsf_channel_note_off(sf, 0, nn);
+                            shared->laneHeld[k][nn] = false;
+                        }
+                    }
+                    shared->laneEngineSeen[k] = engine;
+                }
+                // Re-locate the cursor after a seek / new clip — ALSO while
+                // paused: the jump is consumed by the flush above, so waiting
+                // for `playing` would resume with a stale cursor (silence
+                // until the old position is reached again).
+                if (jumped && evs && cnt > 0) {
+                    shared->laneGenSeen[k] = gen;
+                    long lo = 0, hi = cnt;
+                    while (lo < hi) {
+                        const long mid = (lo + hi) / 2;
+                        if (evs[mid].sample < pos) lo = mid + 1;
+                        else hi = mid;
+                    }
+                    shared->laneCursor[k] = lo;
+                }
+                if (playing) {
+                    const long blockEnd = pos + (long)frameCount;
+                    long cur = shared->laneCursor[k];
+                    while (cur < cnt && evs[cur].sample < blockEnd) {
+                        const uint8_t note = evs[cur].note;
+                        if (evs[cur].on) {
+                            if (sfMode) tsf_channel_note_on(sf, 0, note, evs[cur].vel / 127.0f);
+                            else syn.pushNote(note, evs[cur].vel, true);
+                            shared->laneHeld[k][note] = true;
+                        } else {
+                            if (sfMode) tsf_channel_note_off(sf, 0, note);
+                            else syn.pushNote(note, 0, false);
+                            shared->laneHeld[k][note] = false;
+                        }
+                        cur++;
+                    }
+                    shared->laneCursor[k] = cur;
+                }
+                // Render this lane's instrument into its scratch buffer.
+                // Keep rendering ~4 s after leaving MIDI mode so releases and
+                // FX tails decay instead of cutting.
+                if (midiMode) shared->laneTail[k] = 4L * 48000;
+                const bool wantRender =
+                    shared->laneTail[k] > 0 &&
+                    frameCount <= (AVAudioFrameCount)JamSharedState::kLaneBlockMax;
+                if (wantRender) {
+                    if (sfMode) {
+                        const int prog =
+                            shared->laneSfProgram[k].load(std::memory_order_relaxed);
+                        if (prog != shared->laneSfProgApplied[k]) {
+                            tsf_channel_set_presetnumber(sf, 0, prog, 0);
+                            shared->laneSfProgApplied[k] = prog;
+                        }
+                        tsf_render_float(sf, shared->laneSfTmp, (int)frameCount, 0);
+                        memcpy(shared->laneBufL[k], shared->laneSfTmp,
+                               sizeof(float) * frameCount);
+                        memcpy(shared->laneBufR[k], shared->laneSfTmp + frameCount,
+                               sizeof(float) * frameCount);
+                    } else {
+                        memset(shared->laneBufL[k], 0, sizeof(float) * frameCount);
+                        memset(shared->laneBufR[k], 0, sizeof(float) * frameCount);
+                        syn.render(shared->laneBufL[k], shared->laneBufR[k],
+                                   (int)frameCount, bpm);
+                    }
+                    shared->laneFx[k].process(shared->laneBufL[k], shared->laneBufR[k],
+                                              (int)frameCount, bpm);
+                    if (!midiMode) shared->laneTail[k] -= (long)frameCount;
+                } else {
+                    shared->laneTail[k] = 0;
+                }
+            }
+            // Predict next block's start for jump detection.
+            long next = pos;
+            if (act) next = MIN(len, pos + (long)frameCount);
+            shared->laneLastPos = next;
+        }
+
         // PGM console stem mixer: master transport + per-stem gain/mute/solo.
+        // Stems in MIDI mode contribute their lane synth instead of audio,
+        // through the same audibility/gain (one fader rules both sources).
         {
             const long len = shared->stemLen.load(std::memory_order_relaxed);
-            if (len > 0 && shared->stemActive.load(std::memory_order_relaxed)) {
-                const int mute = shared->stemMuteMask.load(std::memory_order_relaxed);
-                const int solo = shared->stemSoloMask.load(std::memory_order_relaxed);
+            const int mute = shared->stemMuteMask.load(std::memory_order_relaxed);
+            const int solo = shared->stemSoloMask.load(std::memory_order_relaxed);
+            const int16_t* bufs[JamSharedState::kStems];
+            bool midiSrc[JamSharedState::kStems] = {};
+            float target[JamSharedState::kStems];
+            for (int t = 0; t < JamSharedState::kStems; ++t) {
+                bufs[t] = shared->stemBuf[t].load(std::memory_order_relaxed);
+                midiSrc[t] = t > 0 &&
+                    shared->stemSource[t].load(std::memory_order_relaxed) == 1;
+                const bool audible = (bufs[t] || midiSrc[t]) &&
+                    (solo ? ((solo >> t) & 1) : !((mute >> t) & 1));
+                target[t] = audible
+                    ? shared->stemGain[t].load(std::memory_order_relaxed) : 0.0f;
+            }
+            if (len > 0 && shared->stemActive.load(std::memory_order_relaxed) &&
+                shared->countInLeft.load(std::memory_order_relaxed) <= 0) {
+                const bool click = shared->clickOn.load(std::memory_order_relaxed);
+                const float bpmC = shared->stemBpm.load(std::memory_order_relaxed);
+                const long B = (long)(60.0 / ((bpmC < 40 || bpmC > 300) ? 120.0 : bpmC)
+                                      * 48000.0);
+                const long beatOff = shared->stemBeatOff.load(std::memory_order_relaxed);
+                const int barPh = shared->stemBarPhase.load(std::memory_order_relaxed);
                 long pos = shared->stemPos.load(std::memory_order_relaxed);
-                const int16_t* bufs[6];
-                float target[6];
-                for (int t = 0; t < 6; ++t) {
-                    bufs[t] = shared->stemBuf[t].load(std::memory_order_relaxed);
-                    const bool audible = bufs[t] &&
-                        (solo ? ((solo >> t) & 1) : !((mute >> t) & 1));
-                    target[t] = audible
-                        ? shared->stemGain[t].load(std::memory_order_relaxed) : 0.0f;
-                }
                 for (AVAudioFrameCount i = 0; i < frameCount && pos < len; ++i, ++pos) {
                     float l = 0.0f, r = 0.0f;
-                    for (int t = 0; t < 6; ++t) {
+                    for (int t = 0; t < JamSharedState::kStems; ++t) {
+                        if (midiSrc[t]) continue;          // handled below
                         float& g = shared->stemSmoothG[t];
                         g += (target[t] - g) * 0.002f;     // ~10 ms de-click
                         if (bufs[t] && g > 0.0005f) {
@@ -668,11 +820,42 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                             r += bufs[t][pos * 2 + 1] * g * (0.9f / 32768.0f);
                         }
                     }
+                    if (click) {
+                        const long rel = pos - beatOff;
+                        if (rel >= 0 && rel % B == 0) {
+                            shared->clickEnv = 1.0f;
+                            shared->clickPhase = 0.0f;
+                            shared->clickFreq =
+                                ((rel / B) % 4 == barPh) ? 1760.0f : 1175.0f;
+                        }
+                        if (shared->clickEnv > 0.0005f) {
+                            shared->clickPhase += shared->clickFreq / 48000.0f;
+                            if (shared->clickPhase >= 1.0f) shared->clickPhase -= 1.0f;
+                            const float c = sinf(shared->clickPhase * 2.0f * (float)M_PI)
+                                            * shared->clickEnv * 0.4f;
+                            shared->clickEnv *= 0.9988f;
+                            l += c;
+                            r += c;
+                        }
+                    }
                     outL[i] += l;
                     outR[i] += r;
                 }
                 shared->stemPos.store(pos, std::memory_order_relaxed);
                 if (pos >= len) shared->stemActive.store(false, std::memory_order_relaxed);
+            }
+            // MIDI lanes mix in even when the transport is stopped (FX tails).
+            for (int k = 0; k < JamSharedState::kMidiLanes; ++k) {
+                if (shared->laneTail[k] <= 0) continue;
+                const int t = k + 1;
+                const float tgt = midiSrc[t] ? target[t] : 0.0f;
+                float& g = shared->laneSmoothG[k];
+                if (tgt <= 0.0005f && g <= 0.0005f) { g = tgt; continue; }
+                for (AVAudioFrameCount i = 0; i < frameCount; ++i) {
+                    g += (tgt - g) * 0.002f;
+                    outL[i] += shared->laneBufL[k][i] * g * 1.8f;
+                    outR[i] += shared->laneBufR[k][i] * g * 1.8f;
+                }
             }
         }
 

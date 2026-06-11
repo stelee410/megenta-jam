@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #import "JamTranscribe.h"
+#import <AudioToolbox/AudioToolbox.h>
 
 #include <onnxruntime_cxx_api.h>
 #include <coreml_provider_factory.h>
@@ -305,4 +306,55 @@ BOOL JamWriteMidi(NSURL* url, const std::vector<JamNote>& notes, double bpm) {
 
     NSData* data = [NSData dataWithBytes:file.data() length:file.size()];
     return [data writeToURL:url atomically:YES];
+}
+
+// ── SMF → notes (AudioToolbox MusicSequence: handles type 0/1, running
+// status and the tempo map, so note times come out in correct seconds for
+// any well-formed SMF, not just our own writer's output) ──
+BOOL JamReadMidi(NSURL* url, std::vector<JamNote>& outNotes) {
+    outNotes.clear();
+    MusicSequence seq = nullptr;
+    if (NewMusicSequence(&seq) != noErr || !seq) return NO;
+    if (MusicSequenceFileLoad(seq, (__bridge CFURLRef)url,
+                              kMusicSequenceFile_MIDIType, 0) != noErr) {
+        DisposeMusicSequence(seq);
+        return NO;
+    }
+    UInt32 nTracks = 0;
+    MusicSequenceGetTrackCount(seq, &nTracks);
+    for (UInt32 t = 0; t < nTracks; ++t) {
+        MusicTrack track = nullptr;
+        if (MusicSequenceGetIndTrack(seq, t, &track) != noErr || !track) continue;
+        MusicEventIterator it = nullptr;
+        if (NewMusicEventIterator(track, &it) != noErr || !it) continue;
+        Boolean has = false;
+        MusicEventIteratorHasCurrentEvent(it, &has);
+        while (has) {
+            MusicTimeStamp beat = 0;
+            MusicEventType type = 0;
+            const void* data = nullptr;
+            UInt32 size = 0;
+            if (MusicEventIteratorGetEventInfo(it, &beat, &type, &data, &size) == noErr &&
+                type == kMusicEventType_MIDINoteMessage && data &&
+                size >= sizeof(MIDINoteMessage)) {
+                const MIDINoteMessage* m = (const MIDINoteMessage*)data;
+                Float64 startSec = 0, endSec = 0;
+                MusicSequenceGetSecondsForBeats(seq, beat, &startSec);
+                MusicSequenceGetSecondsForBeats(seq, beat + m->duration, &endSec);
+                JamNote n;
+                n.start = startSec;
+                n.duration = std::max(0.01, endSec - startSec);
+                n.pitch = m->note;
+                n.velocity = std::max(0.05f, std::min(1.0f, m->velocity / 127.0f));
+                outNotes.push_back(n);
+            }
+            MusicEventIteratorNextEvent(it);
+            MusicEventIteratorHasCurrentEvent(it, &has);
+        }
+        DisposeMusicEventIterator(it);
+    }
+    DisposeMusicSequence(seq);
+    std::sort(outNotes.begin(), outNotes.end(),
+              [](const JamNote& a, const JamNote& b) { return a.start < b.start; });
+    return !outNotes.empty();
 }

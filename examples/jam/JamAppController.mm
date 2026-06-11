@@ -29,6 +29,9 @@
 #import "JamStudio.h"
 #import "JamSeparate.h"
 #import "JamTranscribe.h"
+#import "JamChords.h"
+#define TSF_IMPLEMENTATION
+#include "vendor/tsf/tsf.h"
 #include "magenta_paths.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -104,13 +107,20 @@ static BOOL isDevServerRunning(void) {
 
     // ── PGM studio ──
     std::vector<float> _songL, _songR;        // original song, 48 kHz
-    std::vector<int16_t> _stems[6];           // drums/bass/other/vocals/guitar/piano
-    std::vector<float> _takeL[6], _takeR[6];  // recorded cover takes
+    std::vector<int16_t> _stems[8];           // 6 separated + aux1/aux2
+    std::vector<float> _takeL[8], _takeR[8];  // recorded cover takes
     std::vector<float> _prevBufL, _prevBufR;  // active preview buffer
     std::vector<float> _recBufL, _recBufR;    // active recording buffer
     jamstudio::Analysis _songAnalysis;
-    NSString* _stemSource[6];   // nil | "neural" | "hpss" | "imported"
-    std::vector<JamNote> _stemNotes[6];   // audio→MIDI transcriptions
+    NSString* _stemSource[8];   // nil | "neural" | "hpss" | "imported"
+    std::vector<JamNote> _stemNotes[8];   // audio→MIDI transcriptions
+    std::vector<jamchords::Chord> _chords;
+    std::vector<JamNote> _laneClip[8];    // published MIDI clip per stem (UI/package)
+    std::vector<JamSharedState::AuxEv> _laneEvBuf[8];  // render-thread event lists
+    BOOL _lanePatched[8];                 // lane synth patch applied
+    NSDictionary* _lanePatchInfo[8];      // chosen patch {name, origin, params, matrix}
+    tsf* _sfMaster;                       // master SoundFont (lanes share samples)
+    BOOL _sfBusy;                         // download/load in flight
     NSString* _songName;
     NSURL* _songURL;
     double _songDur;
@@ -512,6 +522,47 @@ static BOOL isDevServerRunning(void) {
 
 // ─── Script message handler ──────────────────────────────────────────────────
 
+// Apply one named SynthParams value to a synth instance (Instrument tab and
+// the per-stem MIDI lane synths share the parameter schema).
+static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
+    const float v = value.floatValue;
+    const int iv = value.intValue;
+    if ([key isEqualToString:@"oscType"])          sy.oscType.store(MAX(0, MIN(4, iv)), std::memory_order_relaxed);
+    else if ([key isEqualToString:@"wave"])        sy.wave.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"timbre"])      sy.timbre.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"shape"])       sy.shape.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"glide"])       sy.glide.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"attack"])      sy.attack.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"decay"])       sy.decay.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"sustain"])     sy.sustain.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"release"])     sy.release.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"filterType"])  sy.filterType.store(MAX(0, MIN(2, iv)), std::memory_order_relaxed);
+    else if ([key isEqualToString:@"cutoff"])      sy.cutoff.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"resonance"])   sy.resonance.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"envFilter"])   sy.envFilter.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"lfoShape"])    sy.lfoShape.store(MAX(0, MIN(4, iv)), std::memory_order_relaxed);
+    else if ([key isEqualToString:@"lfoRate"])     sy.lfoRate.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"lfoSync"])     sy.lfoSync.store(v > 0.5f, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"cycMode"])     sy.cycMode.store(MAX(0, MIN(2, iv)), std::memory_order_relaxed);
+    else if ([key isEqualToString:@"cycRise"])     sy.cycRise.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"cycFall"])     sy.cycFall.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"cycHold"])     sy.cycHold.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"cycRiseShape"]) sy.cycRiseShape.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"cycFallShape"]) sy.cycFallShape.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"cycAmount"])   sy.cycAmount.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"arpMode"])     sy.arpMode.store(MAX(0, MIN(6, iv)), std::memory_order_relaxed);
+    else if ([key isEqualToString:@"arpOct"])      sy.arpOct.store(MAX(1, MIN(4, iv)), std::memory_order_relaxed);
+    else if ([key isEqualToString:@"arpDiv"])      sy.arpDiv.store(MAX(0, MIN(5, iv)), std::memory_order_relaxed);
+    else if ([key isEqualToString:@"arpHold"])     sy.arpHold.store(v > 0.5f, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"arpSwing"])    sy.arpSwing.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"arpGate"])     sy.arpGate.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"arpSpice"])    sy.arpSpice.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"monoMode"])    sy.monoMode.store(v > 0.5f, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"chorus"])      sy.chorus.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"space"])       sy.space.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"volume"])      sy.volume.store(v, std::memory_order_relaxed);
+}
+
 - (void)userContentController:(WKUserContentController *)userContentController didReceiveScriptMessage:(WKScriptMessage *)message {
     if (![message.name isEqualToString:@"auHost"] || ![message.body isKindOfClass:[NSDictionary class]]) return;
     NSDictionary* body = message.body;
@@ -582,43 +633,7 @@ static BOOL isDevServerRunning(void) {
         NSNumber* value = body[@"value"];
         if ([key isKindOfClass:[NSString class]] &&
             [value isKindOfClass:[NSNumber class]] && self.sharedState) {
-            JamSynth& sy = self.sharedState->synth;
-            const float v = value.floatValue;
-            const int iv = value.intValue;
-            if ([key isEqualToString:@"oscType"])          sy.oscType.store(MAX(0, MIN(4, iv)), std::memory_order_relaxed);
-            else if ([key isEqualToString:@"wave"])        sy.wave.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"timbre"])      sy.timbre.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"shape"])       sy.shape.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"glide"])       sy.glide.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"attack"])      sy.attack.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"decay"])       sy.decay.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"sustain"])     sy.sustain.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"release"])     sy.release.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"filterType"])  sy.filterType.store(MAX(0, MIN(2, iv)), std::memory_order_relaxed);
-            else if ([key isEqualToString:@"cutoff"])      sy.cutoff.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"resonance"])   sy.resonance.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"envFilter"])   sy.envFilter.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"lfoShape"])    sy.lfoShape.store(MAX(0, MIN(4, iv)), std::memory_order_relaxed);
-            else if ([key isEqualToString:@"lfoRate"])     sy.lfoRate.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"lfoSync"])     sy.lfoSync.store(v > 0.5f, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"cycMode"])     sy.cycMode.store(MAX(0, MIN(2, iv)), std::memory_order_relaxed);
-            else if ([key isEqualToString:@"cycRise"])     sy.cycRise.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"cycFall"])     sy.cycFall.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"cycHold"])     sy.cycHold.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"cycRiseShape"]) sy.cycRiseShape.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"cycFallShape"]) sy.cycFallShape.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"cycAmount"])   sy.cycAmount.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"arpMode"])     sy.arpMode.store(MAX(0, MIN(6, iv)), std::memory_order_relaxed);
-            else if ([key isEqualToString:@"arpOct"])      sy.arpOct.store(MAX(1, MIN(4, iv)), std::memory_order_relaxed);
-            else if ([key isEqualToString:@"arpDiv"])      sy.arpDiv.store(MAX(0, MIN(5, iv)), std::memory_order_relaxed);
-            else if ([key isEqualToString:@"arpHold"])     sy.arpHold.store(v > 0.5f, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"arpSwing"])    sy.arpSwing.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"arpGate"])     sy.arpGate.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"arpSpice"])    sy.arpSpice.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"monoMode"])    sy.monoMode.store(v > 0.5f, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"chorus"])      sy.chorus.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"space"])       sy.space.store(v, std::memory_order_relaxed);
-            else if ([key isEqualToString:@"volume"])      sy.volume.store(v, std::memory_order_relaxed);
+            JamSetSynthParam(self.sharedState->synth, key, value);
         }
     }
     else if ([type isEqualToString:@"detectBpm"]) {
@@ -638,6 +653,76 @@ static BOOL isDevServerRunning(void) {
         NSNumber* idx = body[@"index"];
         if ([idx isKindOfClass:[NSNumber class]]) [self handleStudioTranscribe:idx.intValue];
     }
+    else if ([type isEqualToString:@"studioDetectChords"]) {
+        [self handleStudioDetectChords];
+    }
+    else if ([type isEqualToString:@"laneSource"]) {
+        NSNumber* idx = body[@"index"];
+        NSNumber* src = body[@"source"];
+        if ([idx isKindOfClass:[NSNumber class]] && [src isKindOfClass:[NSNumber class]]) {
+            [self handleLaneSource:idx.intValue midi:(src.intValue == 1)];
+        }
+    }
+    else if ([type isEqualToString:@"lanePatch"]) {
+        NSNumber* idx = body[@"index"];
+        if ([idx isKindOfClass:[NSNumber class]]) {
+            [self handleLanePatch:idx.intValue info:body];
+        }
+    }
+    else if ([type isEqualToString:@"laneEngine"]) {
+        NSNumber* idx = body[@"index"];
+        NSNumber* eng = body[@"engine"];
+        if ([idx isKindOfClass:[NSNumber class]] && [eng isKindOfClass:[NSNumber class]]) {
+            [self handleLaneEngine:idx.intValue engine:eng.intValue];
+        }
+    }
+    else if ([type isEqualToString:@"laneSfProgram"]) {
+        NSNumber* idx = body[@"index"];
+        NSNumber* prog = body[@"program"];
+        if ([idx isKindOfClass:[NSNumber class]] && [prog isKindOfClass:[NSNumber class]] &&
+            idx.intValue >= 1 && idx.intValue <= 7 && self.sharedState) {
+            self.sharedState->laneSfProgram[idx.intValue - 1]
+                .store(MAX(0, MIN(127, prog.intValue)), std::memory_order_relaxed);
+            [self studioPushLanes];
+        }
+    }
+    else if ([type isEqualToString:@"laneFx"]) {
+        NSNumber* idx = body[@"index"];
+        NSNumber* rev = body[@"reverb"];
+        NSNumber* ech = body[@"echo"];
+        if ([idx isKindOfClass:[NSNumber class]] &&
+            idx.intValue >= 1 && idx.intValue <= 7 && self.sharedState) {
+            JamLaneFx& fx = self.sharedState->laneFx[idx.intValue - 1];
+            if ([rev isKindOfClass:[NSNumber class]]) {
+                fx.reverb.store(MAX(0.0f, MIN(1.0f, rev.floatValue)),
+                                std::memory_order_relaxed);
+            }
+            if ([ech isKindOfClass:[NSNumber class]]) {
+                fx.echo.store(MAX(0.0f, MIN(1.0f, ech.floatValue)),
+                              std::memory_order_relaxed);
+            }
+            [self studioPushLanes];
+        }
+    }
+    else if ([type isEqualToString:@"laneClear"]) {
+        NSNumber* idx = body[@"index"];
+        if ([idx isKindOfClass:[NSNumber class]]) {
+            [self handleLaneClear:idx.intValue];
+        }
+    }
+    else if ([type isEqualToString:@"laneClipGet"]) {
+        NSNumber* idx = body[@"index"];
+        if ([idx isKindOfClass:[NSNumber class]]) {
+            [self handleLaneClipGet:idx.intValue];
+        }
+    }
+    else if ([type isEqualToString:@"laneClipSet"]) {
+        NSNumber* idx = body[@"index"];
+        NSArray* notes = body[@"notes"];
+        if ([idx isKindOfClass:[NSNumber class]] && [notes isKindOfClass:[NSArray class]]) {
+            [self handleLaneClipSet:idx.intValue notes:notes];
+        }
+    }
     else if ([type isEqualToString:@"studioCover"]) {
         NSNumber* idx = body[@"index"];
         if ([idx isKindOfClass:[NSNumber class]]) [self handleStudioCover:idx.intValue];
@@ -646,10 +731,36 @@ static BOOL isDevServerRunning(void) {
         NSString* action = body[@"action"];
         JamSharedState* sh = self.sharedState;
         if ([action isKindOfClass:[NSString class]] && sh) {
+            // Arm the count-in (预备拍): the count is back-derived from the
+            // song's beat grid — the entry point snaps forward to the next
+            // bar downbeat, so "…3, 4" flows straight into the song's "1"
+            // exactly one beat later.
+            const auto armCountIn = ^{
+                const int beats = sh->countInBeats.load(std::memory_order_relaxed);
+                if (beats <= 0) return;
+                const float bpm = sh->stemBpm.load(std::memory_order_relaxed);
+                const long B = (long)(60.0 / ((bpm < 40 || bpm > 300) ? 120.0 : bpm)
+                                      * 48000.0);
+                const long bar = 4 * B;
+                const long off = sh->stemBeatOff.load(std::memory_order_relaxed);
+                const int ph = sh->stemBarPhase.load(std::memory_order_relaxed);
+                const long len = sh->stemLen.load(std::memory_order_relaxed);
+                const long pos = sh->stemPos.load(std::memory_order_relaxed);
+                const long firstDown = off + (long)ph * B;
+                long D = firstDown;
+                if (pos > firstDown) {
+                    const long m = (pos - firstDown + bar - 1) / bar;
+                    D = firstDown + m * bar;
+                }
+                if (D < len) sh->stemPos.store(D, std::memory_order_relaxed);
+                sh->countInTotal.store(beats * B, std::memory_order_relaxed);
+                sh->countInLeft.store(beats * B, std::memory_order_release);
+            };
             if ([action isEqualToString:@"restart"]) {
                 sh->prevActive.store(false, std::memory_order_relaxed);
                 sh->stemPos.store(0, std::memory_order_relaxed);
                 if (sh->stemLen.load(std::memory_order_relaxed) > 0) {
+                    armCountIn();
                     sh->stemActive.store(true, std::memory_order_release);
                 }
             } else if ([action isEqualToString:@"play"]) {
@@ -659,18 +770,34 @@ static BOOL isDevServerRunning(void) {
                     if (sh->stemPos.load(std::memory_order_relaxed) >= len) {
                         sh->stemPos.store(0, std::memory_order_relaxed);
                     }
+                    armCountIn();
                     sh->stemActive.store(true, std::memory_order_release);
                 }
             } else {   // pause
                 sh->stemActive.store(false, std::memory_order_relaxed);
+                sh->countInLeft.store(0, std::memory_order_relaxed);
             }
+        }
+    }
+    else if ([type isEqualToString:@"studioCountIn"]) {
+        NSNumber* beats = body[@"beats"];
+        if ([beats isKindOfClass:[NSNumber class]] && self.sharedState) {
+            const int b = beats.intValue;
+            self.sharedState->countInBeats.store(
+                (b == 4 || b == 8) ? b : 0, std::memory_order_relaxed);
+        }
+    }
+    else if ([type isEqualToString:@"studioClick"]) {
+        NSNumber* on = body[@"on"];
+        if ([on isKindOfClass:[NSNumber class]] && self.sharedState) {
+            self.sharedState->clickOn.store(on.boolValue, std::memory_order_relaxed);
         }
     }
     else if ([type isEqualToString:@"studioMix"]) {
         NSNumber* idx = body[@"index"];
         JamSharedState* sh = self.sharedState;
         if ([idx isKindOfClass:[NSNumber class]] && sh &&
-            idx.intValue >= 0 && idx.intValue < 6) {
+            idx.intValue >= 0 && idx.intValue < 8) {
             const int i = idx.intValue;
             NSNumber* mute = body[@"mute"];
             NSNumber* solo = body[@"solo"];
@@ -766,8 +893,18 @@ static BOOL isDevServerRunning(void) {
     }
     else if ([type isEqualToString:@"aiPatch"]) {
         NSString* desc = body[@"value"];
+        NSNumber* lane = body[@"lane"];
         if ([desc isKindOfClass:[NSString class]] && desc.length > 0) {
-            [self handleAiPatch:desc];
+            [self handleAiPatch:desc
+                           lane:([lane isKindOfClass:[NSNumber class]] ? lane.intValue : -1)];
+        }
+    }
+    else if ([type isEqualToString:@"aiCompose"]) {
+        NSString* desc = body[@"value"];
+        NSNumber* lane = body[@"lane"];
+        if ([desc isKindOfClass:[NSString class]] && desc.length > 0 &&
+            [lane isKindOfClass:[NSNumber class]]) {
+            [self handleAiCompose:desc lane:lane.intValue];
         }
     }
     else if ([type isEqualToString:@"punchFx"]) {
@@ -1477,7 +1614,7 @@ static NSArray* JamWaveThumb(const float* L, const float* R, long n, int points)
 
 static NSArray* JamWaveThumbI16(const int16_t* interleaved, long frames, int points) {
     NSMutableArray* arr = [NSMutableArray arrayWithCapacity:points];
-    if (frames <= 0) { for (int i = 0; i < points; i++) [arr addObject:@0]; return arr; }
+    if (frames <= 0) return @[];   // empty lane -> empty thumb (UI keys off length)
     const long step = MAX(1L, frames / points);
     for (int p = 0; p < points; ++p) {
         const long s0 = p * step;
@@ -1549,7 +1686,9 @@ static NSString* const kJamKeyNames[12] = {@"C", @"C#", @"D", @"D#", @"E", @"F",
     const UInt32 chunk = 1 << 16;
     std::vector<float> bufL(chunk), bufR(chunk);
     while ((long)_songL.size() < maxFrames) {
-        AudioBufferList abl;
+        // AudioBufferList has storage for ONE buffer; allocate room for two.
+        struct { AudioBufferList list; AudioBuffer extra; } ablMem = {};
+        AudioBufferList& abl = ablMem.list;
         abl.mNumberBuffers = 2;
         abl.mBuffers[0] = {1, chunk * 4, bufL.data()};
         abl.mBuffers[1] = {1, chunk * 4, bufR.data()};
@@ -1571,6 +1710,17 @@ static NSString* const kJamKeyNames[12] = {@"C", @"C#", @"D", @"D#", @"E", @"F",
     std::vector<float> mono(n);
     for (long i = 0; i < n; ++i) mono[i] = (_songL[i] + _songR[i]) * 0.5f;
     _songAnalysis = jamstudio::analyze(mono.data(), n);
+    {
+        // Refine the beat grid (sub-BPM tempo + first-beat offset + downbeat)
+        // so the click metronome and count-in actually line up with the song.
+        jamstudio::BeatGrid bg =
+            jamstudio::beatGrid(mono.data(), n, _songAnalysis.bpm);
+        _songAnalysis.bpm = bg.bpm;
+        self.sharedState->stemBpm.store(bg.bpm, std::memory_order_relaxed);
+        self.sharedState->stemBeatOff.store((long)(bg.offsetSec * 48000.0),
+                                            std::memory_order_relaxed);
+        self.sharedState->stemBarPhase.store(bg.barPhase, std::memory_order_relaxed);
+    }
 
     NSMutableArray* sections = [NSMutableArray array];
     static NSString* const labels[4] = {@"break", @"verse", @"drop", @"build"};
@@ -1595,13 +1745,31 @@ static NSString* const kJamKeyNames[12] = {@"C", @"C#", @"D", @"D#", @"E", @"F",
 
     // Decode + analysis done — separation is an explicit user action
     // (the ✂ Separate button), so a model downloaded later still applies.
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 8; ++i) {
         _stems[i].clear();
         _takeL[i].clear();
         _takeR[i].clear();
         _stemNotes[i].clear();
     }
+    _chords.clear();
+    // Drop all MIDI lanes (the new song invalidates every clip).
+    for (int t = 0; t < 8; ++t) {
+        _laneClip[t].clear();
+        if (t >= 1) {
+            const int k = t - 1;
+            self.sharedState->stemSource[t].store(0, std::memory_order_relaxed);
+            self.sharedState->laneEv[k].store(nullptr, std::memory_order_relaxed);
+            self.sharedState->laneCount[k].store(0, std::memory_order_relaxed);
+        }
+    }
     dispatch_async(dispatch_get_main_queue(), ^{
+        // The render thread has dropped the old pointers by now (60 ms+).
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            for (int t = 0; t < 8; ++t) self->_laneEvBuf[t].clear();
+        });
+        [self studioPushChords];
+        [self studioPushSources];
         self->_studioBusy = NO;
         [self studioProgress:@"ready" pct:1.0f];
     });
@@ -1646,12 +1814,14 @@ static NSString* const kJamKeyNames[12] = {@"C", @"C#", @"D", @"D#", @"E", @"F",
         for (int i = 3; i < 6; ++i) _stems[i].clear();
         nSources = 3;
     }
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 8; ++i) {
         _takeL[i].clear();
         _takeR[i].clear();
         _stemNotes[i].clear();
         _stemSource[i] = _stems[i].empty() ? nil : (neural ? @"neural" : @"hpss");
     }
+
+    [self studioRefineBeatGridFromDrums];
 
     const BOOL isNeural = neural;
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -1663,11 +1833,31 @@ static NSString* const kJamKeyNames[12] = {@"C", @"C#", @"D", @"D#", @"E", @"F",
     });
 }
 
+// Re-derive the beat grid from the DRUMS stem: percussion onsets give a far
+// cleaner tempo/offset/downbeat than the full mix. No-op without drums.
+- (void)studioRefineBeatGridFromDrums {
+    if (_stems[0].empty() || !self.sharedState) return;
+    const long nf = (long)_stems[0].size() / 2;
+    std::vector<float> mono(nf);
+    for (long i = 0; i < nf; ++i) {
+        mono[i] = (_stems[0][i * 2] + _stems[0][i * 2 + 1]) * (0.5f / 32768.0f);
+    }
+    jamstudio::BeatGrid bg =
+        jamstudio::beatGrid(mono.data(), nf, _songAnalysis.bpm);
+    _songAnalysis.bpm = bg.bpm;
+    self.sharedState->stemBpm.store(bg.bpm, std::memory_order_relaxed);
+    self.sharedState->stemBeatOff.store((long)(bg.offsetSec * 48000.0),
+                                        std::memory_order_relaxed);
+    self.sharedState->stemBarPhase.store(bg.barPhase, std::memory_order_relaxed);
+    NSLog(@"Jam studio: drum beat grid — %.3f bpm, offset %.3fs, bar phase %d",
+          bg.bpm, bg.offsetSec, bg.barPhase);
+}
+
 // Push all stem waveforms + per-stem sources to the UI (main thread).
 - (void)studioPushStemWaves {
     NSMutableArray* waves = [NSMutableArray array];
     NSMutableArray* sources = [NSMutableArray array];
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 8; ++i) {
         const long frames = (long)_stems[i].size() / 2;
         [waves addObject:JamWaveThumbI16(_stems[i].data(), frames, 480)];
         [sources addObject:_stemSource[i] ?: @""];
@@ -1679,12 +1869,12 @@ static NSString* const kJamKeyNames[12] = {@"C", @"C#", @"D", @"D#", @"E", @"F",
 // Decoded at 48 kHz stereo and length-aligned to the loaded song so the
 // multi-track mix player stays in sync.
 - (void)handleStudioImportStem:(int)idx {
-    if (idx < 0 || idx > 5 || _studioBusy) return;
+    if (idx < 0 || idx > 7 || _studioBusy) return;
     NSOpenPanel* panel = [NSOpenPanel openPanel];
     [panel setCanChooseFiles:YES];
     [panel setAllowedContentTypes:@[[UTType typeWithIdentifier:@"public.audio"]]];
-    static NSString* const stemNames[6] = {@"drums", @"bass", @"other", @"vocals",
-                                           @"guitar", @"piano"};
+    static NSString* const stemNames[8] = {@"drums", @"bass", @"other", @"vocals",
+                                           @"guitar", @"piano", @"aux1", @"aux2"};
     [panel setMessage:[NSString stringWithFormat:@"Select an audio file for the %@ stem",
                        stemNames[idx]]];
     void (^completion)(NSModalResponse) = ^(NSModalResponse result) {
@@ -1713,7 +1903,9 @@ static NSString* const kJamKeyNames[12] = {@"C", @"C#", @"D", @"D#", @"E", @"F",
                 std::vector<float> bufL(chunk), bufR(chunk);
                 const long maxFrames = 48000L * 60 * 8;
                 while ((long)L.size() < maxFrames) {
-                    AudioBufferList abl;
+                    // AudioBufferList has storage for ONE buffer; allocate room for two.
+                    struct { AudioBufferList list; AudioBuffer extra; } ablMem = {};
+                    AudioBufferList& abl = ablMem.list;
                     abl.mNumberBuffers = 2;
                     abl.mBuffers[0] = {1, chunk * 4, bufL.data()};
                     abl.mBuffers[1] = {1, chunk * 4, bufR.data()};
@@ -1732,7 +1924,7 @@ static NSString* const kJamKeyNames[12] = {@"C", @"C#", @"D", @"D#", @"E", @"F",
             // stem, else the imported file itself defines the length.
             long target = (long)self->_songL.size();
             if (target == 0) {
-                for (int k = 0; k < 6; ++k) {
+                for (int k = 0; k < 8; ++k) {
                     target = MAX(target, (long)self->_stems[k].size() / 2);
                 }
             }
@@ -1749,6 +1941,7 @@ static NSString* const kJamKeyNames[12] = {@"C", @"C#", @"D", @"D#", @"E", @"F",
             }
             self->_stemSource[idx] = @"imported";
             self->_stemNotes[idx].clear();
+            if (idx == 0) [self studioRefineBeatGridFromDrums];
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self studioPushStemWaves];
                 [self studioPublishStems];
@@ -1780,7 +1973,9 @@ static BOOL JamDecode48k(NSURL* url, std::vector<float>& L, std::vector<float>& 
     const long maxFrames = 48000L * 60 * 8;
     L.clear(); R.clear();
     while ((long)L.size() < maxFrames) {
-        AudioBufferList abl;
+        // AudioBufferList has storage for ONE buffer; allocate room for two.
+        struct { AudioBufferList list; AudioBuffer extra; } ablMem = {};
+        AudioBufferList& abl = ablMem.list;
         abl.mNumberBuffers = 2;
         abl.mBuffers[0] = {1, chunk * 4, bufL.data()};
         abl.mBuffers[1] = {1, chunk * 4, bufR.data()};
@@ -1803,7 +1998,7 @@ static NSString* const kBpModelURL =
 }
 
 - (void)handleStudioTranscribe:(int)idx {
-    if (idx < 0 || idx > 5 || _studioBusy || _stems[idx].empty()) return;
+    if (idx < 0 || idx > 7 || _studioBusy || _stems[idx].empty()) return;
     NSString* model = [self bpModelPath];
     NSDictionary* attrs = [[NSFileManager defaultManager]
         attributesOfItemAtPath:model error:nil];
@@ -1846,6 +2041,11 @@ static NSString* const kBpModelURL =
             }
             self->_stemNotes[idx] = std::move(notes);
             [self studioPushNotes:idx];
+            // If this lane already plays MIDI (e.g. a chord-voiced fallback),
+            // swap in the fresh transcription.
+            if (idx >= 1 && idx <= 7 && !self->_laneEvBuf[idx].empty()) {
+                [self lanePublish:idx];
+            }
             self->_studioBusy = NO;
             [self studioProgress:@"ready" pct:1.0f];
         });
@@ -1863,6 +2063,503 @@ static NSString* const kBpModelURL =
     }
     [self sendStateUpdate:@{@"studioNotes": @{
         @"index": @(idx),
+        @"count": @((int)notes.size()),
+        @"ribbon": ribbon,
+    }}];
+}
+
+// ── Chord recognition + AUX re-voicing ───────────────────────────────────────
+
+- (void)handleStudioDetectChords {
+    if (_studioBusy) return;
+    // Drums-free stem mix when available (much cleaner chroma), else the song.
+    bool anyHarm = false;
+    for (int i = 1; i < 8; ++i) anyHarm |= !_stems[i].empty();
+    if (!anyHarm && _songL.empty()) {
+        [self sendStateUpdate:@{@"studioError": @"load a song or stems first"}];
+        return;
+    }
+    _studioBusy = YES;
+    [self studioProgress:@"detecting chords" pct:0.1f];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        std::vector<float> mono;
+        if (anyHarm) {
+            long n = 0;
+            for (int i = 1; i < 8; ++i) n = MAX(n, (long)self->_stems[i].size() / 2);
+            mono.assign(n, 0.0f);
+            for (int i = 1; i < 8; ++i) {     // skip drums (index 0)
+                const auto& st = self->_stems[i];
+                const long fn = (long)st.size() / 2;
+                for (long k = 0; k < fn; ++k) {
+                    mono[k] += (st[k * 2] + st[k * 2 + 1]) * (0.5f / 32768.0f);
+                }
+            }
+        } else {
+            const long n = (long)self->_songL.size();
+            mono.resize(n);
+            for (long k = 0; k < n; ++k) {
+                mono[k] = (self->_songL[k] + self->_songR[k]) * 0.5f;
+            }
+        }
+        [self studioProgress:@"detecting chords" pct:0.4f];
+        auto chords = jamchords::detect(mono.data(), (long)mono.size(),
+                                        self->_songAnalysis.bpm,
+                                        self->_songAnalysis.keyIdx,
+                                        self->_songAnalysis.minor);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_chords = std::move(chords);
+            [self studioPushChords];
+            self->_studioBusy = NO;
+            [self studioProgress:@"ready" pct:1.0f];
+            int named = 0;
+            for (const auto& c : self->_chords) named += !c.none;
+            [self sendStateUpdate:@{@"studioNotice":
+                [NSString stringWithFormat:@"✓ 识别到 %d 段和弦（CHORDS 轨）", named]}];
+        });
+    });
+}
+
+- (void)studioPushChords {
+    NSMutableArray* arr = [NSMutableArray array];
+    for (const auto& c : _chords) {
+        [arr addObject:@{@"start": @(c.start), @"end": @(c.end),
+                         @"label": [NSString stringWithUTF8String:
+                                    jamchords::chordName(c).c_str()],
+                         @"minor": @(c.minor), @"none": @(c.none)}];
+    }
+    [self sendStateUpdate:@{@"studioChords": arr}];
+}
+
+// Build the AUX clip from the chord timeline in the given style and publish
+// it to the render-thread sequencer.
+// ── Per-stem MIDI lanes ──────────────────────────────────────────────────
+// Lane k of JamSharedState ↔ stem k+1 (bass, other, vocals, guitar, piano).
+
+// Stem-appropriate synth patch, applied once per lane.
+static void JamApplyLanePatch(JamSynth& s, int stem) {
+    s.arpMode.store(0);
+    s.matrix[0].store(0);
+    switch (stem) {
+        case 1:   // BASS — mono lowpass saw with a little glide
+            s.monoMode.store(true);
+            s.oscType.store(0); s.wave.store(0.15f); s.timbre.store(0.4f);
+            s.glide.store(0.06f);
+            s.attack.store(0.01f); s.decay.store(0.35f);
+            s.sustain.store(0.75f); s.release.store(0.12f);
+            s.cutoff.store(0.38f); s.resonance.store(0.18f); s.envFilter.store(0.5f);
+            s.chorus.store(0.0f); s.space.store(0.05f); s.volume.store(0.75f);
+            break;
+        case 2:   // OTHER — supersaw pad, slow swell, wide
+            s.monoMode.store(false);
+            s.oscType.store(1); s.wave.store(0.55f); s.timbre.store(0.6f);
+            s.glide.store(0.0f);
+            s.attack.store(0.3f); s.decay.store(0.5f);
+            s.sustain.store(0.85f); s.release.store(0.45f);
+            s.cutoff.store(0.55f); s.resonance.store(0.12f); s.envFilter.store(0.3f);
+            s.chorus.store(0.45f); s.space.store(0.35f); s.volume.store(0.5f);
+            break;
+        case 3:   // VOCALS — mono portamento lead
+            s.monoMode.store(true);
+            s.oscType.store(0); s.wave.store(0.6f); s.timbre.store(0.5f);
+            s.glide.store(0.1f);
+            s.attack.store(0.02f); s.decay.store(0.4f);
+            s.sustain.store(0.85f); s.release.store(0.2f);
+            s.cutoff.store(0.62f); s.resonance.store(0.2f); s.envFilter.store(0.4f);
+            s.chorus.store(0.2f); s.space.store(0.3f); s.volume.store(0.65f);
+            break;
+        case 4:   // GUITAR — plucked, fast decay, no sustain
+            s.monoMode.store(false);
+            s.oscType.store(2); s.wave.store(0.35f); s.timbre.store(0.45f);
+            s.glide.store(0.0f);
+            s.attack.store(0.0f); s.decay.store(0.28f);
+            s.sustain.store(0.0f); s.release.store(0.2f);
+            s.cutoff.store(0.6f); s.resonance.store(0.25f); s.envFilter.store(0.55f);
+            s.chorus.store(0.25f); s.space.store(0.15f); s.volume.store(0.65f);
+            break;
+        default:  // PIANO — keys: snappy attack, medium decay
+            s.monoMode.store(false);
+            s.oscType.store(0); s.wave.store(0.4f); s.timbre.store(0.45f);
+            s.glide.store(0.0f);
+            s.attack.store(0.0f); s.decay.store(0.5f);
+            s.sustain.store(0.35f); s.release.store(0.22f);
+            s.cutoff.store(0.65f); s.resonance.store(0.15f); s.envFilter.store(0.45f);
+            s.chorus.store(0.15f); s.space.store(0.2f); s.volume.store(0.6f);
+            break;
+    }
+}
+
+// Chord-voicing fallback style per stem (when no transcription exists).
+static int JamLaneDefaultStyle(int stem) {
+    switch (stem) {
+        case 1: return 4;   // bass
+        case 2: return 0;   // other → pad
+        case 3: return 3;   // vocals → arp (a melodic placeholder)
+        case 4: return 1;   // guitar → pluck
+        case 5: return 2;   // piano → stab
+        default: return 0;  // aux → pad
+    }
+}
+
+// Build + publish the MIDI clip for a stem: its transcription when present,
+// otherwise a chord-voiced phrase in the stem's default style.
+- (BOOL)lanePublish:(int)stem {
+    if (stem < 1 || stem > 7) return NO;
+    std::vector<JamNote> notes = _stemNotes[stem];
+    BOOL fromChords = NO;
+    if (notes.empty()) {
+        // Chord-voicing fallback applies to the separated stems only — AUX
+        // lanes start empty by design (write in the piano roll / AI compose).
+        if (stem >= 6 || _chords.empty()) return NO;
+        notes = jamchords::voice(_chords, _songAnalysis.bpm,
+                                 JamLaneDefaultStyle(stem));
+        fromChords = YES;
+    }
+    if (notes.empty()) return NO;
+
+    // Convert to sorted sample-time on/off events.
+    std::vector<JamSharedState::AuxEv> evs;
+    evs.reserve(notes.size() * 2);
+    for (const auto& n : notes) {
+        const long on = (long)(n.start * 48000.0);
+        long off = (long)((n.start + n.duration) * 48000.0);
+        if (off <= on) off = on + 2400;
+        const uint8_t vel = (uint8_t)MAX(1, MIN(127, (int)lround(n.velocity * 127)));
+        evs.push_back({on, (uint8_t)MAX(0, MIN(127, n.pitch)), vel, true});
+        evs.push_back({off, (uint8_t)MAX(0, MIN(127, n.pitch)), 0, false});
+    }
+    std::sort(evs.begin(), evs.end(),
+              [](const JamSharedState::AuxEv& a, const JamSharedState::AuxEv& b) {
+                  return a.sample < b.sample || (a.sample == b.sample && !a.on && b.on);
+              });
+
+    JamSharedState* sh = self.sharedState;
+    const int k = stem - 1;
+    if (!_lanePatched[stem]) {
+        JamApplyLanePatch(sh->laneSynth[k], stem);
+        _lanePatched[stem] = YES;
+    }
+    // Swap-publish: point the render thread away, replace, re-point.
+    sh->laneEv[k].store(nullptr, std::memory_order_release);
+    sh->laneCount[k].store(0, std::memory_order_relaxed);
+    usleep(20000);
+    _laneEvBuf[stem] = std::move(evs);
+    sh->laneCount[k].store((long)_laneEvBuf[stem].size(), std::memory_order_relaxed);
+    sh->laneEv[k].store(_laneEvBuf[stem].data(), std::memory_order_release);
+    sh->laneGen[k].fetch_add(1, std::memory_order_relaxed);
+    _laneClip[stem] = std::move(notes);
+    [self studioPublishStems];   // MIDI-only sessions get their timeline from clips
+
+    // Show the clip on the lane's ribbon (chord-voiced clips have no
+    // transcription ribbon yet).
+    if (fromChords) [self studioPushNotes:stem fromClip:YES];
+    return YES;
+}
+
+- (void)handleLaneSource:(int)stem midi:(BOOL)midi {
+    if (stem < 1 || stem > 7) return;
+    JamSharedState* sh = self.sharedState;
+    if (midi && _laneEvBuf[stem].empty()) {
+        if (![self lanePublish:stem]) {
+            [self sendStateUpdate:@{@"studioError": stem >= 6
+                ? @"空轨：先用 ✎ 打开钢琴卷写 MIDI（手写或 ✨ AI 生成）"
+                : @"先 ♪ MIDI 转录该轨，或 ♪ Chords 识别和弦（自动生成乐句）"}];
+            return;
+        }
+    }
+    sh->stemSource[stem].store(midi ? 1 : 0, std::memory_order_relaxed);
+    [self studioPushSources];
+}
+
+// Remove an AUX lane's content entirely (audio + MIDI + patch).
+- (void)handleLaneClear:(int)stem {
+    if (stem < 6 || stem > 7 || !self.sharedState) return;
+    JamSharedState* sh = self.sharedState;
+    const int k = stem - 1;
+    sh->stemSource[stem].store(0, std::memory_order_relaxed);
+    sh->stemBuf[stem].store(nullptr, std::memory_order_relaxed);
+    sh->laneEv[k].store(nullptr, std::memory_order_relaxed);
+    sh->laneCount[k].store(0, std::memory_order_relaxed);
+    sh->laneFx[k].reverb.store(0, std::memory_order_relaxed);
+    sh->laneFx[k].echo.store(0, std::memory_order_relaxed);
+    _lanePatchInfo[stem] = nil;
+    _stemSource[stem] = nil;
+    // Free the buffers after the render thread has dropped the pointers.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        self->_stems[stem].clear();
+        self->_stemNotes[stem].clear();
+        self->_laneClip[stem].clear();
+        self->_laneEvBuf[stem].clear();
+        [self studioPushStemWaves];
+        [self studioPushNotes:stem];
+        [self studioPushSources];
+        [self studioPushPatches];
+        [self studioPushLanes];
+        [self studioPublishStems];
+    });
+}
+
+- (void)studioPushSources {
+    JamSharedState* sh = self.sharedState;
+    NSMutableArray* arr = [NSMutableArray array];
+    for (int t = 0; t < 8; ++t) {
+        [arr addObject:@(sh->stemSource[t].load(std::memory_order_relaxed))];
+    }
+    [self sendStateUpdate:@{@"studioSources": arr}];
+}
+
+// Apply a full patch (Instrument-tab SynthParams numeric schema + 25-cell mod
+// matrix) to a lane synth and remember it for PGM packaging.
+// info: {index, name, origin: 'factory'|'user'|'ai', params: {...}, matrix: [25]}
+- (void)handleLanePatch:(int)stem info:(NSDictionary*)info {
+    if (stem < 1 || stem > 7 || !self.sharedState) return;
+    JamSynth& sy = self.sharedState->laneSynth[stem - 1];
+    NSDictionary* params = info[@"params"];
+    if (![params isKindOfClass:[NSDictionary class]]) return;
+    for (NSString* key in params) {
+        NSNumber* v = params[key];
+        if ([key isKindOfClass:[NSString class]] && [v isKindOfClass:[NSNumber class]]) {
+            JamSetSynthParam(sy, key, v);
+        }
+    }
+    NSArray* mx = info[@"matrix"];
+    for (int i = 0; i < 25; ++i) {
+        float v = 0;
+        if ([mx isKindOfClass:[NSArray class]] && (NSUInteger)i < mx.count &&
+            [mx[i] isKindOfClass:[NSNumber class]]) {
+            v = MAX(-1.0f, MIN(1.0f, [mx[i] floatValue]));
+        }
+        sy.matrix[i].store(v, std::memory_order_relaxed);
+    }
+    NSString* pname = [info[@"name"] isKindOfClass:[NSString class]] ? info[@"name"] : @"patch";
+    NSString* origin = [info[@"origin"] isKindOfClass:[NSString class]] ? info[@"origin"] : @"user";
+    _lanePatchInfo[stem] = @{@"name": pname, @"origin": origin,
+                             @"params": params,
+                             @"matrix": [mx isKindOfClass:[NSArray class]] ? mx : @[]};
+    _lanePatched[stem] = YES;   // don't overwrite with the built-in default later
+    [self studioPushPatches];
+}
+
+- (void)studioPushPatches {
+    NSMutableArray* arr = [NSMutableArray array];
+    for (int t = 0; t < 8; ++t) {
+        NSDictionary* p = _lanePatchInfo[t];
+        [arr addObject:p ? @{@"name": p[@"name"] ?: @"patch",
+                             @"origin": p[@"origin"] ?: @"user"}
+                         : (id)[NSNull null]];
+    }
+    [self sendStateUpdate:@{@"studioPatches": arr}];
+}
+
+// ── SF2 sample engine (TinySoundFont) ──
+// One master font; each lane gets a tsf_copy that shares the sample data.
+
+static NSString* const kSf2URL =
+    @"https://raw.githubusercontent.com/mrbumpy409/GeneralUser-GS/main/GeneralUser-GS.sf2";
+
+- (NSString*)sf2Path {
+    return [[self sepModelDir] stringByAppendingPathComponent:@"GeneralUser-GS.sf2"];
+}
+
+// Default GM program per stem when SF2 is first enabled.
+static int JamLaneDefaultProgram(int stem) {
+    switch (stem) {
+        case 1: return 33;   // Electric Bass (finger)
+        case 2: return 48;   // String Ensemble
+        case 3: return 52;   // Choir Aahs
+        case 4: return 25;   // Steel Guitar
+        case 5: return 0;    // Grand Piano
+        default: return 40;  // Violin (aux lanes)
+    }
+}
+
+// Load (downloading first if needed) and publish per-lane tsf instances.
+// Calls done(YES) on the main queue once lanes can play SF2.
+- (void)laneEnsureSf:(void (^)(BOOL))done {
+    if (self.sharedState->laneSf[0].load(std::memory_order_relaxed)) { done(YES); return; }
+    if (_sfBusy) { done(NO); return; }
+    _sfBusy = YES;
+    NSString* path = [self sf2Path];
+
+    void (^loadIt)(void) = ^{
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            tsf* master = tsf_load_filename(path.fileSystemRepresentation);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (!master) {
+                    self->_sfBusy = NO;
+                    [self sendStateUpdate:@{@"studioError": @"音色库加载失败"}];
+                    [self studioProgress:@"ready" pct:1.0f];
+                    done(NO);
+                    return;
+                }
+                self->_sfMaster = master;
+                for (int k = 0; k < JamSharedState::kMidiLanes; ++k) {
+                    tsf* c = tsf_copy(master);
+                    tsf_set_output(c, TSF_STEREO_UNWEAVED, 48000, 0.0f);
+                    tsf_set_max_voices(c, 48);   // preallocate (audio-thread safety)
+                    const int prog = self.sharedState->laneSfProgram[k]
+                                         .load(std::memory_order_relaxed);
+                    tsf_channel_set_presetnumber(c, 0, prog, 0);
+                    self.sharedState->laneSfProgApplied[k] = prog;
+                    self.sharedState->laneSf[k].store(c, std::memory_order_release);
+                }
+                self->_sfBusy = NO;
+                [self studioProgress:@"ready" pct:1.0f];
+                [self sendStateUpdate:@{@"studioNotice":
+                    [NSString stringWithFormat:@"✓ 音色库就绪（%d 个预设）",
+                     tsf_get_presetcount(master)]}];
+                done(YES);
+            });
+        });
+    };
+
+    if ([[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        [self studioProgress:@"loading soundfont" pct:0.5f];
+        loadIt();
+        return;
+    }
+    // Download (~31 MB) then load.
+    [self studioProgress:@"downloading soundfont" pct:0.02f];
+    NSURLSessionDownloadTask* task = [[NSURLSession sharedSession]
+        downloadTaskWithURL:[NSURL URLWithString:kSf2URL]
+          completionHandler:^(NSURL* loc, NSURLResponse* resp, NSError* err) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (err || !loc) {
+                    self->_sfBusy = NO;
+                    [self sendStateUpdate:@{@"studioError":
+                        [NSString stringWithFormat:@"音色库下载失败: %@",
+                         err.localizedDescription ?: @"no data"]}];
+                    [self studioProgress:@"ready" pct:1.0f];
+                    done(NO);
+                    return;
+                }
+                [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+                NSError* mvErr = nil;
+                [[NSFileManager defaultManager] moveItemAtURL:loc
+                    toURL:[NSURL fileURLWithPath:path] error:&mvErr];
+                if (mvErr) {
+                    self->_sfBusy = NO;
+                    [self sendStateUpdate:@{@"studioError": @"音色库保存失败"}];
+                    done(NO);
+                    return;
+                }
+                [self studioProgress:@"loading soundfont" pct:0.9f];
+                loadIt();
+            });
+        }];
+    [task resume];
+    // Progress poll (NSURLSession download progress via KVO is overkill here).
+    __weak NSURLSessionDownloadTask* wTask = task;
+    NSTimer* timer = [NSTimer scheduledTimerWithTimeInterval:0.3 repeats:YES
+                                                       block:^(NSTimer* t) {
+        NSURLSessionDownloadTask* st = wTask;
+        if (!st || st.state != NSURLSessionTaskStateRunning) { [t invalidate]; return; }
+        const int64_t got = st.countOfBytesReceived;
+        const int64_t want = st.countOfBytesExpectedToReceive;
+        if (want > 0) {
+            [self studioProgress:@"downloading soundfont"
+                             pct:0.02f + 0.85f * (float)got / (float)want];
+        }
+    }];
+    (void)timer;
+}
+
+- (void)handleLaneEngine:(int)stem engine:(int)engine {
+    if (stem < 1 || stem > 7 || !self.sharedState) return;
+    JamSharedState* sh = self.sharedState;
+    const int k = stem - 1;
+    if (engine == 1) {
+        // First time on this lane: give it a stem-appropriate GM program.
+        if (sh->laneSf[k].load(std::memory_order_relaxed) == nullptr &&
+            sh->laneSfProgram[k].load(std::memory_order_relaxed) == 0 &&
+            JamLaneDefaultProgram(stem) != 0) {
+            sh->laneSfProgram[k].store(JamLaneDefaultProgram(stem),
+                                       std::memory_order_relaxed);
+        }
+        [self laneEnsureSf:^(BOOL ok) {
+            if (!ok) return;
+            sh->laneEngine[k].store(1, std::memory_order_relaxed);
+            [self studioPushLanes];
+        }];
+        // Optimistic UI update (download may take a while).
+        [self studioPushLanes];
+        return;
+    }
+    sh->laneEngine[k].store(0, std::memory_order_relaxed);
+    [self studioPushLanes];
+}
+
+- (void)studioPushLanes {
+    JamSharedState* sh = self.sharedState;
+    NSMutableArray* arr = [NSMutableArray array];
+    for (int t = 0; t < 8; ++t) {
+        if (t == 0) { [arr addObject:[NSNull null]]; continue; }
+        const int k = t - 1;
+        [arr addObject:@{
+            @"engine": @(sh->laneEngine[k].load(std::memory_order_relaxed)),
+            @"program": @(sh->laneSfProgram[k].load(std::memory_order_relaxed)),
+            @"reverb": @(sh->laneFx[k].reverb.load(std::memory_order_relaxed)),
+            @"echo": @(sh->laneFx[k].echo.load(std::memory_order_relaxed)),
+        }];
+    }
+    [self sendStateUpdate:@{@"studioLanes": arr}];
+}
+
+// ── MIDI clip editor (piano roll) ──
+// Full-resolution clip for the editor: what the lane actually plays.
+- (void)handleLaneClipGet:(int)stem {
+    if (stem < 1 || stem > 7) return;
+    const auto& notes = !_laneClip[stem].empty() ? _laneClip[stem] : _stemNotes[stem];
+    NSMutableArray* arr = [NSMutableArray arrayWithCapacity:notes.size()];
+    for (const auto& n : notes) {
+        [arr addObject:@[@(n.start), @(n.duration), @(n.pitch), @(n.velocity)]];
+    }
+    [self sendStateUpdate:@{@"studioClip": @{@"index": @(stem), @"notes": arr}}];
+}
+
+// Edited clip back from the piano roll: becomes the lane's notes, republished
+// to the render thread immediately so changes are audible during playback.
+- (void)handleLaneClipSet:(int)stem notes:(NSArray*)arr {
+    if (stem < 1 || stem > 7) return;
+    std::vector<JamNote> notes;
+    notes.reserve(arr.count);
+    for (NSArray* e in arr) {
+        if (![e isKindOfClass:[NSArray class]] || e.count < 4) continue;
+        JamNote n;
+        n.start = MAX(0.0, [e[0] doubleValue]);
+        n.duration = MAX(0.01, [e[1] doubleValue]);
+        n.pitch = MAX(0, MIN(127, [e[2] intValue]));
+        n.velocity = MAX(0.05f, MIN(1.0f, [e[3] floatValue]));
+        notes.push_back(n);
+    }
+    std::sort(notes.begin(), notes.end(),
+              [](const JamNote& a, const JamNote& b) { return a.start < b.start; });
+    _stemNotes[stem] = std::move(notes);
+    [self studioPushNotes:stem];
+    // Republish when this lane is (or was) playing MIDI.
+    if (!_laneEvBuf[stem].empty() ||
+        self.sharedState->stemSource[stem].load(std::memory_order_relaxed) == 1) {
+        [self lanePublish:stem];
+    } else if (_stems[stem].empty() && !_stemNotes[stem].empty()) {
+        // A lane with no audio (AUX) gets MIDI as its source automatically.
+        if ([self lanePublish:stem]) {
+            self.sharedState->stemSource[stem].store(1, std::memory_order_relaxed);
+            [self studioPushSources];
+        }
+    }
+}
+
+// Push a stem lane's note ribbon (from transcription or the published clip).
+- (void)studioPushNotes:(int)stem fromClip:(BOOL)fromClip {
+    const auto& notes = fromClip ? _laneClip[stem] : _stemNotes[stem];
+    NSMutableArray* ribbon = [NSMutableArray array];
+    const size_t step = MAX((size_t)1, notes.size() / 1000);
+    for (size_t i = 0; i < notes.size(); i += step) {
+        const auto& n = notes[i];
+        [ribbon addObject:@[@(n.start), @(n.start + n.duration), @(n.pitch)]];
+    }
+    [self sendStateUpdate:@{@"studioNotes": @{
+        @"index": @(stem),
         @"count": @((int)notes.size()),
         @"ribbon": ribbon,
     }}];
@@ -1913,7 +2610,17 @@ static BOOL JamWriteWav(NSURL* url, const int16_t* interleaved, long frames) {
         self.sharedState->prevActive.store(false, std::memory_order_relaxed);
         [self studioProgress:@"loading pgm" pct:0.05f];
         dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            // Drop the MIDI lanes before touching their buffers.
+            for (int t = 1; t <= 7; ++t) {
+                self.sharedState->stemSource[t].store(0, std::memory_order_relaxed);
+                self.sharedState->laneEv[t - 1].store(nullptr, std::memory_order_relaxed);
+                self.sharedState->laneCount[t - 1].store(0, std::memory_order_relaxed);
+            }
             usleep(60000);
+            for (int t = 0; t < 8; ++t) {
+                self->_laneEvBuf[t].clear();
+                self->_laneClip[t].clear();
+            }
             NSDictionary* song = pgm[@"song"];
             NSString* name = [song isKindOfClass:[NSDictionary class]] ? song[@"name"] : nil;
             self->_songName = [name isKindOfClass:[NSString class]] ? name : @"pgm";
@@ -1931,10 +2638,10 @@ static BOOL JamWriteWav(NSURL* url, const int16_t* interleaved, long frames) {
             }
 
             // Stems by canonical name.
-            static NSString* const names[6] = {@"drums", @"bass", @"other", @"vocals",
-                                               @"guitar", @"piano"};
+            static NSString* const names[8] = {@"drums", @"bass", @"other", @"vocals",
+                                               @"guitar", @"piano", @"aux1", @"aux2"};
             long maxFrames = (long)self->_songL.size();
-            for (int i = 0; i < 6; ++i) {
+            for (int i = 0; i < 8; ++i) {
                 self->_stems[i].clear();
                 self->_stemSource[i] = nil;
                 self->_takeL[i].clear();
@@ -1963,7 +2670,7 @@ static BOOL JamWriteWav(NSURL* url, const int16_t* interleaved, long frames) {
                 return;
             }
             // Length-align every loaded stem (mixer requires equal lengths).
-            for (int i = 0; i < 6; ++i) {
+            for (int i = 0; i < 8; ++i) {
                 if (!self->_stems[i].empty()) {
                     self->_stems[i].resize(maxFrames * 2, 0);
                 }
@@ -1975,6 +2682,26 @@ static BOOL JamWriteWav(NSURL* url, const int16_t* interleaved, long frames) {
             NSString* key = [song isKindOfClass:[NSDictionary class]] ? song[@"key"] : nil;
             self->_songAnalysis.bpm = [bpm isKindOfClass:[NSNumber class]]
                 ? bpm.floatValue : 120.0f;
+            self.sharedState->stemBpm.store(self->_songAnalysis.bpm,
+                                            std::memory_order_relaxed);
+            if (!self->_stems[0].empty()) {
+                // Drums give the cleanest beat grid.
+                [self studioRefineBeatGridFromDrums];
+            } else if (!self->_songL.empty()) {
+                // Re-derive the precise beat grid from the imported song.
+                std::vector<float> bgMono(self->_songL.size());
+                for (size_t i = 0; i < bgMono.size(); ++i) {
+                    bgMono[i] = (self->_songL[i] + self->_songR[i]) * 0.5f;
+                }
+                jamstudio::BeatGrid bg = jamstudio::beatGrid(
+                    bgMono.data(), (long)bgMono.size(), self->_songAnalysis.bpm);
+                self->_songAnalysis.bpm = bg.bpm;
+                self.sharedState->stemBpm.store(bg.bpm, std::memory_order_relaxed);
+                self.sharedState->stemBeatOff.store((long)(bg.offsetSec * 48000.0),
+                                                    std::memory_order_relaxed);
+                self.sharedState->stemBarPhase.store(bg.barPhase,
+                                                     std::memory_order_relaxed);
+            }
             self->_songAnalysis.sections.clear();
             NSArray* sections = pgm[@"sections"];
             if ([sections isKindOfClass:[NSArray class]]) {
@@ -1992,6 +2719,45 @@ static BOOL JamWriteWav(NSURL* url, const int16_t* interleaved, long frames) {
                 }
             }
 
+            // MIDI clips back from midi/<stem>.mid (exact round-trip of what
+            // the lanes played at package time — transcription or voicing).
+            for (int i = 0; i < 8; ++i) {
+                self->_stemNotes[i].clear();
+                NSURL* mid = [[root URLByAppendingPathComponent:@"midi"]
+                              URLByAppendingPathComponent:
+                              [names[i] stringByAppendingString:@".mid"]];
+                if ([[NSFileManager defaultManager] fileExistsAtPath:mid.path]) {
+                    JamReadMidi(mid, self->_stemNotes[i]);
+                }
+            }
+
+            // Chord chart from program.json (label → root/minor/none).
+            self->_chords.clear();
+            NSArray* chordArr = pgm[@"chords"];
+            if ([chordArr isKindOfClass:[NSArray class]]) {
+                for (NSDictionary* cd in chordArr) {
+                    if (![cd isKindOfClass:[NSDictionary class]]) continue;
+                    jamchords::Chord c;
+                    c.start = [cd[@"start"] doubleValue];
+                    c.end = [cd[@"end"] doubleValue];
+                    NSString* lbl = [cd[@"label"] isKindOfClass:[NSString class]]
+                        ? cd[@"label"] : @"";
+                    c.none = YES;
+                    for (int pc = 11; pc >= 0; --pc) {   // longest match first (C# over C)
+                        NSString* nm = [NSString stringWithUTF8String:jamchords::kPcNames[pc]];
+                        if ([lbl hasPrefix:nm] &&
+                            (lbl.length == nm.length ||
+                             [lbl isEqualToString:[nm stringByAppendingString:@"m"]])) {
+                            c.root = pc;
+                            c.minor = (lbl.length > nm.length);
+                            c.none = NO;
+                            break;
+                        }
+                    }
+                    self->_chords.push_back(c);
+                }
+            }
+
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self sendStateUpdate:@{@"studioSong": @{
                     @"name": self->_songName ?: @"pgm",
@@ -2006,6 +2772,59 @@ static BOOL JamWriteWav(NSURL* url, const int16_t* interleaved, long frames) {
                 }}];
                 [self studioPushStemWaves];
                 [self studioPublishStems];
+                [self studioPushChords];
+                for (int i = 0; i < 8; ++i) {
+                    if (!self->_stemNotes[i].empty()) [self studioPushNotes:i];
+                }
+                // Lane patches (incl. AI-designed ones) + playback sources.
+                NSArray* patches = pgm[@"patches"];
+                for (int t = 1; t <= 7; ++t) {
+                    self->_lanePatchInfo[t] = nil;
+                    self->_lanePatched[t] = NO;
+                    if ([patches isKindOfClass:[NSArray class]] &&
+                        (NSUInteger)t < patches.count &&
+                        [patches[t] isKindOfClass:[NSDictionary class]]) {
+                        [self handleLanePatch:t info:patches[t]];
+                    }
+                }
+                // Lane engines (synth/SF2), GM programs + insert FX.
+                NSArray* lanes = pgm[@"lanes"];
+                BOOL wantSf = NO;
+                if ([lanes isKindOfClass:[NSArray class]]) {
+                    for (int t = 1; t <= 7 && (NSUInteger)t < lanes.count; ++t) {
+                        NSDictionary* ld = lanes[t];
+                        if (![ld isKindOfClass:[NSDictionary class]]) continue;
+                        const int k = t - 1;
+                        self.sharedState->laneSfProgram[k].store(
+                            MAX(0, MIN(127, [ld[@"program"] intValue])),
+                            std::memory_order_relaxed);
+                        self.sharedState->laneFx[k].reverb.store(
+                            MAX(0.0f, MIN(1.0f, [ld[@"reverb"] floatValue])),
+                            std::memory_order_relaxed);
+                        self.sharedState->laneFx[k].echo.store(
+                            MAX(0.0f, MIN(1.0f, [ld[@"echo"] floatValue])),
+                            std::memory_order_relaxed);
+                        if ([ld[@"engine"] intValue] == 1) {
+                            wantSf = YES;
+                            [self handleLaneEngine:t engine:1];
+                        } else {
+                            self.sharedState->laneEngine[k].store(0,
+                                std::memory_order_relaxed);
+                        }
+                    }
+                }
+                (void)wantSf;
+                NSArray* sources = pgm[@"sources"];
+                if ([sources isKindOfClass:[NSArray class]]) {
+                    for (int t = 1; t <= 7 && (NSUInteger)t < sources.count; ++t) {
+                        if ([sources[t] intValue] == 1) {
+                            [self handleLaneSource:t midi:YES];
+                        }
+                    }
+                }
+                [self studioPushPatches];
+                [self studioPushSources];
+                [self studioPushLanes];
                 self->_studioBusy = NO;
                 [self studioProgress:@"ready" pct:1.0f];
             });
@@ -2314,7 +3133,7 @@ static NSString* const kSepModelURL =
     if (!sh) return;
     long len = LONG_MAX;
     bool any = false;
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 8; ++i) {
         if (_stems[i].empty()) {
             sh->stemBuf[i].store(nullptr, std::memory_order_relaxed);
         } else {
@@ -2322,6 +3141,17 @@ static NSString* const kSepModelURL =
             len = MIN(len, (long)_stems[i].size() / 2);
             any = true;
         }
+    }
+    if (!any) {
+        // MIDI-only session: the transport timeline falls back to the song
+        // length, or the longest published MIDI clip (+1 s of tail).
+        len = (long)_songL.size();
+        for (int t = 1; t < 8; ++t) {
+            if (!_laneEvBuf[t].empty()) {
+                len = MAX(len, _laneEvBuf[t].back().sample + 48000);
+            }
+        }
+        if (len > 0) any = true;
     }
     sh->stemLen.store(any ? len : 0, std::memory_order_release);
 }
@@ -2332,11 +3162,11 @@ static NSString* const kSepModelURL =
     sh->stemActive.store(false, std::memory_order_relaxed);
     sh->stemMask.store(0, std::memory_order_relaxed);
     sh->stemLen.store(0, std::memory_order_relaxed);
-    for (int i = 0; i < 6; ++i) sh->stemBuf[i].store(nullptr, std::memory_order_relaxed);
+    for (int i = 0; i < 8; ++i) sh->stemBuf[i].store(nullptr, std::memory_order_relaxed);
 }
 
 - (void)handleStudioStemToggle:(int)idx on:(BOOL)on {
-    if (idx < 0 || idx > 5) return;
+    if (idx < 0 || idx > 7) return;
     JamSharedState* sh = self.sharedState;
     if (!sh) return;
     // Stems and the song preview are mutually exclusive.
@@ -2368,7 +3198,7 @@ static NSString* const kSepModelURL =
     shared->stemMask.store(0, std::memory_order_relaxed);
     if (!on) return;
     if ([source isEqualToString:@"take"]) {
-        if (idx < 0 || idx > 5 || _takeL[idx].empty()) return;
+        if (idx < 0 || idx > 7 || _takeL[idx].empty()) return;
         _prevBufL = _takeL[idx];
         _prevBufR = _takeR[idx];
     } else if ([source isEqualToString:@"song"]) {
@@ -2376,7 +3206,7 @@ static NSString* const kSepModelURL =
         _prevBufL = _songL;
         _prevBufR = _songR;
     } else {
-        if (idx < 0 || idx > 5 || _stems[idx].empty()) return;
+        if (idx < 0 || idx > 7 || _stems[idx].empty()) return;
         const long frames = (long)_stems[idx].size() / 2;
         _prevBufL.resize(frames);
         _prevBufR.resize(frames);
@@ -2398,7 +3228,7 @@ static NSString* const kSepModelURL =
         return;
     }
     bool anyStem = false;
-    for (int i = 0; i < 6; ++i) anyStem |= !_stems[i].empty();
+    for (int i = 0; i < 8; ++i) anyStem |= !_stems[i].empty();
     if (!anyStem) {
         [self sendStateUpdate:@{@"studioError": @"separate or import stems first"}];
         return;
@@ -2409,20 +3239,22 @@ static NSString* const kSepModelURL =
         [sections addObject:@{@"start": @(s.start), @"end": @(s.end),
                               @"label": labels[s.label & 3], @"energy": @(s.energy)}];
     }
-    static NSString* const stemNames[6] = {@"drums", @"bass", @"other", @"vocals",
-                                            @"guitar", @"piano"};
-    static NSString* const tmpl[6] = {
+    static NSString* const stemNames[8] = {@"drums", @"bass", @"other", @"vocals",
+                                            @"guitar", @"piano", @"aux1", @"aux2"};
+    static NSString* const tmpl[8] = {
         @"solo drums, drum kit only, no melody no bass",
         @"solo bass line, deep round bass, no drums",
         @"melodic instruments, chords and lead, no drums",
         @"expressive lead melody, vocal-like phrasing, no drums",
         @"solo electric guitar, expressive riffs, no drums",
         @"solo piano, expressive chords and melody, no drums",
+        @"auxiliary melodic part, no drums",
+        @"auxiliary melodic part, no drums",
     };
     const int bpm = (int)lroundf(_songAnalysis.bpm);
     NSMutableArray* stems = [NSMutableArray array];
-    for (int i = 0; i < 6; ++i) {
-        if (_stems[i].empty()) continue;
+    for (int i = 0; i < 8; ++i) {
+        if (_stems[i].empty() && _stemNotes[i].empty() && _laneClip[i].empty()) continue;
         NSMutableDictionary* st = [@{
             @"name": stemNames[i],
             @"prompt": [NSString stringWithFormat:@"%@, %d bpm", tmpl[i], bpm],
@@ -2448,6 +3280,52 @@ static NSString* const kSepModelURL =
                    @"file": _songL.empty() ? @"" : @"song.wav"},
         @"sections": sections,
         @"stems": stems,
+        @"chords": ({
+            NSMutableArray* arr = [NSMutableArray array];
+            for (const auto& c : _chords) {
+                [arr addObject:@{@"start": @(c.start), @"end": @(c.end),
+                                 @"label": [NSString stringWithUTF8String:
+                                            jamchords::chordName(c).c_str()]}];
+            }
+            arr;
+        }),
+        @"sources": ({
+            // Per-stem playback source at package time (0 = audio, 1 = MIDI).
+            NSMutableArray* arr = [NSMutableArray array];
+            for (int t = 0; t < 8; ++t) {
+                [arr addObject:@(self.sharedState->stemSource[t]
+                                     .load(std::memory_order_relaxed))];
+            }
+            arr;
+        }),
+        @"patches": ({
+            // Per-stem lane synth patches (full parameter values, so
+            // AI-designed sounds reload exactly on import).
+            NSMutableArray* arr = [NSMutableArray array];
+            for (int t = 0; t < 8; ++t) {
+                [arr addObject:_lanePatchInfo[t] ?: (id)[NSNull null]];
+            }
+            arr;
+        }),
+        @"lanes": ({
+            // Per-stem lane engine (synth/SF2), GM program and insert FX.
+            NSMutableArray* arr = [NSMutableArray array];
+            for (int t = 0; t < 8; ++t) {
+                if (t == 0) { [arr addObject:[NSNull null]]; continue; }
+                const int k = t - 1;
+                [arr addObject:@{
+                    @"engine": @(self.sharedState->laneEngine[k]
+                                     .load(std::memory_order_relaxed)),
+                    @"program": @(self.sharedState->laneSfProgram[k]
+                                      .load(std::memory_order_relaxed)),
+                    @"reverb": @(self.sharedState->laneFx[k].reverb
+                                     .load(std::memory_order_relaxed)),
+                    @"echo": @(self.sharedState->laneFx[k].echo
+                                   .load(std::memory_order_relaxed)),
+                }];
+            }
+            arr;
+        }),
     };
     NSData* data = [NSJSONSerialization dataWithJSONObject:pgm
                                                    options:NSJSONWritingPrettyPrinted
@@ -2476,33 +3354,54 @@ static NSString* const kSepModelURL =
             }
             [data writeToURL:[root URLByAppendingPathComponent:@"program.json"]
                   atomically:YES];
-            static NSString* const names[6] = {@"drums", @"bass", @"other", @"vocals",
-                                               @"guitar", @"piano"};
+            static NSString* const names[8] = {@"drums", @"bass", @"other", @"vocals",
+                                               @"guitar", @"piano", @"aux1", @"aux2"};
             BOOL ok = YES;
             int written = 0;
-            for (int i = 0; i < 6; ++i) {
+            for (int i = 0; i < 8; ++i) {
                 if (self->_stems[i].empty()) continue;
-                [self studioProgress:@"packaging stems" pct:0.1f + 0.75f * (written / 6.0f)];
+                [self studioProgress:@"packaging stems" pct:0.1f + 0.75f * (written / 8.0f)];
                 NSURL* wav = [stemsDir URLByAppendingPathComponent:
                               [names[i] stringByAppendingString:@".wav"]];
                 ok &= JamWriteWav(wav, self->_stems[i].data(),
                                   (long)self->_stems[i].size() / 2);
                 written++;
             }
-            // MIDI transcriptions.
+            // MIDI transcriptions + chords + AUX clip.
             {
-                BOOL anyMidi = NO;
-                for (int i = 0; i < 6; ++i) anyMidi |= !self->_stemNotes[i].empty();
+                BOOL anyMidi = !self->_chords.empty();
+                for (int i = 0; i < 8; ++i) {
+                    anyMidi |= !self->_stemNotes[i].empty() ||
+                               !self->_laneClip[i].empty();
+                }
                 if (anyMidi) {
                     NSURL* midiDir = [root URLByAppendingPathComponent:@"midi"];
                     [fm createDirectoryAtURL:midiDir withIntermediateDirectories:YES
                                   attributes:nil error:nil];
-                    for (int i = 0; i < 6; ++i) {
-                        if (self->_stemNotes[i].empty()) continue;
+                    for (int i = 0; i < 8; ++i) {
+                        // Prefer the published lane clip (what actually plays
+                        // when the lane is on MIDI); fall back to the raw
+                        // transcription.
+                        const auto& notes = !self->_laneClip[i].empty()
+                            ? self->_laneClip[i] : self->_stemNotes[i];
+                        if (notes.empty()) continue;
                         JamWriteMidi([midiDir URLByAppendingPathComponent:
                                       [names[i] stringByAppendingString:@".mid"]],
-                                     self->_stemNotes[i],
-                                     self->_songAnalysis.bpm);
+                                     notes, self->_songAnalysis.bpm);
+                    }
+                    if (!self->_chords.empty()) {
+                        // Block-triad chart for DAW reference.
+                        std::vector<JamNote> chordNotes;
+                        for (const auto& c : self->_chords) {
+                            if (c.none) continue;
+                            const int third = c.minor ? 3 : 4;
+                            const double dur = MAX(0.1, c.end - c.start - 0.05);
+                            chordNotes.push_back({c.start, dur, 60 + c.root, 0.7f});
+                            chordNotes.push_back({c.start, dur, 60 + c.root + third, 0.7f});
+                            chordNotes.push_back({c.start, dur, 67 + c.root, 0.7f});
+                        }
+                        JamWriteMidi([midiDir URLByAppendingPathComponent:@"chords.mid"],
+                                     chordNotes, self->_songAnalysis.bpm);
                     }
                 }
             }
@@ -2631,11 +3530,17 @@ static NSDictionary* JamParsePatchJson(NSString* jsonStr) {
         [jsonStr dataUsingEncoding:NSUTF8StringEncoding] options:0 error:nil];
     if ([parsed isKindOfClass:[NSDictionary class]]) return parsed;
 
-    // Truncated output (finish_reason == length): cut at the last '}' so we are
-    // not inside a string/number, then close whatever is still open.
+    // Truncated output (finish_reason == length): cut at the last '}' or ']'
+    // so we are not inside a string/number, then close whatever is still open.
     NSRange lastBrace = [jsonStr rangeOfString:@"}" options:NSBackwardsSearch];
-    if (lastBrace.location == NSNotFound) return nil;
-    NSString* cut = [jsonStr substringToIndex:lastBrace.location + 1];
+    NSRange lastBracket = [jsonStr rangeOfString:@"]" options:NSBackwardsSearch];
+    NSUInteger cutAt = lastBrace.location;
+    if (lastBracket.location != NSNotFound &&
+        (cutAt == NSNotFound || lastBracket.location > cutAt)) {
+        cutAt = lastBracket.location;
+    }
+    if (cutAt == NSNotFound) return nil;
+    NSString* cut = [jsonStr substringToIndex:cutAt + 1];
 
     NSMutableString* closers = [NSMutableString string];
     {
@@ -2662,7 +3567,100 @@ static NSDictionary* JamParsePatchJson(NSString* jsonStr) {
     return [parsed isKindOfClass:[NSDictionary class]] ? parsed : nil;
 }
 
-- (void)handleAiPatch:(NSString*)desc {
+// ── AI MIDI composition (piano-roll ✨ 写MIDI) ──
+// Turns a musical request + song context (key/BPM/sections/chords, assembled
+// by the UI) into a JSON note list, in beats from song start.
+- (void)handleAiCompose:(NSString*)desc lane:(int)lane {
+    NSString* apiKey = [[NSUserDefaults standardUserDefaults] stringForKey:@"Jam_LyriaApiKey"];
+    if (apiKey.length == 0) {
+        [self sendStateUpdate:@{@"aiComposeError": @"No API key — set it in the Lyria settings first"}];
+        return;
+    }
+    NSURL* url = [NSURL URLWithString:@"https://agentllm.linkyun.co/v1/chat/completions"];
+    NSMutableURLRequest* req = [NSMutableURLRequest requestWithURL:url];
+    req.HTTPMethod = @"POST";
+    req.timeoutInterval = 90.0;
+    [req setValue:[NSString stringWithFormat:@"Bearer %@", apiKey] forHTTPHeaderField:@"Authorization"];
+    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+
+    NSString* sys =
+        @"You are a MIDI composer writing one part for a live show backing track (4/4). "
+         "Reply with STRICT JSON only, no code fences, no prose: "
+         "{\"notes\": [[start_beat, duration_beats, midi_pitch, velocity], ...]} "
+         "where start_beat is a float counted from the song start at the given BPM, "
+         "duration_beats is a float > 0, midi_pitch is an int 0-127, velocity is a float 0..1. "
+         "COMPOSE MUSICALLY: follow the provided chord timeline exactly (chord tones on strong "
+         "beats, scale passing tones on weak beats), stay in the song key, write idiomatic "
+         "phrases for the requested instrument with breathing rests between phrases, vary the "
+         "rhythm, prefer stepwise motion with occasional expressive leaps, and stay in a "
+         "practical register for the instrument. If the user names a song section (e.g. intro), "
+         "write ONLY inside that section's beat range and leave everything else empty. "
+         "Use at most 200 notes.";
+
+    NSDictionary* payload = @{
+        @"model": @"c-music-express",
+        @"max_tokens": @8000,
+        @"temperature": @0.7,
+        @"stream": @NO,
+        @"messages": @[
+            @{@"role": @"system", @"content": sys},
+            @{@"role": @"user", @"content": desc},
+        ],
+    };
+    NSData* bodyData = [NSJSONSerialization dataWithJSONObject:payload options:0 error:nil];
+    if (!bodyData) {
+        [self sendStateUpdate:@{@"aiComposeError": @"Could not encode request"}];
+        return;
+    }
+    req.HTTPBody = bodyData;
+
+    NSURLSessionDataTask* task = [[NSURLSession sharedSession] dataTaskWithRequest:req
+        completionHandler:^(NSData* data, NSURLResponse* response, NSError* error) {
+            NSArray* notes = nil;
+            NSString* errMsg = nil;
+            if (error) {
+                errMsg = error.localizedDescription;
+            } else if (data) {
+                id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                NSString* content = nil;
+                if ([json isKindOfClass:[NSDictionary class]]) {
+                    NSArray* choices = json[@"choices"];
+                    if ([choices isKindOfClass:[NSArray class]] && choices.count > 0) {
+                        NSDictionary* msg = choices[0][@"message"];
+                        if ([msg isKindOfClass:[NSDictionary class]] &&
+                            [msg[@"content"] isKindOfClass:[NSString class]]) {
+                            content = msg[@"content"];
+                        }
+                    }
+                }
+                if (content.length > 0) {
+                    NSRange open = [content rangeOfString:@"{"];
+                    if (open.location != NSNotFound) {
+                        NSDictionary* obj =
+                            JamParsePatchJson([content substringFromIndex:open.location]);
+                        if ([obj[@"notes"] isKindOfClass:[NSArray class]]) {
+                            notes = obj[@"notes"];
+                        }
+                    }
+                }
+                if (!notes) errMsg = @"AI returned unreadable notes";
+            } else {
+                errMsg = @"No response data";
+            }
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (notes) {
+                    [self sendStateUpdate:@{@"aiComposeResult":
+                        @{@"lane": @(lane), @"notes": notes}}];
+                } else {
+                    [self sendStateUpdate:@{@"aiComposeError":
+                        errMsg ?: @"Compose request failed"}];
+                }
+            });
+        }];
+    [task resume];
+}
+
+- (void)handleAiPatch:(NSString*)desc lane:(int)lane {
     NSString* apiKey = [[NSUserDefaults standardUserDefaults] stringForKey:@"Jam_LyriaApiKey"];
     if (apiKey.length == 0) {
         [self sendStateUpdate:@{@"aiPatchError": @"No API key — set it in the Lyria settings first"}];
@@ -2766,7 +3764,9 @@ static NSDictionary* JamParsePatchJson(NSString* jsonStr) {
             }
             dispatch_async(dispatch_get_main_queue(), ^{
                 if (patch) {
-                    [self sendStateUpdate:@{@"aiPatchResult": patch}];
+                    NSMutableDictionary* result = [patch mutableCopy];
+                    if (lane >= 1 && lane <= 7) result[@"_lane"] = @(lane);
+                    [self sendStateUpdate:@{@"aiPatchResult": result}];
                 } else {
                     [self sendStateUpdate:@{@"aiPatchError": errMsg ?: @"Patch request failed"}];
                 }
