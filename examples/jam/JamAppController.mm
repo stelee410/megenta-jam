@@ -26,6 +26,8 @@
 #import "MagentaSettings.h"
 #import "LyriaClient.h"
 #import "LyriaConductor.h"
+#import "JamStudio.h"
+#import "JamSeparate.h"
 #include "magenta_paths.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -98,6 +100,27 @@ static BOOL isDevServerRunning(void) {
     NSString* _modelName;
     NSString* _currentPromptText;
     BOOL _isPlaying;
+
+    // ── PGM studio ──
+    std::vector<float> _songL, _songR;        // original song, 48 kHz
+    std::vector<int16_t> _stems[6];           // drums/bass/other/vocals/guitar/piano
+    std::vector<float> _takeL[6], _takeR[6];  // recorded cover takes
+    std::vector<float> _prevBufL, _prevBufR;  // active preview buffer
+    std::vector<float> _recBufL, _recBufR;    // active recording buffer
+    jamstudio::Analysis _songAnalysis;
+    NSString* _stemSource[6];   // nil | "neural" | "hpss" | "imported"
+    NSString* _songName;
+    NSURL* _songURL;
+    double _songDur;
+    BOOL _studioBusy;
+    BOOL _coverStartedPlayback;
+    BOOL _studioPrevWasActive;
+    NSURLSessionDownloadTask* _sepDownload;
+    NSTimer* _sepDownloadTimer;
+    NSData* _sepResumeData;
+    int _sepRetries;
+    int64_t _sepLastBytes;
+    CFAbsoluteTime _sepLastChange;
 
     // Audio-prompt recording (mic → 16 kHz mono → engine).
     AVAudioEngine* _recordEngine;
@@ -241,6 +264,31 @@ static BOOL isDevServerRunning(void) {
             [wave addObject:@(roundf(shared->vizRing[idx] * 1000.0f) / 1000.0f)];
         }
         stateUpdate[@"waveform"] = wave;
+
+        // PGM console playhead: song preview, or the stem transport (also
+        // while paused so the position stays visible/seekable).
+        if (shared->prevActive.load(std::memory_order_relaxed)) {
+            stateUpdate[@"studioPlayhead"] = @{
+                @"pos": @(shared->prevPos.load(std::memory_order_relaxed) / 48000.0),
+                @"len": @(shared->prevLen.load(std::memory_order_relaxed) / 48000.0),
+                @"mode": @"song",
+                @"playing": @YES,
+                @"active": @YES,
+            };
+            _studioPrevWasActive = YES;
+        } else if (shared->stemLen.load(std::memory_order_relaxed) > 0) {
+            stateUpdate[@"studioPlayhead"] = @{
+                @"pos": @(shared->stemPos.load(std::memory_order_relaxed) / 48000.0),
+                @"len": @(shared->stemLen.load(std::memory_order_relaxed) / 48000.0),
+                @"mode": @"stems",
+                @"playing": @(shared->stemActive.load(std::memory_order_relaxed)),
+                @"active": @YES,
+            };
+            _studioPrevWasActive = YES;
+        } else if (_studioPrevWasActive) {
+            _studioPrevWasActive = NO;
+            stateUpdate[@"studioPlayhead"] = @{@"active": @NO};
+        }
     }
 
     // Metrics every 5th tick (~5 Hz)
@@ -348,6 +396,18 @@ static BOOL isDevServerRunning(void) {
     // Restore performance-synth user presets
     NSArray* savedSynthPresets = [[NSUserDefaults standardUserDefaults] arrayForKey:@"Jam_SynthPresets"];
     if (savedSynthPresets) state[@"savedSynthPresets"] = savedSynthPresets;
+
+    // PGM studio: neural separation model availability
+    {
+        NSString* sepPath = [self sepModelPath];
+        const BOOL sepPresent = JamDemucsAvailable(sepPath);
+        state[@"studioSepModel"] = @{
+            @"present": @(sepPresent),
+            @"sources": @(sepPresent ? ([sepPath containsString:@"-6s-"] ? 6 : 4) : 0),
+            @"downloading": @NO,
+            @"pct": @0,
+        };
+    }
 
     // Restore saved prompt history
     NSArray* savedHistory = [[NSUserDefaults standardUserDefaults] arrayForKey:@"Jam_PromptHistory"];
@@ -561,6 +621,114 @@ static BOOL isDevServerRunning(void) {
     }
     else if ([type isEqualToString:@"detectBpm"]) {
         [self handleDetectBpm];
+    }
+    else if ([type isEqualToString:@"studioLoadSong"]) {
+        [self handleStudioLoadSong];
+    }
+    else if ([type isEqualToString:@"studioSeparate"]) {
+        [self handleStudioSeparate];
+    }
+    else if ([type isEqualToString:@"studioImportStem"]) {
+        NSNumber* idx = body[@"index"];
+        if ([idx isKindOfClass:[NSNumber class]]) [self handleStudioImportStem:idx.intValue];
+    }
+    else if ([type isEqualToString:@"studioCover"]) {
+        NSNumber* idx = body[@"index"];
+        if ([idx isKindOfClass:[NSNumber class]]) [self handleStudioCover:idx.intValue];
+    }
+    else if ([type isEqualToString:@"studioTransport"]) {
+        NSString* action = body[@"action"];
+        JamSharedState* sh = self.sharedState;
+        if ([action isKindOfClass:[NSString class]] && sh) {
+            if ([action isEqualToString:@"restart"]) {
+                sh->prevActive.store(false, std::memory_order_relaxed);
+                sh->stemPos.store(0, std::memory_order_relaxed);
+                if (sh->stemLen.load(std::memory_order_relaxed) > 0) {
+                    sh->stemActive.store(true, std::memory_order_release);
+                }
+            } else if ([action isEqualToString:@"play"]) {
+                sh->prevActive.store(false, std::memory_order_relaxed);
+                const long len = sh->stemLen.load(std::memory_order_relaxed);
+                if (len > 0) {
+                    if (sh->stemPos.load(std::memory_order_relaxed) >= len) {
+                        sh->stemPos.store(0, std::memory_order_relaxed);
+                    }
+                    sh->stemActive.store(true, std::memory_order_release);
+                }
+            } else {   // pause
+                sh->stemActive.store(false, std::memory_order_relaxed);
+            }
+        }
+    }
+    else if ([type isEqualToString:@"studioMix"]) {
+        NSNumber* idx = body[@"index"];
+        JamSharedState* sh = self.sharedState;
+        if ([idx isKindOfClass:[NSNumber class]] && sh &&
+            idx.intValue >= 0 && idx.intValue < 6) {
+            const int i = idx.intValue;
+            NSNumber* mute = body[@"mute"];
+            NSNumber* solo = body[@"solo"];
+            NSNumber* gain = body[@"gain"];
+            if ([mute isKindOfClass:[NSNumber class]]) {
+                int m = sh->stemMuteMask.load(std::memory_order_relaxed);
+                m = mute.boolValue ? (m | (1 << i)) : (m & ~(1 << i));
+                sh->stemMuteMask.store(m, std::memory_order_relaxed);
+            }
+            if ([solo isKindOfClass:[NSNumber class]]) {
+                int m = sh->stemSoloMask.load(std::memory_order_relaxed);
+                m = solo.boolValue ? (m | (1 << i)) : (m & ~(1 << i));
+                sh->stemSoloMask.store(m, std::memory_order_relaxed);
+            }
+            if ([gain isKindOfClass:[NSNumber class]]) {
+                float g = gain.floatValue;
+                if (g < 0) g = 0;
+                if (g > 1.5f) g = 1.5f;
+                sh->stemGain[i].store(g, std::memory_order_relaxed);
+            }
+        }
+    }
+    else if ([type isEqualToString:@"studioLoadPgm"]) {
+        [self handleStudioLoadPgm];
+    }
+    else if ([type isEqualToString:@"studioStemToggle"]) {
+        NSNumber* idx = body[@"index"];
+        NSNumber* on = body[@"on"];
+        if ([idx isKindOfClass:[NSNumber class]] && [on isKindOfClass:[NSNumber class]]) {
+            [self handleStudioStemToggle:idx.intValue on:on.boolValue];
+        }
+    }
+    else if ([type isEqualToString:@"studioSeek"]) {
+        NSNumber* sec = body[@"sec"];
+        if ([sec isKindOfClass:[NSNumber class]] && self.sharedState) {
+            const long p = (long)(MAX(0.0, sec.doubleValue) * 48000.0);
+            JamSharedState* sh = self.sharedState;
+            if (sh->prevActive.load(std::memory_order_relaxed)) {
+                const long len = sh->prevLen.load(std::memory_order_relaxed);
+                sh->prevPos.store(MIN(p, MAX(0L, len - 1)), std::memory_order_relaxed);
+            } else if (sh->stemLen.load(std::memory_order_relaxed) > 0) {
+                const long len = sh->stemLen.load(std::memory_order_relaxed);
+                sh->stemPos.store(MIN(p, MAX(0L, len - 1)), std::memory_order_relaxed);
+            }
+        }
+    }
+    else if ([type isEqualToString:@"studioPreview"]) {
+        NSNumber* idx = body[@"index"];
+        NSString* src = body[@"source"];
+        NSNumber* on = body[@"on"];
+        if ([idx isKindOfClass:[NSNumber class]] && [on isKindOfClass:[NSNumber class]]) {
+            [self handleStudioPreview:idx.intValue
+                               source:([src isKindOfClass:[NSString class]] ? src : @"stem")
+                                   on:on.boolValue];
+        }
+    }
+    else if ([type isEqualToString:@"studioPackage"]) {
+        [self handleStudioPackage];
+    }
+    else if ([type isEqualToString:@"studioSepDownload"]) {
+        [self handleSepModelDownload];
+    }
+    else if ([type isEqualToString:@"studioSepPick"]) {
+        [self handleSepModelPick];
     }
     else if ([type isEqualToString:@"synthDice"]) {
         // Re-roll the arp pattern (Dice).
@@ -1279,6 +1447,983 @@ static const int kAudioPromptFrames = 160000; // 10s @ 16kHz
 // ─── AI prompt assist (agentllm, model c-music-express) ─────────────────────
 // Turns a free-form idea (any language) into a concise English music prompt
 // tuned for this engine. Reuses the Lyria API key; runs off the main thread.
+
+// ─── PGM studio ──────────────────────────────────────────────────────────────
+// Upload a song → analyze (BPM/key/sections) + HPSS stem separation → cover
+// each stem with the local model (stem slice as audio prompt, take recorded
+// from the engine output) → A/B against the original → package as a PGM.
+
+static NSArray* JamWaveThumb(const float* L, const float* R, long n, int points) {
+    NSMutableArray* arr = [NSMutableArray arrayWithCapacity:points];
+    if (n <= 0) { for (int i = 0; i < points; i++) [arr addObject:@0]; return arr; }
+    const long step = MAX(1L, n / points);
+    for (int p = 0; p < points; ++p) {
+        const long s0 = p * step;
+        float peak = 0;
+        for (long i = s0; i < MIN(n, s0 + step); i += 16) {
+            const float v = std::fabs(L[i]) + (R ? std::fabs(R[i]) : 0.0f);
+            if (v > peak) peak = v;
+        }
+        [arr addObject:@(MIN(1.0f, peak * (R ? 0.55f : 1.0f)))];
+    }
+    return arr;
+}
+
+static NSArray* JamWaveThumbI16(const int16_t* interleaved, long frames, int points) {
+    NSMutableArray* arr = [NSMutableArray arrayWithCapacity:points];
+    if (frames <= 0) { for (int i = 0; i < points; i++) [arr addObject:@0]; return arr; }
+    const long step = MAX(1L, frames / points);
+    for (int p = 0; p < points; ++p) {
+        const long s0 = p * step;
+        float peak = 0;
+        for (long i = s0; i < MIN(frames, s0 + step); i += 16) {
+            const float v = (std::fabs((float)interleaved[i * 2]) +
+                             std::fabs((float)interleaved[i * 2 + 1])) / 65536.0f;
+            if (v > peak) peak = v;
+        }
+        [arr addObject:@(MIN(1.0f, peak * 1.1f))];
+    }
+    return arr;
+}
+
+static NSString* const kJamKeyNames[12] = {@"C", @"C#", @"D", @"D#", @"E", @"F",
+                                           @"F#", @"G", @"G#", @"A", @"A#", @"B"};
+
+- (void)studioProgress:(NSString*)stage pct:(float)pct {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self sendStateUpdate:@{@"studioProgress": @{@"stage": stage, @"pct": @(pct)}}];
+    });
+}
+
+- (void)handleStudioLoadSong {
+    if (_studioBusy) return;
+    NSOpenPanel* panel = [NSOpenPanel openPanel];
+    [panel setCanChooseFiles:YES];
+    [panel setCanChooseDirectories:NO];
+    [panel setAllowedContentTypes:@[[UTType typeWithIdentifier:@"public.audio"]]];
+    [panel setMessage:@"Select a song to turn into a live PGM"];
+    void (^completion)(NSModalResponse) = ^(NSModalResponse result) {
+        if (result != NSModalResponseOK) return;
+        NSURL* url = [panel URL];
+        if (!url) return;
+        self->_studioBusy = YES;
+        self->_songName = url.lastPathComponent;
+        self->_songURL = url;
+        [self studioUnpublishStems];
+        self.sharedState->prevActive.store(false, std::memory_order_relaxed);
+        [self studioProgress:@"decoding" pct:0.02f];
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            [self studioDecodeAnalyzeSeparate:url];
+        });
+    };
+    if (self.view.window) [panel beginSheetModalForWindow:self.view.window completionHandler:completion];
+    else [panel beginWithCompletionHandler:completion];
+}
+
+- (void)studioDecodeAnalyzeSeparate:(NSURL*)url {
+    // 1. Decode to 48 kHz stereo float (cap 8 minutes).
+    ExtAudioFileRef f = nullptr;
+    if (ExtAudioFileOpenURL((__bridge CFURLRef)url, &f) != noErr || !f) {
+        [self studioFail:@"could not open the file"];
+        return;
+    }
+    AudioStreamBasicDescription fmt = {};
+    fmt.mSampleRate = 48000.0;
+    fmt.mFormatID = kAudioFormatLinearPCM;
+    fmt.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsNonInterleaved;
+    fmt.mBitsPerChannel = 32;
+    fmt.mChannelsPerFrame = 2;
+    fmt.mBytesPerFrame = 4;
+    fmt.mFramesPerPacket = 1;
+    fmt.mBytesPerPacket = 4;
+    ExtAudioFileSetProperty(f, kExtAudioFileProperty_ClientDataFormat, sizeof(fmt), &fmt);
+    const long maxFrames = 48000L * 60 * 8;
+    _songL.clear(); _songR.clear();
+    _songL.reserve(48000L * 240); _songR.reserve(48000L * 240);
+    const UInt32 chunk = 1 << 16;
+    std::vector<float> bufL(chunk), bufR(chunk);
+    while ((long)_songL.size() < maxFrames) {
+        AudioBufferList abl;
+        abl.mNumberBuffers = 2;
+        abl.mBuffers[0] = {1, chunk * 4, bufL.data()};
+        abl.mBuffers[1] = {1, chunk * 4, bufR.data()};
+        UInt32 n = chunk;
+        if (ExtAudioFileRead(f, &n, &abl) != noErr || n == 0) break;
+        _songL.insert(_songL.end(), bufL.begin(), bufL.begin() + n);
+        _songR.insert(_songR.end(), bufR.begin(), bufR.begin() + n);
+    }
+    ExtAudioFileDispose(f);
+    const long n = (long)_songL.size();
+    if (n < 48000L * 10) {
+        [self studioFail:@"song too short (need ≥10 s)"];
+        return;
+    }
+    _songDur = n / 48000.0;
+
+    // 2. Analysis on a mono mix.
+    [self studioProgress:@"analyzing" pct:0.12f];
+    std::vector<float> mono(n);
+    for (long i = 0; i < n; ++i) mono[i] = (_songL[i] + _songR[i]) * 0.5f;
+    _songAnalysis = jamstudio::analyze(mono.data(), n);
+
+    NSMutableArray* sections = [NSMutableArray array];
+    static NSString* const labels[4] = {@"break", @"verse", @"drop", @"build"};
+    for (const auto& s : _songAnalysis.sections) {
+        [sections addObject:@{@"start": @(s.start), @"end": @(s.end),
+                              @"label": labels[s.label & 3], @"energy": @(s.energy)}];
+    }
+    NSString* key = [NSString stringWithFormat:@"%@ %@",
+                     kJamKeyNames[_songAnalysis.keyIdx],
+                     _songAnalysis.minor ? @"minor" : @"major"];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self sendStateUpdate:@{@"studioSong": @{
+            @"name": self->_songName ?: @"song",
+            @"duration": @(self->_songDur),
+            @"bpm": @((int)lroundf(self->_songAnalysis.bpm)),
+            @"key": key,
+            @"sections": sections,
+            @"wave": JamWaveThumb(self->_songL.data(), self->_songR.data(),
+                                  (long)self->_songL.size(), 480),
+        }}];
+    });
+
+    // Decode + analysis done — separation is an explicit user action
+    // (the ✂ Separate button), so a model downloaded later still applies.
+    for (int i = 0; i < 6; ++i) { _stems[i].clear(); _takeL[i].clear(); _takeR[i].clear(); }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self->_studioBusy = NO;
+        [self studioProgress:@"ready" pct:1.0f];
+    });
+}
+
+- (void)handleStudioSeparate {
+    if (_studioBusy) return;
+    if (_songL.empty() || !_songURL) {
+        [self sendStateUpdate:@{@"studioError": @"load a song first"}];
+        return;
+    }
+    _studioBusy = YES;
+    [self studioUnpublishStems];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        usleep(60000);   // let the render thread drop any old stem pointers
+        [self studioRunSeparation];
+    });
+}
+
+// Stem separation: neural (htdemucs 4/6 stems) when weights are present,
+// classic HPSS (3 stems) as the fallback. Background thread.
+- (void)studioRunSeparation {
+    const long n = (long)_songL.size();
+    NSString* sepPath = [self sepModelPath];
+    BOOL neural = NO;
+    int nSources = 3;
+    if (JamDemucsAvailable(sepPath)) {
+        [self studioProgress:@"separating (neural htdemucs)" pct:0.02f];
+        NSString* err = nil;
+        neural = JamDemucsSeparate(sepPath, _songURL, _stems, &nSources,
+                                   ^(float p) { [self studioProgress:@"separating (neural htdemucs)"
+                                                                 pct:0.02f + p * 0.96f]; },
+                                   &err);
+        if (!neural) NSLog(@"Jam studio: neural separation failed (%@) — falling back to HPSS", err);
+    }
+    if (!neural) {
+        [self studioProgress:@"separating (fast hpss)" pct:0.05f];
+        jamstudio::separate(_songL.data(), _songR.data(), n,
+                            _stems[0], _stems[1], _stems[2],
+                            ^(float p) { [self studioProgress:@"separating (fast hpss)"
+                                                          pct:0.05f + p * 0.9f]; });
+        for (int i = 3; i < 6; ++i) _stems[i].clear();
+        nSources = 3;
+    }
+    for (int i = 0; i < 6; ++i) {
+        _takeL[i].clear();
+        _takeR[i].clear();
+        _stemSource[i] = _stems[i].empty() ? nil : (neural ? @"neural" : @"hpss");
+    }
+
+    const BOOL isNeural = neural;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self studioPushStemWaves];
+        [self sendStateUpdate:@{@"studioSepEngine": isNeural ? @"htdemucs" : @"hpss"}];
+        [self studioPublishStems];
+        self->_studioBusy = NO;
+        [self studioProgress:@"ready" pct:1.0f];
+    });
+}
+
+// Push all stem waveforms + per-stem sources to the UI (main thread).
+- (void)studioPushStemWaves {
+    NSMutableArray* waves = [NSMutableArray array];
+    NSMutableArray* sources = [NSMutableArray array];
+    for (int i = 0; i < 6; ++i) {
+        const long frames = (long)_stems[i].size() / 2;
+        [waves addObject:JamWaveThumbI16(_stems[i].data(), frames, 480)];
+        [sources addObject:_stemSource[i] ?: @""];
+    }
+    [self sendStateUpdate:@{@"studioStems": waves, @"studioStemSources": sources}];
+}
+
+// ── Import / replace a stem from a third-party file ──
+// Decoded at 48 kHz stereo and length-aligned to the loaded song so the
+// multi-track mix player stays in sync.
+- (void)handleStudioImportStem:(int)idx {
+    if (idx < 0 || idx > 5 || _studioBusy) return;
+    NSOpenPanel* panel = [NSOpenPanel openPanel];
+    [panel setCanChooseFiles:YES];
+    [panel setAllowedContentTypes:@[[UTType typeWithIdentifier:@"public.audio"]]];
+    static NSString* const stemNames[6] = {@"drums", @"bass", @"other", @"vocals",
+                                           @"guitar", @"piano"};
+    [panel setMessage:[NSString stringWithFormat:@"Select an audio file for the %@ stem",
+                       stemNames[idx]]];
+    void (^completion)(NSModalResponse) = ^(NSModalResponse result) {
+        if (result != NSModalResponseOK || !panel.URL) return;
+        NSURL* url = panel.URL;
+        self->_studioBusy = YES;
+        [self studioUnpublishStems];
+        [self studioProgress:@"importing stem" pct:0.3f];
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            usleep(60000);   // render thread drops old stem pointers
+            ExtAudioFileRef f = nullptr;
+            std::vector<float> L, R;
+            if (ExtAudioFileOpenURL((__bridge CFURLRef)url, &f) == noErr && f) {
+                AudioStreamBasicDescription fmt = {};
+                fmt.mSampleRate = 48000.0;
+                fmt.mFormatID = kAudioFormatLinearPCM;
+                fmt.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsNonInterleaved;
+                fmt.mBitsPerChannel = 32;
+                fmt.mChannelsPerFrame = 2;
+                fmt.mBytesPerFrame = 4;
+                fmt.mFramesPerPacket = 1;
+                fmt.mBytesPerPacket = 4;
+                ExtAudioFileSetProperty(f, kExtAudioFileProperty_ClientDataFormat,
+                                        sizeof(fmt), &fmt);
+                const UInt32 chunk = 1 << 16;
+                std::vector<float> bufL(chunk), bufR(chunk);
+                const long maxFrames = 48000L * 60 * 8;
+                while ((long)L.size() < maxFrames) {
+                    AudioBufferList abl;
+                    abl.mNumberBuffers = 2;
+                    abl.mBuffers[0] = {1, chunk * 4, bufL.data()};
+                    abl.mBuffers[1] = {1, chunk * 4, bufR.data()};
+                    UInt32 nf = chunk;
+                    if (ExtAudioFileRead(f, &nf, &abl) != noErr || nf == 0) break;
+                    L.insert(L.end(), bufL.begin(), bufL.begin() + nf);
+                    R.insert(R.end(), bufR.begin(), bufR.begin() + nf);
+                }
+                ExtAudioFileDispose(f);
+            }
+            if (L.empty()) {
+                [self studioFail:@"could not decode that file"];
+                return;
+            }
+            // Length reference: the song if loaded, else the longest existing
+            // stem, else the imported file itself defines the length.
+            long target = (long)self->_songL.size();
+            if (target == 0) {
+                for (int k = 0; k < 6; ++k) {
+                    target = MAX(target, (long)self->_stems[k].size() / 2);
+                }
+            }
+            if (target == 0) target = (long)L.size();
+            if (self->_songDur <= 0) self->_songDur = target / 48000.0;
+            self->_stems[idx].assign(target * 2, 0);
+            const long copyN = MIN(target, (long)L.size());
+            for (long i = 0; i < copyN; ++i) {
+                float l = L[i] * 32767.0f, r = R[i] * 32767.0f;
+                l = MAX(-32768.0f, MIN(32767.0f, l));
+                r = MAX(-32768.0f, MIN(32767.0f, r));
+                self->_stems[idx][i * 2] = (int16_t)l;
+                self->_stems[idx][i * 2 + 1] = (int16_t)r;
+            }
+            self->_stemSource[idx] = @"imported";
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self studioPushStemWaves];
+                [self studioPublishStems];
+                self->_studioBusy = NO;
+                [self studioProgress:@"ready" pct:1.0f];
+            });
+        });
+    };
+    if (self.view.window) [panel beginSheetModalForWindow:self.view.window completionHandler:completion];
+    else [panel beginWithCompletionHandler:completion];
+}
+
+// Decode any audio file to 48 kHz stereo float (cap 8 min).
+static BOOL JamDecode48k(NSURL* url, std::vector<float>& L, std::vector<float>& R) {
+    ExtAudioFileRef f = nullptr;
+    if (ExtAudioFileOpenURL((__bridge CFURLRef)url, &f) != noErr || !f) return NO;
+    AudioStreamBasicDescription fmt = {};
+    fmt.mSampleRate = 48000.0;
+    fmt.mFormatID = kAudioFormatLinearPCM;
+    fmt.mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsNonInterleaved;
+    fmt.mBitsPerChannel = 32;
+    fmt.mChannelsPerFrame = 2;
+    fmt.mBytesPerFrame = 4;
+    fmt.mFramesPerPacket = 1;
+    fmt.mBytesPerPacket = 4;
+    ExtAudioFileSetProperty(f, kExtAudioFileProperty_ClientDataFormat, sizeof(fmt), &fmt);
+    const UInt32 chunk = 1 << 16;
+    std::vector<float> bufL(chunk), bufR(chunk);
+    const long maxFrames = 48000L * 60 * 8;
+    L.clear(); R.clear();
+    while ((long)L.size() < maxFrames) {
+        AudioBufferList abl;
+        abl.mNumberBuffers = 2;
+        abl.mBuffers[0] = {1, chunk * 4, bufL.data()};
+        abl.mBuffers[1] = {1, chunk * 4, bufR.data()};
+        UInt32 nf = chunk;
+        if (ExtAudioFileRead(f, &nf, &abl) != noErr || nf == 0) break;
+        L.insert(L.end(), bufL.begin(), bufL.begin() + nf);
+        R.insert(R.end(), bufR.begin(), bufR.begin() + nf);
+    }
+    ExtAudioFileDispose(f);
+    return !L.empty();
+}
+
+// 16-bit stereo 48 kHz WAV writer (AudioToolbox).
+static BOOL JamWriteWav(NSURL* url, const int16_t* interleaved, long frames) {
+    AudioStreamBasicDescription fmt = {};
+    fmt.mSampleRate = 48000.0;
+    fmt.mFormatID = kAudioFormatLinearPCM;
+    fmt.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked;
+    fmt.mBitsPerChannel = 16;
+    fmt.mChannelsPerFrame = 2;
+    fmt.mBytesPerFrame = 4;
+    fmt.mFramesPerPacket = 1;
+    fmt.mBytesPerPacket = 4;
+    AudioFileID file = nullptr;
+    if (AudioFileCreateWithURL((__bridge CFURLRef)url, kAudioFileWAVEType, &fmt,
+                               kAudioFileFlags_EraseFile, &file) != noErr || !file) {
+        return NO;
+    }
+    UInt32 bytes = (UInt32)(frames * 4);
+    const OSStatus st = AudioFileWriteBytes(file, false, 0, &bytes, interleaved);
+    AudioFileClose(file);
+    return st == noErr;
+}
+
+// ── Import a packaged PGM folder (program.json + stems/*.wav [+ song.wav]) ──
+- (void)handleStudioLoadPgm {
+    if (_studioBusy) return;
+    NSOpenPanel* panel = [NSOpenPanel openPanel];
+    [panel setCanChooseFiles:NO];
+    [panel setCanChooseDirectories:YES];
+    [panel setMessage:@"Select a .pgm folder (program.json + stems)"];
+    void (^completion)(NSModalResponse) = ^(NSModalResponse result) {
+        if (result != NSModalResponseOK || !panel.URL) return;
+        NSURL* root = panel.URL;
+        NSData* jsonData = [NSData dataWithContentsOfURL:
+                            [root URLByAppendingPathComponent:@"program.json"]];
+        NSDictionary* pgm = jsonData
+            ? [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:nil] : nil;
+        if (![pgm isKindOfClass:[NSDictionary class]]) {
+            [self sendStateUpdate:@{@"studioError": @"not a PGM folder (program.json missing)"}];
+            return;
+        }
+        self->_studioBusy = YES;
+        [self studioUnpublishStems];
+        self.sharedState->prevActive.store(false, std::memory_order_relaxed);
+        [self studioProgress:@"loading pgm" pct:0.05f];
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            usleep(60000);
+            NSDictionary* song = pgm[@"song"];
+            NSString* name = [song isKindOfClass:[NSDictionary class]] ? song[@"name"] : nil;
+            self->_songName = [name isKindOfClass:[NSString class]] ? name : @"pgm";
+
+            // Original song (optional in v1 packages).
+            self->_songL.clear();
+            self->_songR.clear();
+            self->_songURL = nil;
+            NSURL* songWav = [root URLByAppendingPathComponent:@"song.wav"];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:songWav.path]) {
+                [self studioProgress:@"loading song" pct:0.15f];
+                if (JamDecode48k(songWav, self->_songL, self->_songR)) {
+                    self->_songURL = songWav;
+                }
+            }
+
+            // Stems by canonical name.
+            static NSString* const names[6] = {@"drums", @"bass", @"other", @"vocals",
+                                               @"guitar", @"piano"};
+            long maxFrames = (long)self->_songL.size();
+            for (int i = 0; i < 6; ++i) {
+                self->_stems[i].clear();
+                self->_stemSource[i] = nil;
+                self->_takeL[i].clear();
+                self->_takeR[i].clear();
+                NSURL* wav = [[root URLByAppendingPathComponent:@"stems"]
+                              URLByAppendingPathComponent:
+                              [names[i] stringByAppendingString:@".wav"]];
+                if (![[NSFileManager defaultManager] fileExistsAtPath:wav.path]) continue;
+                [self studioProgress:@"loading stems" pct:0.2f + 0.6f * (i / 6.0f)];
+                std::vector<float> L, R;
+                if (!JamDecode48k(wav, L, R)) continue;
+                const long nf = (long)L.size();
+                maxFrames = MAX(maxFrames, nf);
+                self->_stems[i].assign(nf * 2, 0);
+                for (long k = 0; k < nf; ++k) {
+                    float l = L[k] * 32767.0f, r = R[k] * 32767.0f;
+                    l = MAX(-32768.0f, MIN(32767.0f, l));
+                    r = MAX(-32768.0f, MIN(32767.0f, r));
+                    self->_stems[i][k * 2] = (int16_t)l;
+                    self->_stems[i][k * 2 + 1] = (int16_t)r;
+                }
+                self->_stemSource[i] = @"imported";
+            }
+            if (maxFrames <= 0) {
+                [self studioFail:@"PGM folder has no audio"];
+                return;
+            }
+            // Length-align every loaded stem (mixer requires equal lengths).
+            for (int i = 0; i < 6; ++i) {
+                if (!self->_stems[i].empty()) {
+                    self->_stems[i].resize(maxFrames * 2, 0);
+                }
+            }
+            self->_songDur = maxFrames / 48000.0;
+
+            // Metadata from program.json.
+            NSNumber* bpm = [song isKindOfClass:[NSDictionary class]] ? song[@"bpm"] : nil;
+            NSString* key = [song isKindOfClass:[NSDictionary class]] ? song[@"key"] : nil;
+            self->_songAnalysis.bpm = [bpm isKindOfClass:[NSNumber class]]
+                ? bpm.floatValue : 120.0f;
+            self->_songAnalysis.sections.clear();
+            NSArray* sections = pgm[@"sections"];
+            if ([sections isKindOfClass:[NSArray class]]) {
+                for (NSDictionary* sec in sections) {
+                    if (![sec isKindOfClass:[NSDictionary class]]) continue;
+                    jamstudio::Section js;
+                    js.start = [sec[@"start"] doubleValue];
+                    js.end = [sec[@"end"] doubleValue];
+                    js.energy = [sec[@"energy"] floatValue];
+                    NSString* lbl = sec[@"label"];
+                    js.label = [@"verse" isEqualToString:lbl] ? 1
+                             : [@"drop" isEqualToString:lbl] ? 2
+                             : [@"build" isEqualToString:lbl] ? 3 : 0;
+                    self->_songAnalysis.sections.push_back(js);
+                }
+            }
+
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self sendStateUpdate:@{@"studioSong": @{
+                    @"name": self->_songName ?: @"pgm",
+                    @"duration": @(self->_songDur),
+                    @"bpm": @((int)lroundf(self->_songAnalysis.bpm)),
+                    @"key": [key isKindOfClass:[NSString class]] ? key : @"",
+                    @"sections": [sections isKindOfClass:[NSArray class]] ? sections : @[],
+                    @"wave": self->_songL.empty()
+                        ? @[]
+                        : JamWaveThumb(self->_songL.data(), self->_songR.data(),
+                                       (long)self->_songL.size(), 480),
+                }}];
+                [self studioPushStemWaves];
+                [self studioPublishStems];
+                self->_studioBusy = NO;
+                [self studioProgress:@"ready" pct:1.0f];
+            });
+        });
+    };
+    if (self.view.window) [panel beginSheetModalForWindow:self.view.window completionHandler:completion];
+    else [panel beginWithCompletionHandler:completion];
+}
+
+// ── Separation model management ──
+// htdemucs ggml weights (~81 MB) live in Application Support; downloadable
+// from Hugging Face or hand-picked from disk.
+
+static NSString* const kSepModelURL =
+    @"https://huggingface.co/datasets/Retrobear/demucs.cpp/resolve/main/ggml-model-htdemucs-6s-f16.bin";
+
+- (NSString*)sepModelDir {
+    NSString* dir = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory,
+                                                         NSUserDomainMask, YES).firstObject
+                     stringByAppendingPathComponent:@"MagentaRT"];
+    [[NSFileManager defaultManager] createDirectoryAtPath:dir
+                              withIntermediateDirectories:YES attributes:nil error:nil];
+    return dir;
+}
+
+// Preferred weights: hand-picked file → 6-source → 4-source.
+- (NSString*)sepModelPath {
+    NSString* custom = [[NSUserDefaults standardUserDefaults] stringForKey:@"Jam_SepModelPath"];
+    if (custom.length > 0 && JamDemucsAvailable(custom)) return custom;
+    NSString* six = [[self sepModelDir] stringByAppendingPathComponent:@"ggml-model-htdemucs-6s-f16.bin"];
+    if (JamDemucsAvailable(six)) return six;
+    return [[self sepModelDir] stringByAppendingPathComponent:@"ggml-model-htdemucs-4s-f16.bin"];
+}
+
+- (void)pushSepModelState:(BOOL)downloading pct:(float)pct {
+    [self pushSepModelState:downloading pct:pct mb:0];
+}
+
+- (void)pushSepModelState:(BOOL)downloading pct:(float)pct mb:(float)mb {
+    NSString* path = [self sepModelPath];
+    const BOOL present = JamDemucsAvailable(path);
+    int sources = 0;
+    if (present) sources = [path containsString:@"-6s-"] ? 6 : 4;
+    [self sendStateUpdate:@{@"studioSepModel": @{
+        @"present": @(present),
+        @"sources": @(sources),
+        @"downloading": @(downloading),
+        @"pct": @(pct),
+        @"mb": @(mb),
+    }}];
+}
+
+- (void)handleSepModelDownload {
+    if (_sepDownload) return;
+    if (JamDemucsAvailable([self sepModelPath])) { [self pushSepModelState:NO pct:1]; return; }
+    _sepRetries = 0;
+    _sepResumeData = nil;
+    [self sepStartDownload];
+}
+
+// Resume-capable download with a stall watchdog: if no bytes arrive for 20 s
+// (flaky CDN / proxy), cancel-with-resume-data and continue from where it
+// stopped. Network errors that carry resume data also continue in place.
+- (void)sepStartDownload {
+    __weak JamAppController* weakSelf = self;
+    void (^completion)(NSURL*, NSURLResponse*, NSError*) =
+        ^(NSURL* location, NSURLResponse* response, NSError* error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                JamAppController* s = weakSelf;
+                if (!s) return;
+                [s->_sepDownloadTimer invalidate];
+                s->_sepDownloadTimer = nil;
+                s->_sepDownload = nil;
+                if (error || !location) {
+                    NSData* rd = error.userInfo[NSURLSessionDownloadTaskResumeData];
+                    if (s->_sepRetries < 12) {
+                        s->_sepRetries++;
+                        s->_sepResumeData = rd;   // nil → restart from scratch
+                        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                                     (int64_t)(2.0 * NSEC_PER_SEC)),
+                                       dispatch_get_main_queue(), ^{
+                            [weakSelf sepStartDownload];
+                        });
+                        return;
+                    }
+                    [s sendStateUpdate:@{@"studioError":
+                        [NSString stringWithFormat:@"model download failed: %@",
+                         error.localizedDescription ?: @"unknown"]}];
+                    [s pushSepModelState:NO pct:0];
+                    return;
+                }
+                NSString* dest = [[s sepModelDir]
+                    stringByAppendingPathComponent:@"ggml-model-htdemucs-6s-f16.bin"];
+                [[NSFileManager defaultManager] removeItemAtPath:dest error:nil];
+                NSError* mvErr = nil;
+                [[NSFileManager defaultManager] moveItemAtURL:location
+                                                        toURL:[NSURL fileURLWithPath:dest]
+                                                        error:&mvErr];
+                [s pushSepModelState:NO pct:1];
+                [s sendStateUpdate:@{@"studioNotice":
+                    mvErr ? @"download finished but could not save" : @"separation model ready"}];
+            });
+        };
+
+    if (_sepResumeData) {
+        _sepDownload = [[NSURLSession sharedSession]
+            downloadTaskWithResumeData:_sepResumeData completionHandler:completion];
+        _sepResumeData = nil;
+    } else {
+        _sepDownload = [[NSURLSession sharedSession]
+            downloadTaskWithURL:[NSURL URLWithString:kSepModelURL]
+              completionHandler:completion];
+    }
+    [_sepDownload resume];
+    _sepLastBytes = -1;
+    _sepLastChange = CFAbsoluteTimeGetCurrent();
+    [self pushSepModelState:YES pct:0];
+
+    _sepDownloadTimer = [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer* t) {
+        JamAppController* s = weakSelf;
+        if (!s || !s->_sepDownload) { [t invalidate]; return; }
+        const int64_t got = s->_sepDownload.countOfBytesReceived;
+        const int64_t want = s->_sepDownload.countOfBytesExpectedToReceive;
+        const float pct = want > 0 ? (float)((double)got / want) : 0;
+        [s pushSepModelState:YES pct:pct mb:(float)(got / 1048576.0)];
+        // Stall watchdog.
+        if (got != s->_sepLastBytes) {
+            s->_sepLastBytes = got;
+            s->_sepLastChange = CFAbsoluteTimeGetCurrent();
+        } else if (CFAbsoluteTimeGetCurrent() - s->_sepLastChange > 20.0 &&
+                   s->_sepRetries < 12) {
+            s->_sepRetries++;
+            [t invalidate];
+            s->_sepDownloadTimer = nil;
+            NSURLSessionDownloadTask* task = s->_sepDownload;
+            s->_sepDownload = nil;
+            [task cancelByProducingResumeData:^(NSData* rd) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    JamAppController* s2 = weakSelf;
+                    if (!s2) return;
+                    s2->_sepResumeData = rd;
+                    [s2 sepStartDownload];
+                });
+            }];
+        }
+    }];
+}
+
+- (void)handleSepModelPick {
+    NSOpenPanel* panel = [NSOpenPanel openPanel];
+    [panel setCanChooseFiles:YES];
+    [panel setMessage:@"Select the htdemucs ggml weights (ggml-model-htdemucs-4s-f16.bin)"];
+    void (^completion)(NSModalResponse) = ^(NSModalResponse result) {
+        if (result != NSModalResponseOK || !panel.URL) return;
+        [[NSUserDefaults standardUserDefaults] setObject:panel.URL.path
+                                                  forKey:@"Jam_SepModelPath"];
+        [self pushSepModelState:NO pct:1];
+    };
+    if (self.view.window) [panel beginSheetModalForWindow:self.view.window completionHandler:completion];
+    else [panel beginWithCompletionHandler:completion];
+}
+
+- (void)studioFail:(NSString*)msg {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        self->_studioBusy = NO;
+        [self sendStateUpdate:@{@"studioError": msg}];
+    });
+}
+
+// Find the loudest 10 s window of a stem and resample it to the engine's
+// 160000-frame (16 kHz mono) audio-prompt buffer.
+- (BOOL)studioSetAudioPromptFromStem:(int)idx {
+    const std::vector<int16_t>& stem = _stems[idx];
+    const long frames = (long)stem.size() / 2;
+    const long win = 48000L * 10;
+    if (frames < win) return NO;
+    const long hop = 48000L / 2;
+    long bestAt = 0;
+    double bestE = -1;
+    for (long s = 0; s + win <= frames; s += hop) {
+        double e = 0;
+        for (long i = s; i < s + win; i += 64) {
+            const float v = (stem[i * 2] + stem[i * 2 + 1]) / 65536.0f;
+            e += v * v;
+        }
+        if (e > bestE) { bestE = e; bestAt = s; }
+    }
+    std::vector<float> prompt(160000);
+    for (long o = 0; o < 160000; ++o) {
+        const long s = bestAt + o * 3;
+        float acc = 0;
+        for (int k = 0; k < 3; ++k) {
+            acc += (stem[(s + k) * 2] + stem[(s + k) * 2 + 1]) / 65536.0f;
+        }
+        prompt[o] = acc / 3.0f;
+    }
+    self.engine->set_audio_prompt_samples(0, "stem", prompt.data(), 160000);
+    return YES;
+}
+
+- (void)handleStudioCover:(int)idx {
+    if (idx < 0 || idx > 5 || _studioBusy || _stems[idx].empty()) return;
+    if (!self.engine || !self.engine->is_loaded()) {
+        [self sendStateUpdate:@{@"studioError": @"load a local model first"}];
+        return;
+    }
+    if (self.useLyria && self.useLyria->load(std::memory_order_relaxed)) {
+        [self sendStateUpdate:@{@"studioError": @"covers use the local engine — switch to local"}];
+        return;
+    }
+    _studioBusy = YES;
+    [self studioProgress:@"covering" pct:0.05f];
+
+    // 1. Style DNA: the stem's loudest 10 s into audio slot 0. Audio slots
+    //    take priority over text at the SAME index, so the steering text must
+    //    live in slot 1 — blended ~70% audio DNA / 30% text guidance.
+    if (![self studioSetAudioPromptFromStem:idx]) {
+        [self studioFail:@"stem too short"];
+        return;
+    }
+    static NSString* const tmpl[6] = {
+        @"solo drums, drum kit only, no melody no bass",
+        @"solo bass line, deep round bass, no drums",
+        @"melodic instruments, chords and lead, no drums",
+        @"expressive lead melody, vocal-like phrasing, no drums",
+        @"solo electric guitar, expressive riffs, no drums",
+        @"solo piano, expressive chords and melody, no drums",
+    };
+    const int bpm = (int)lroundf(_songAnalysis.bpm);
+    NSString* text = [NSString stringWithFormat:@"%@, %d bpm", tmpl[idx], bpm];
+    std::vector<std::string> texts = {"", text.UTF8String};   // slot 0 = audio
+    std::vector<float> weights = {0.7f, 0.3f};
+    self.engine->set_text_prompts(texts, weights);
+    self.engine->set_blend_weights(weights.data(), 2);
+
+    // 2. Stem discipline: suppress drums for bass/melodic takes.
+    [self applyParamToEngine:39 value:(idx == 0 ? 0.0f : 1.0f)];   // drumless
+
+    // 3. Clean slate: reset the model context so the take doesn't inherit
+    //    whatever was playing before.
+    [self applyParamToEngine:31 value:1.0f];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.1 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self applyParamToEngine:31 value:0.0f];
+    });
+
+    // 4. Roll: start playback if needed, settle 8 bars (encode + steering +
+    //    buffering), record 8 bars.
+    BOOL started = NO;
+    if (!_isPlaying) {
+        [NSApp sendAction:@selector(menuTogglePlayStop:) to:nil from:self];
+        started = YES;
+    }
+    _coverStartedPlayback = started;
+    const double beat = 60.0 / MAX(70, bpm);
+    const double settleSec = 32.0 * beat;   // 8 bars
+    const double recSec = 32.0 * beat;      // 8 bars
+    const long recFrames = (long)(recSec * 48000.0);
+    _recBufL.assign(recFrames, 0.0f);
+    _recBufR.assign(recFrames, 0.0f);
+
+    JamSharedState* shared = self.sharedState;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(settleSec * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        [self studioProgress:@"recording take" pct:0.4f];
+        shared->recWritten.store(0, std::memory_order_relaxed);
+        shared->recL.store(self->_recBufL.data(), std::memory_order_relaxed);
+        shared->recR.store(self->_recBufR.data(), std::memory_order_relaxed);
+        shared->recCap.store(recFrames, std::memory_order_relaxed);
+        shared->recArmed.store(true, std::memory_order_release);
+    });
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)((settleSec + recSec + 0.3) * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        shared->recArmed.store(false, std::memory_order_relaxed);
+        shared->recL.store(nullptr, std::memory_order_relaxed);
+        shared->recR.store(nullptr, std::memory_order_relaxed);
+        self->_takeL[idx] = self->_recBufL;
+        self->_takeR[idx] = self->_recBufR;
+        if (self->_coverStartedPlayback && self->_isPlaying) {
+            [NSApp sendAction:@selector(menuTogglePlayStop:) to:nil from:self];
+        }
+        // Restore: clear the audio slot, drumless off, back to the user's prompt.
+        self.engine->set_audio_prompt_samples(0, "", nullptr, 0);
+        [self applyParamToEngine:39 value:0.0f];
+        if (self->_currentPromptText.length > 0) {
+            std::vector<std::string> t = {self->_currentPromptText.UTF8String};
+            std::vector<float> w = {1.0f};
+            self.engine->set_text_prompts(t, w);
+            self.engine->set_blend_weights(w.data(), 1);
+        }
+        self->_studioBusy = NO;
+        [self sendStateUpdate:@{@"studioTake": @{
+            @"index": @(idx),
+            @"wave": JamWaveThumb(self->_takeL[idx].data(), self->_takeR[idx].data(),
+                                  (long)self->_takeL[idx].size(), 480),
+        }}];
+        [self studioProgress:@"ready" pct:1.0f];
+    });
+}
+
+// Publish the controller-owned stem buffers to the render thread (call on
+// main, only when the vectors are stable).
+- (void)studioPublishStems {
+    JamSharedState* sh = self.sharedState;
+    if (!sh) return;
+    long len = LONG_MAX;
+    bool any = false;
+    for (int i = 0; i < 6; ++i) {
+        if (_stems[i].empty()) {
+            sh->stemBuf[i].store(nullptr, std::memory_order_relaxed);
+        } else {
+            sh->stemBuf[i].store(_stems[i].data(), std::memory_order_relaxed);
+            len = MIN(len, (long)_stems[i].size() / 2);
+            any = true;
+        }
+    }
+    sh->stemLen.store(any ? len : 0, std::memory_order_release);
+}
+
+- (void)studioUnpublishStems {
+    JamSharedState* sh = self.sharedState;
+    if (!sh) return;
+    sh->stemActive.store(false, std::memory_order_relaxed);
+    sh->stemMask.store(0, std::memory_order_relaxed);
+    sh->stemLen.store(0, std::memory_order_relaxed);
+    for (int i = 0; i < 6; ++i) sh->stemBuf[i].store(nullptr, std::memory_order_relaxed);
+}
+
+- (void)handleStudioStemToggle:(int)idx on:(BOOL)on {
+    if (idx < 0 || idx > 5) return;
+    JamSharedState* sh = self.sharedState;
+    if (!sh) return;
+    // Stems and the song preview are mutually exclusive.
+    sh->prevActive.store(false, std::memory_order_relaxed);
+    int mask = sh->stemMask.load(std::memory_order_relaxed);
+    if (on) {
+        if (_stems[idx].empty()) return;
+        mask |= (1 << idx);
+    } else {
+        mask &= ~(1 << idx);
+    }
+    sh->stemMask.store(mask, std::memory_order_relaxed);
+    if (mask) {
+        const long len = sh->stemLen.load(std::memory_order_relaxed);
+        if (sh->stemPos.load(std::memory_order_relaxed) >= len) {
+            sh->stemPos.store(0, std::memory_order_relaxed);
+        }
+        sh->stemActive.store(true, std::memory_order_release);
+    } else {
+        sh->stemActive.store(false, std::memory_order_relaxed);
+    }
+}
+
+- (void)handleStudioPreview:(int)idx source:(NSString*)source on:(BOOL)on {
+    JamSharedState* shared = self.sharedState;
+    if (!shared) return;
+    shared->prevActive.store(false, std::memory_order_relaxed);
+    shared->stemActive.store(false, std::memory_order_relaxed);
+    shared->stemMask.store(0, std::memory_order_relaxed);
+    if (!on) return;
+    if ([source isEqualToString:@"take"]) {
+        if (idx < 0 || idx > 5 || _takeL[idx].empty()) return;
+        _prevBufL = _takeL[idx];
+        _prevBufR = _takeR[idx];
+    } else if ([source isEqualToString:@"song"]) {
+        if (_songL.empty()) return;
+        _prevBufL = _songL;
+        _prevBufR = _songR;
+    } else {
+        if (idx < 0 || idx > 5 || _stems[idx].empty()) return;
+        const long frames = (long)_stems[idx].size() / 2;
+        _prevBufL.resize(frames);
+        _prevBufR.resize(frames);
+        for (long i = 0; i < frames; ++i) {
+            _prevBufL[i] = _stems[idx][i * 2] / 32768.0f;
+            _prevBufR[i] = _stems[idx][i * 2 + 1] / 32768.0f;
+        }
+    }
+    shared->prevPos.store(0, std::memory_order_relaxed);
+    shared->prevLen.store((long)_prevBufL.size(), std::memory_order_relaxed);
+    shared->prevL.store(_prevBufL.data(), std::memory_order_relaxed);
+    shared->prevR.store(_prevBufR.data(), std::memory_order_relaxed);
+    shared->prevActive.store(true, std::memory_order_release);
+}
+
+- (void)handleStudioPackage {
+    if (_songL.empty()) {
+        [self sendStateUpdate:@{@"studioError": @"load a song first"}];
+        return;
+    }
+    bool anyStem = false;
+    for (int i = 0; i < 6; ++i) anyStem |= !_stems[i].empty();
+    if (!anyStem) {
+        [self sendStateUpdate:@{@"studioError": @"separate or import stems first"}];
+        return;
+    }
+    NSMutableArray* sections = [NSMutableArray array];
+    static NSString* const labels[4] = {@"break", @"verse", @"drop", @"build"};
+    for (const auto& s : _songAnalysis.sections) {
+        [sections addObject:@{@"start": @(s.start), @"end": @(s.end),
+                              @"label": labels[s.label & 3], @"energy": @(s.energy)}];
+    }
+    static NSString* const stemNames[6] = {@"drums", @"bass", @"other", @"vocals",
+                                            @"guitar", @"piano"};
+    static NSString* const tmpl[6] = {
+        @"solo drums, drum kit only, no melody no bass",
+        @"solo bass line, deep round bass, no drums",
+        @"melodic instruments, chords and lead, no drums",
+        @"expressive lead melody, vocal-like phrasing, no drums",
+        @"solo electric guitar, expressive riffs, no drums",
+        @"solo piano, expressive chords and melody, no drums",
+    };
+    const int bpm = (int)lroundf(_songAnalysis.bpm);
+    NSMutableArray* stems = [NSMutableArray array];
+    for (int i = 0; i < 6; ++i) {
+        if (_stems[i].empty()) continue;
+        [stems addObject:@{
+            @"name": stemNames[i],
+            @"prompt": [NSString stringWithFormat:@"%@, %d bpm", tmpl[i], bpm],
+            @"file": [NSString stringWithFormat:@"stems/%@.wav", stemNames[i]],
+            @"source": _stemSource[i] ?: @"",
+        }];
+    }
+    NSDictionary* pgm = @{
+        @"app": @"megenta-jam",
+        @"type": @"pgm",
+        @"version": @2,
+        @"song": @{@"name": _songName ?: @"song",
+                   @"duration": @(_songDur),
+                   @"bpm": @(bpm),
+                   @"key": [NSString stringWithFormat:@"%@ %@",
+                            kJamKeyNames[_songAnalysis.keyIdx],
+                            _songAnalysis.minor ? @"minor" : @"major"],
+                   @"file": _songL.empty() ? @"" : @"song.wav"},
+        @"sections": sections,
+        @"stems": stems,
+    };
+    NSData* data = [NSJSONSerialization dataWithJSONObject:pgm
+                                                   options:NSJSONWritingPrettyPrinted
+                                                     error:nil];
+    if (!data) return;
+    // The PGM is a folder: program.json + stems/<name>.wav (48 kHz 16-bit).
+    NSSavePanel* panel = [NSSavePanel savePanel];
+    NSString* base = [_songName stringByDeletingPathExtension] ?: @"show";
+    [panel setNameFieldStringValue:[base stringByAppendingString:@".pgm"]];
+    [panel setMessage:@"Package the live performance program (folder with stems + program.json)"];
+    void (^completion)(NSModalResponse) = ^(NSModalResponse result) {
+        if (result != NSModalResponseOK || !panel.URL) return;
+        NSURL* root = panel.URL;
+        self->_studioBusy = YES;
+        [self studioProgress:@"packaging" pct:0.05f];
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+            NSFileManager* fm = [NSFileManager defaultManager];
+            [fm removeItemAtURL:root error:nil];
+            NSURL* stemsDir = [root URLByAppendingPathComponent:@"stems"];
+            NSError* dirErr = nil;
+            [fm createDirectoryAtURL:stemsDir withIntermediateDirectories:YES
+                          attributes:nil error:&dirErr];
+            if (dirErr) {
+                [self studioFail:@"could not create the PGM folder"];
+                return;
+            }
+            [data writeToURL:[root URLByAppendingPathComponent:@"program.json"]
+                  atomically:YES];
+            static NSString* const names[6] = {@"drums", @"bass", @"other", @"vocals",
+                                               @"guitar", @"piano"};
+            BOOL ok = YES;
+            int written = 0;
+            for (int i = 0; i < 6; ++i) {
+                if (self->_stems[i].empty()) continue;
+                [self studioProgress:@"packaging stems" pct:0.1f + 0.75f * (written / 6.0f)];
+                NSURL* wav = [stemsDir URLByAppendingPathComponent:
+                              [names[i] stringByAppendingString:@".wav"]];
+                ok &= JamWriteWav(wav, self->_stems[i].data(),
+                                  (long)self->_stems[i].size() / 2);
+                written++;
+            }
+            // Original song (enables full PGM re-import).
+            if (!self->_songL.empty()) {
+                [self studioProgress:@"packaging song" pct:0.88f];
+                const long nf = (long)self->_songL.size();
+                std::vector<int16_t> songI16(nf * 2);
+                for (long i = 0; i < nf; ++i) {
+                    float l = self->_songL[i] * 32767.0f, r = self->_songR[i] * 32767.0f;
+                    l = MAX(-32768.0f, MIN(32767.0f, l));
+                    r = MAX(-32768.0f, MIN(32767.0f, r));
+                    songI16[i * 2] = (int16_t)l;
+                    songI16[i * 2 + 1] = (int16_t)r;
+                }
+                ok &= JamWriteWav([root URLByAppendingPathComponent:@"song.wav"],
+                                  songI16.data(), nf);
+            }
+            const BOOL allOk = ok;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self->_studioBusy = NO;
+                [self studioProgress:@"ready" pct:1.0f];
+                [self sendStateUpdate:@{@"studioNotice":
+                    allOk ? [NSString stringWithFormat:@"PGM packaged → %@", root.lastPathComponent]
+                          : @"PGM packaged with errors (some stems failed)"}];
+            });
+        });
+    };
+    if (self.view.window) [panel beginSheetModalForWindow:self.view.window completionHandler:completion];
+    else [panel beginWithCompletionHandler:completion];
+}
 
 // ─── BPM detection ───────────────────────────────────────────────────────────
 // One-click tempo detection from the master output: autocorrelate the recent

@@ -32,6 +32,8 @@ import {
 } from './InstrumentPanel';
 import type { SynthParams, SynthPreset } from './InstrumentPanel';
 import { FACTORY_PRESETS } from './SynthPresets';
+import { StudioPanel, STUDIO_INIT } from './StudioPanel';
+import type { StudioState } from './StudioPanel';
 import {
   IconButton,
   MenuItem,
@@ -385,14 +387,34 @@ function App() {
     tremolo: 0.0,
   });
 
-  // ─── Main tabs: JAM (generative mix) vs INSTRUMENT (performance synth) ────
-  const [mainTab, setMainTab] = useState<'jam' | 'instrument'>('jam');
+  // ─── Main tabs: JAM (mix) · INSTRUMENT (synth) · PGM (show studio) ────────
+  const [mainTab, setMainTab] = useState<'jam' | 'instrument' | 'pgm'>('jam');
   const mainTabRef = useRef(mainTab);
   mainTabRef.current = mainTab;
   // Gate native note routing: instrument tab → notes play the synth.
   useEffect(() => {
     post({ type: 'instrumentActive', value: mainTab === 'instrument' });
   }, [mainTab]);
+
+  // ─── PGM studio: song → stems → model covers → packaged show program ──────
+  const [studio, setStudio] = useState<StudioState>(STUDIO_INIT);
+  const studioSongToggle = useCallback((on: boolean) => {
+    setStudio(st => ({ ...st, playMode: on ? 'song' : 'none' }));
+    post({ type: 'studioPreview', index: -1, source: 'song', on });
+  }, []);
+  const studioTransport = useCallback((action: 'play' | 'pause' | 'restart') => {
+    post({ type: 'studioTransport', action });
+  }, []);
+  const studioMix = useCallback((idx: number, patch: { mute?: boolean; solo?: boolean; gain?: number }) => {
+    setStudio(st => ({
+      ...st,
+      mixer: st.mixer.map((m, i) => (i === idx ? { ...m, ...patch } : m)),
+    }));
+    post({ type: 'studioMix', index: idx, ...patch });
+  }, []);
+  const studioSeek = useCallback((sec: number) => {
+    post({ type: 'studioSeek', sec });
+  }, []);
 
   // Performance synth (MicroFreak-style) parameters — UI is the source of truth.
   const [synthParams, setSynthParams] = useState<SynthParams>(DEFAULT_SYNTH);
@@ -1899,6 +1921,83 @@ function App() {
         setBpmDetecting(false);
         flashBpmStatus(state.bpmDetectError);
       }
+      if (state.studioSong && typeof state.studioSong === 'object') {
+        const sg = state.studioSong;
+        setStudio(st => ({
+          ...st,
+          loaded: true,
+          name: String(sg.name ?? 'song'),
+          duration: Number(sg.duration ?? 0),
+          bpm: Number(sg.bpm ?? 0),
+          key: String(sg.key ?? ''),
+          sections: Array.isArray(sg.sections) ? sg.sections : [],
+          songWave: Array.isArray(sg.wave) ? sg.wave : [],
+          stems: st.stems.map(x => ({ ...x, wave: [], source: '' })),
+          error: null,
+        }));
+      }
+      if (Array.isArray(state.studioStems)) {
+        const waves = state.studioStems;
+        const sources = Array.isArray(state.studioStemSources) ? state.studioStemSources : null;
+        setStudio(st => ({
+          ...st,
+          stems: st.stems.map((x, i) => ({
+            ...x,
+            wave: waves[i] ?? [],
+            source: sources ? String(sources[i] ?? '') : x.source,
+          })),
+        }));
+      }
+      if (typeof state.studioSepEngine === 'string') {
+        const eng = state.studioSepEngine;
+        setStudio(st => ({ ...st, sepEngine: eng }));
+      }
+      if (state.studioSepModel && typeof state.studioSepModel === 'object') {
+        const m = state.studioSepModel;
+        setStudio(st => ({
+          ...st,
+          sepModel: {
+            present: !!m.present,
+            sources: Number(m.sources ?? 0),
+            downloading: !!m.downloading,
+            pct: Number(m.pct ?? 0),
+            mb: Number(m.mb ?? 0),
+          },
+        }));
+      }
+      if (state.studioProgress && typeof state.studioProgress === 'object') {
+        const { stage, pct } = state.studioProgress;
+        setStudio(st => ({
+          ...st,
+          stage: String(stage ?? ''),
+          pct: Number(pct ?? 0),
+          busy: stage !== 'ready',
+        }));
+      }
+      if (state.studioPlayhead && typeof state.studioPlayhead === 'object') {
+        const ph = state.studioPlayhead;
+        if (ph.active) {
+          setStudio(st => ({
+            ...st,
+            playMode: ph.mode === 'stems' ? 'stems' : 'song',
+            playing: !!ph.playing,
+            playhead: { pos: Number(ph.pos ?? 0), len: Number(ph.len ?? 0) },
+          }));
+        } else {
+          setStudio(st => ({
+            ...st, playMode: 'none', playing: false, playhead: { pos: 0, len: 0 },
+          }));
+        }
+      }
+      if (typeof state.studioError === 'string') {
+        const msg = state.studioError;
+        setStudio(st => ({ ...st, busy: false, error: msg }));
+      }
+      if (typeof state.studioNotice === 'string') {
+        const msg = state.studioNotice;
+        setStudio(st => ({ ...st, notice: msg }));
+        window.setTimeout(() => setStudio(st => ({ ...st, notice: null })), 2600);
+      }
       if (typeof state.importedSession === 'string') {
         applyImportedSessionRef.current(state.importedSession);
       }
@@ -2327,6 +2426,12 @@ function App() {
               >
                 instrument
               </button>
+              <button
+                className={mainTab === 'pgm' ? 'is-active' : ''}
+                onClick={() => setMainTab('pgm')}
+              >
+                pgm
+              </button>
             </div>
             <ModelSelector
               modelName={modelName}
@@ -2412,6 +2517,23 @@ function App() {
           </div>
         </div>
 
+        {mainTab === 'pgm' && (
+          <StudioPanel
+            studio={studio}
+            onLoadSong={() => post({ type: 'studioLoadSong' })}
+            onLoadPgm={() => post({ type: 'studioLoadPgm' })}
+            onSeparate={() => post({ type: 'studioSeparate' })}
+            onSongToggle={studioSongToggle}
+            onTransport={studioTransport}
+            onMix={studioMix}
+            onSeek={studioSeek}
+            onImportStem={(i) => post({ type: 'studioImportStem', index: i })}
+            onPackage={() => post({ type: 'studioPackage' })}
+            onSepDownload={() => post({ type: 'studioSepDownload' })}
+            onSepPick={() => post({ type: 'studioSepPick' })}
+          />
+        )}
+
         {mainTab === 'instrument' && (
           <InstrumentPanel
             synth={synthParams}
@@ -2438,7 +2560,7 @@ function App() {
           />
         )}
 
-        <div className={`jam-main-grid${mainTab === 'instrument' ? ' is-tab-hidden' : ''}`}>
+        <div className={`jam-main-grid${mainTab !== 'jam' ? ' is-tab-hidden' : ''}`}>
           <section className="jam-prompt-panel">
             <div className="jam-prompt-head">
               <div className="jam-prompt-titlebar">
@@ -3065,6 +3187,7 @@ function App() {
       <div
         className="jam-keyboard-zone"
         style={{
+          display: mainTab === 'pgm' ? 'none' : undefined,
           flexShrink: 0,
           height: '158px',
           paddingTop: '26px',

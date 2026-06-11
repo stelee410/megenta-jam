@@ -19,9 +19,32 @@
 set(APP_ICON "${CMAKE_CURRENT_SOURCE_DIR}/../common/assets/AppIcon.icns")
 set_source_files_properties(${APP_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
 
+# Vendored demucs.cpp (https://github.com/sevagh/demucs.cpp, MIT) — neural
+# 4-stem separation (htdemucs) used by the PGM studio.
+add_library(demucscpp STATIC
+    vendor/demucscpp/crosstransformer.cpp
+    vendor/demucscpp/dsp.cpp
+    vendor/demucscpp/encdec.cpp
+    vendor/demucscpp/layers.cpp
+    vendor/demucscpp/lstm.cpp
+    vendor/demucscpp/model_apply.cpp
+    vendor/demucscpp/model_inference.cpp
+    vendor/demucscpp/model_load.cpp
+)
+target_include_directories(demucscpp PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/demucscpp
+    ${eigen_SOURCE_DIR}
+)
+target_compile_options(demucscpp PRIVATE -O3 -ffast-math)
+# Route Eigen's GEMM through Apple Accelerate (AMX) — big transformer speedup.
+target_compile_definitions(demucscpp PUBLIC EIGEN_USE_BLAS)
+target_link_libraries(demucscpp PUBLIC "-framework Accelerate")
+set_target_properties(demucscpp PROPERTIES CXX_STANDARD 17)
+
 add_executable(mrt2_jam MACOSX_BUNDLE
     JamApp.mm
     JamAppController.mm
+    JamSeparate.mm
     LyriaClient.mm
     LyriaConductor.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/magenta_paths.cpp
@@ -37,9 +60,13 @@ target_include_directories(mrt2_jam PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/objc
 )
 target_compile_options(mrt2_jam PRIVATE -fobjc-arc)
+# The separation wrapper instantiates Eigen kernels — keep it optimized.
+set_source_files_properties(JamSeparate.mm PROPERTIES COMPILE_OPTIONS "-O3")
 
 target_link_libraries(mrt2_jam PRIVATE
     magentart::core
+    demucscpp
+    "-framework Accelerate"
     "-framework AppKit"
     "-framework AudioToolbox"
     "-framework AVFoundation"

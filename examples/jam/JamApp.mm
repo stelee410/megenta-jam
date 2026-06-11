@@ -542,6 +542,23 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
             engine->read_audio_stereo(outL, outR, frameCount, false);
         }
 
+        // PGM studio take recorder: capture the raw engine output (pre-FX)
+        // while armed so cover takes can be A/B'd against the original stem.
+        if (shared->recArmed.load(std::memory_order_relaxed)) {
+            float* rl = shared->recL.load(std::memory_order_relaxed);
+            float* rr = shared->recR.load(std::memory_order_relaxed);
+            const long cap = shared->recCap.load(std::memory_order_relaxed);
+            long w = shared->recWritten.load(std::memory_order_relaxed);
+            if (rl && rr) {
+                for (AVAudioFrameCount i = 0; i < frameCount && w < cap; ++i, ++w) {
+                    rl[w] = outL[i];
+                    rr[w] = outR[i];
+                }
+                shared->recWritten.store(w, std::memory_order_release);
+                if (w >= cap) shared->recArmed.store(false, std::memory_order_relaxed);
+            }
+        }
+
         // Check if any MIDI note is currently held
         bool anyNoteHeld = false;
         for (int n = 0; n < 128 && !anyNoteHeld; ++n) {
@@ -607,6 +624,58 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                              shared->fxTempo.load(std::memory_order_relaxed));
 
         shared->processPerformanceFX(outL, outR, frameCount);
+
+        // PGM studio preview player: dry one-shot playback (post-FX) of an
+        // original stem or a recorded cover take.
+        if (shared->prevActive.load(std::memory_order_relaxed)) {
+            const float* pl = shared->prevL.load(std::memory_order_relaxed);
+            const float* pr = shared->prevR.load(std::memory_order_relaxed);
+            const long len = shared->prevLen.load(std::memory_order_relaxed);
+            long pos = shared->prevPos.load(std::memory_order_relaxed);
+            if (pl && pr) {
+                for (AVAudioFrameCount i = 0; i < frameCount && pos < len; ++i, ++pos) {
+                    outL[i] += pl[pos] * 0.9f;
+                    outR[i] += pr[pos] * 0.9f;
+                }
+                shared->prevPos.store(pos, std::memory_order_relaxed);
+                if (pos >= len) shared->prevActive.store(false, std::memory_order_relaxed);
+            }
+        }
+
+        // PGM console stem mixer: master transport + per-stem gain/mute/solo.
+        {
+            const long len = shared->stemLen.load(std::memory_order_relaxed);
+            if (len > 0 && shared->stemActive.load(std::memory_order_relaxed)) {
+                const int mute = shared->stemMuteMask.load(std::memory_order_relaxed);
+                const int solo = shared->stemSoloMask.load(std::memory_order_relaxed);
+                long pos = shared->stemPos.load(std::memory_order_relaxed);
+                const int16_t* bufs[6];
+                float target[6];
+                for (int t = 0; t < 6; ++t) {
+                    bufs[t] = shared->stemBuf[t].load(std::memory_order_relaxed);
+                    const bool audible = bufs[t] &&
+                        (solo ? ((solo >> t) & 1) : !((mute >> t) & 1));
+                    target[t] = audible
+                        ? shared->stemGain[t].load(std::memory_order_relaxed) : 0.0f;
+                }
+                for (AVAudioFrameCount i = 0; i < frameCount && pos < len; ++i, ++pos) {
+                    float l = 0.0f, r = 0.0f;
+                    for (int t = 0; t < 6; ++t) {
+                        float& g = shared->stemSmoothG[t];
+                        g += (target[t] - g) * 0.002f;     // ~10 ms de-click
+                        if (bufs[t] && g > 0.0005f) {
+                            l += bufs[t][pos * 2] * g * (0.9f / 32768.0f);
+                            r += bufs[t][pos * 2 + 1] * g * (0.9f / 32768.0f);
+                        }
+                    }
+                    outL[i] += l;
+                    outR[i] += r;
+                }
+                shared->stemPos.store(pos, std::memory_order_relaxed);
+                if (pos >= len) shared->stemActive.store(false, std::memory_order_relaxed);
+            }
+        }
+
         shared->pushAudioSamples(outL, outR, frameCount);
         return noErr;
     }];

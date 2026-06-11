@@ -31,6 +31,34 @@ struct JamSharedState {
     // notes route here instead of conditioning the generative engine.
     JamSynth synth;
 
+    // ── PGM studio I/O (render-thread side) ─────────────────────────────
+    // Preview player: one-shot stereo playback of an original stem or a cover
+    // take. Buffers are owned by the controller, which never frees them while
+    // `prevActive` could still be observed by the render thread.
+    std::atomic<const float*> prevL{nullptr};
+    std::atomic<const float*> prevR{nullptr};
+    std::atomic<long> prevLen{0};
+    std::atomic<long> prevPos{0};
+    std::atomic<bool> prevActive{false};
+    // Stem mixer (PGM console): the render thread sums the loaded stems with
+    // per-stem gain + mute/solo, driven by a master transport.
+    std::atomic<const int16_t*> stemBuf[6] = {};
+    std::atomic<long> stemLen{0};
+    std::atomic<long> stemPos{0};
+    std::atomic<int> stemMask{0};          // legacy (unused by the mixer)
+    std::atomic<bool> stemActive{false};   // transport: playing
+    std::atomic<float> stemGain[6] = {{1}, {1}, {1}, {1}, {1}, {1}};
+    std::atomic<int> stemMuteMask{0};
+    std::atomic<int> stemSoloMask{0};
+    float stemSmoothG[6] = {};             // render-thread gain smoothing
+    // Take recorder: captures the raw generative-engine output (pre-FX) while
+    // armed, so a cover take can be A/B'd against the original stem.
+    std::atomic<float*> recL{nullptr};
+    std::atomic<float*> recR{nullptr};
+    std::atomic<long> recCap{0};
+    std::atomic<long> recWritten{0};
+    std::atomic<bool> recArmed{false};
+
     static constexpr int VIZ_BUF_SIZE = 8192;
     float vizRing[VIZ_BUF_SIZE] = {};
     std::atomic<int> vizHead{0};

@@ -118,6 +118,17 @@ set(FETCHCONTENT_SOURCE_DIR_TENSORFLOW "${CMAKE_BINARY_DIR}/_deps/tensorflow-lit
 message(STATUS "Fetching tensorflow-lite... (this may take a long time due to repo size)")
 FetchContent_MakeAvailable(tensorflow-lite)
 
+# Eigen (header-only) — used by the vendored demucs.cpp stem separator.
+FetchContent_Declare(
+  eigen
+  URL https://gitlab.com/libeigen/eigen/-/archive/3.4.0/eigen-3.4.0.tar.gz
+  DOWNLOAD_EXTRACT_TIMESTAMP ON
+)
+FetchContent_GetProperties(eigen)
+if(NOT eigen_POPULATED)
+  FetchContent_Populate(eigen)
+endif()
+
 
 
 # --- Host-shared settings -----------------------------------------------------
