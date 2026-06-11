@@ -682,6 +682,22 @@ function App() {
   // Keep the audio-thread tremolo LFO synced to the displayed BPM.
   useEffect(() => { post({ type: 'fxTempo', value: bpmValue }); }, [bpmValue]);
 
+  // One-click BPM detection from the playing audio (works for both engines).
+  // The result feeds the single global BPM, which drives the instrument's
+  // arp/LFO sync, the punch tremolo, and the jam page's BPM box alike.
+  const [bpmDetecting, setBpmDetecting] = useState(false);
+  const [bpmStatus, setBpmStatus] = useState<string | null>(null);
+  const bpmStatusTimer = useRef<number | null>(null);
+  const flashBpmStatus = (msg: string) => {
+    setBpmStatus(msg);
+    if (bpmStatusTimer.current) clearTimeout(bpmStatusTimer.current);
+    bpmStatusTimer.current = window.setTimeout(() => setBpmStatus(null), 2600);
+  };
+  const detectBpm = useCallback(() => {
+    setBpmDetecting(true);
+    post({ type: 'detectBpm' });
+  }, []);
+
   /** Parse the typed BPM and apply it (clamped); reset the box if invalid. */
   const commitBpmText = () => {
     const v = parseInt(bpmText.trim(), 10);
@@ -1870,6 +1886,19 @@ function App() {
           (p: any) => p && typeof p.name === 'string' && p.params,
         ));
       }
+      if (typeof state.detectedBpm === 'number') {
+        setBpmDetecting(false);
+        if (state.detectedBpm >= 40) {
+          const v = Math.max(40, Math.min(220, Math.round(state.detectedBpm)));
+          setBpmValue(v);
+          setBpmText(String(v));
+          flashBpmStatus(`♪ ${v} bpm`);
+        }
+      }
+      if (typeof state.bpmDetectError === 'string') {
+        setBpmDetecting(false);
+        flashBpmStatus(state.bpmDetectError);
+      }
       if (typeof state.importedSession === 'string') {
         applyImportedSessionRef.current(state.importedSession);
       }
@@ -1926,9 +1955,9 @@ function App() {
     let nextBeat = Date.now();
     const tick = () => {
       if (cancelled) return;
-      post({ type: 'kbdNote', note: METRONOME_NOTE, on: true });
+      post({ type: 'kbdNote', note: METRONOME_NOTE, on: true, pulse: true });
       gateTimer = window.setTimeout(() => {
-        post({ type: 'kbdNote', note: METRONOME_NOTE, on: false });
+        post({ type: 'kbdNote', note: METRONOME_NOTE, on: false, pulse: true });
       }, gateMs);
       // Self-correcting schedule: accumulate the ideal beat time so timer
       // jitter never drifts the average tempo.
@@ -1940,7 +1969,7 @@ function App() {
       cancelled = true;
       clearTimeout(timer);
       clearTimeout(gateTimer);
-      post({ type: 'kbdNote', note: METRONOME_NOTE, on: false });
+      post({ type: 'kbdNote', note: METRONOME_NOTE, on: false, pulse: true });
     };
   }, [bpmLock, bpmValue, isPlaying, isSoloMode, engineMode]);
 
@@ -2399,6 +2428,10 @@ function App() {
             onDeletePreset={deleteSynthPreset}
             octaveOffset={octaveOffset}
             onOctave={(dir) => (dir < 0 ? handleOctaveDown() : handleOctaveUp())}
+            bpm={bpmValue}
+            bpmStatus={bpmStatus}
+            bpmDetecting={bpmDetecting}
+            onDetectBpm={detectBpm}
             aiBusy={aiPatchBusy}
             aiError={aiPatchError}
             onAiPatch={requestAiPatch}

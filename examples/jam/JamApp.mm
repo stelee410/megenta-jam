@@ -698,9 +698,11 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                                 shared->noteOn(note);
                             }
                         } else if (statusNibble == 0x80 || (statusNibble == 0x90 && velocity == 0)) {
-                            if (shared->synth.active.load(std::memory_order_relaxed)) {
-                                shared->synth.pushNote(note, 0, false);
-                            } else {
+                            // Note-offs always reach the synth too, so keys
+                            // released after a tab switch never leave stale
+                            // held notes (harmless when the note is unknown).
+                            shared->synth.pushNote(note, 0, false);
+                            if (!shared->synth.active.load(std::memory_order_relaxed)) {
                                 engine->set_note_off(note);
                                 shared->noteOff(note);
                             }
@@ -734,9 +736,11 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                                 shared->noteOn(note);
                             }
                         } else if (statusNibble == 0x80 || (statusNibble == 0x90 && velocity == 0)) {
-                            if (shared->synth.active.load(std::memory_order_relaxed)) {
-                                shared->synth.pushNote(note, 0, false);
-                            } else {
+                            // Note-offs always reach the synth too, so keys
+                            // released after a tab switch never leave stale
+                            // held notes (harmless when the note is unknown).
+                            shared->synth.pushNote(note, 0, false);
+                            if (!shared->synth.active.load(std::memory_order_relaxed)) {
                                 engine->set_note_off(note);
                                 shared->noteOff(note);
                             }

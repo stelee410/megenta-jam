@@ -1623,6 +1623,36 @@ input[type="range"]::-webkit-slider-thumb {
     inset 0 1px 1px rgba(255, 255, 255, 0.16);
 }
 
+/* ── Tempo cluster (global BPM readout + detect) ── */
+.freak-tempo {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  align-self: center;
+}
+
+.freak-tempo-read {
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 20px;
+  font-weight: 700;
+  color: #6fb3ff;
+  text-shadow: 0 0 10px rgba(111, 179, 255, 0.45);
+  line-height: 1;
+}
+.freak-tempo-read small {
+  font-size: 9px;
+  margin-left: 3px;
+  color: rgba(111, 179, 255, 0.6);
+}
+
+.freak-tempo-status {
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 9px;
+  color: #f8d35c;
+  white-space: nowrap;
+}
+
 /* ── ARP middle toggles ── */
 .freak-arp-mid { display: flex; align-items: center; }
 .freak-arp-toggles {

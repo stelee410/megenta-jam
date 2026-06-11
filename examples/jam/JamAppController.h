@@ -35,6 +35,17 @@ struct JamSharedState {
     float vizRing[VIZ_BUF_SIZE] = {};
     std::atomic<int> vizHead{0};
 
+    // ── BPM detection ────────────────────────────────────────────────────
+    // The audio thread writes a low-band onset-strength envelope (energy flux
+    // of a ~200 Hz lowpass, one value per 512-sample hop ≈ 93.75 fps). The
+    // main thread autocorrelates the most recent ~10 s on demand.
+    static constexpr int BPM_HOP = 512;
+    static constexpr int BPM_RING = 1024;          // ≈ 10.9 s of envelope
+    float bpmOnset[BPM_RING] = {};
+    std::atomic<int> bpmWrite{0};                  // monotonic block counter
+    float bpmLp = 0.0f, bpmAccum = 0.0f, bpmPrevE = 0.0f;  // audio-thread only
+    int bpmAccumN = 0;
+
     magentart::common::AudioLevelProcessor levelProcessor;
 
     std::atomic<float> filterX{1.0f};
@@ -337,8 +348,24 @@ struct JamSharedState {
     void pushAudioSamples(const float* left, const float* right, int count) {
         int h = vizHead.load(std::memory_order_relaxed);
         for (int i = 0; i < count; i++) {
-            vizRing[h] = (left[i] + right[i]) * 0.5f;
+            const float mono = (left[i] + right[i]) * 0.5f;
+            vizRing[h] = mono;
             h = (h + 1) % VIZ_BUF_SIZE;
+
+            // BPM onset envelope: kick-band energy flux per hop.
+            bpmLp += 0.026f * (mono - bpmLp);          // ~200 Hz lowpass
+            bpmAccum += bpmLp * bpmLp;
+            if (++bpmAccumN >= BPM_HOP) {
+                const float e = bpmAccum / BPM_HOP;
+                float flux = e - bpmPrevE;
+                if (flux < 0.0f) flux = 0.0f;
+                bpmPrevE = e;
+                const int w = bpmWrite.load(std::memory_order_relaxed);
+                bpmOnset[w % BPM_RING] = flux;
+                bpmWrite.store(w + 1, std::memory_order_release);
+                bpmAccum = 0.0f;
+                bpmAccumN = 0;
+            }
         }
         vizHead.store(h, std::memory_order_release);
 

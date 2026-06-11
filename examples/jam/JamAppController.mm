@@ -509,9 +509,10 @@ static BOOL isDevServerRunning(void) {
         NSNumber* value = body[@"value"];
         if ([value isKindOfClass:[NSNumber class]] && self.sharedState) {
             const BOOL on = value.boolValue;
+            // Gates note ROUTING only. The synth keeps sounding across tab
+            // switches (latched arps, ringing releases) — note-offs always
+            // reach it, so physical releases land even from the jam tab.
             self.sharedState->synth.active.store(on, std::memory_order_relaxed);
-            // Leaving the instrument: release any held synth notes so nothing drones.
-            if (!on) self.sharedState->synth.allNotesOff();
         }
     }
     else if ([type isEqualToString:@"synthParam"]) {
@@ -557,6 +558,9 @@ static BOOL isDevServerRunning(void) {
             else if ([key isEqualToString:@"space"])       sy.space.store(v, std::memory_order_relaxed);
             else if ([key isEqualToString:@"volume"])      sy.volume.store(v, std::memory_order_relaxed);
         }
+    }
+    else if ([type isEqualToString:@"detectBpm"]) {
+        [self handleDetectBpm];
     }
     else if ([type isEqualToString:@"synthDice"]) {
         // Re-roll the arp pattern (Dice).
@@ -834,14 +838,24 @@ static BOOL isDevServerRunning(void) {
     else if ([type isEqualToString:@"kbdNote"]) {
         NSNumber* noteVal = body[@"note"];
         NSNumber* onVal = body[@"on"];
+        NSNumber* pulseVal = body[@"pulse"];
         if (!noteVal || !onVal || !self.engine) return;
         uint8_t note = (uint8_t)MIN(127, MAX(0, noteVal.intValue));
         BOOL on = onVal.boolValue;
-        // Instrument tab: notes play the performance synth instead of
+        // BPM-lock metronome pulses condition the generative engine ONLY —
+        // never the synth (they'd stomp the arp's held notes / hold latch).
+        BOOL isPulse = [pulseVal isKindOfClass:[NSNumber class]] && pulseVal.boolValue;
+        // Instrument tab: note-ons play the performance synth instead of
         // conditioning the generative engine.
-        if (self.sharedState && self.sharedState->synth.active.load(std::memory_order_relaxed)) {
+        if (!isPulse && self.sharedState &&
+            self.sharedState->synth.active.load(std::memory_order_relaxed)) {
             self.sharedState->synth.pushNote(note, 100, on);
             return;
+        }
+        // Note-offs also reach the synth so keys released after a tab switch
+        // never leave stale held notes behind (harmless if unknown).
+        if (!on && !isPulse && self.sharedState) {
+            self.sharedState->synth.pushNote(note, 0, false);
         }
         if (on) {
             self.engine->set_note_on(note);
@@ -1265,6 +1279,91 @@ static const int kAudioPromptFrames = 160000; // 10s @ 16kHz
 // ─── AI prompt assist (agentllm, model c-music-express) ─────────────────────
 // Turns a free-form idea (any language) into a concise English music prompt
 // tuned for this engine. Reuses the Lyria API key; runs off the main thread.
+
+// ─── BPM detection ───────────────────────────────────────────────────────────
+// One-click tempo detection from the master output: autocorrelate the recent
+// onset-strength envelope (written by the audio thread), pick the strongest
+// beat period in the 50–200 BPM range with a harmonic bonus, refine the peak
+// parabolically, and fold the result into the 70–180 dance range.
+
+- (void)handleDetectBpm {
+    JamSharedState* shared = self.sharedState;
+    if (!shared) return;
+    if (!_isPlaying) {
+        [self sendStateUpdate:@{@"detectedBpm": @0,
+                                @"bpmDetectError": @"start playback first"}];
+        return;
+    }
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        const float fps = 48000.0f / (float)JamSharedState::BPM_HOP;   // ≈ 93.75
+        const int total = shared->bpmWrite.load(std::memory_order_acquire);
+        const int n = MIN(total, JamSharedState::BPM_RING);
+        if (n < (int)(fps * 6.0f)) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self sendStateUpdate:@{@"detectedBpm": @0,
+                                        @"bpmDetectError": @"let it play a few more seconds"}];
+            });
+            return;
+        }
+        // Copy the most recent window in time order (relaxed reads are fine
+        // for analysis) and remove the mean.
+        std::vector<float> x(n);
+        const int start = total - n;
+        double mean = 0.0;
+        for (int i = 0; i < n; ++i) {
+            x[i] = shared->bpmOnset[(start + i) % JamSharedState::BPM_RING];
+            mean += x[i];
+        }
+        mean /= n;
+        double energy = 0.0;
+        for (int i = 0; i < n; ++i) { x[i] -= (float)mean; energy += x[i] * x[i]; }
+        if (energy < 1e-12) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self sendStateUpdate:@{@"detectedBpm": @0,
+                                        @"bpmDetectError": @"no beat found"}];
+            });
+            return;
+        }
+
+        // Autocorrelation over beat periods for 50–200 BPM.
+        const int minLag = (int)(60.0f * fps / 200.0f);                // ≈ 28
+        const int maxLag = MIN((int)(60.0f * fps / 50.0f), n / 2);     // ≈ 112
+        std::vector<float> r(maxLag + 1, 0.0f);
+        for (int lag = minLag; lag <= maxLag; ++lag) {
+            double acc = 0.0;
+            for (int i = 0; i + lag < n; ++i) acc += x[i] * x[i + lag];
+            r[lag] = (float)(acc / (n - lag));
+        }
+        int bestLag = -1;
+        float bestScore = 0.0f;
+        for (int lag = minLag; lag <= maxLag; ++lag) {
+            float score = r[lag];
+            if (lag * 2 <= maxLag) score += 0.5f * r[lag * 2];         // harmonic bonus
+            if (score > bestScore) { bestScore = score; bestLag = lag; }
+        }
+        if (bestLag < 0 || bestScore <= 0.0f) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self sendStateUpdate:@{@"detectedBpm": @0,
+                                        @"bpmDetectError": @"no beat found"}];
+            });
+            return;
+        }
+        // Parabolic peak refinement for sub-block accuracy.
+        float lagF = (float)bestLag;
+        if (bestLag > minLag && bestLag < maxLag) {
+            const float y0 = r[bestLag - 1], y1 = r[bestLag], y2 = r[bestLag + 1];
+            const float den = y0 - 2.0f * y1 + y2;
+            if (std::fabs(den) > 1e-12f) lagF += 0.5f * (y0 - y2) / den;
+        }
+        float bpm = 60.0f * fps / lagF;
+        while (bpm < 70.0f) bpm *= 2.0f;
+        while (bpm > 180.0f) bpm *= 0.5f;
+        const int bpmInt = (int)std::lround(bpm);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self sendStateUpdate:@{@"detectedBpm": @(bpmInt)}];
+        });
+    });
+}
 
 // ─── AI patch design (Instrument tab) ────────────────────────────────────────
 // Turns a free-form sound description (any language) into a synth patch JSON

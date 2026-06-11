@@ -274,6 +274,10 @@ export function InstrumentPanel({
   onDeletePreset,
   octaveOffset,
   onOctave,
+  bpm,
+  bpmStatus,
+  bpmDetecting,
+  onDetectBpm,
   aiBusy,
   aiError,
   onAiPatch,
@@ -292,6 +296,10 @@ export function InstrumentPanel({
   onDeletePreset: (name: string) => void;
   octaveOffset: number;
   onOctave: (dir: -1 | 1) => void;
+  bpm: number;
+  bpmStatus: string | null;
+  bpmDetecting: boolean;
+  onDetectBpm: () => void;
   aiBusy: boolean;
   aiError: string | null;
   onAiPatch: (desc: string) => void;
@@ -505,6 +513,20 @@ export function InstrumentPanel({
                   ⚄ Dice
                 </button>
               </div>
+            </div>
+            <div className="freak-tempo">
+              <div className="freak-tempo-read" title="Global BPM — set in the JAM page (Lyria) or detected from the playing audio">
+                {bpm}<small>bpm</small>
+              </div>
+              <button
+                className={`freak-soft ${bpmDetecting ? 'is-lit' : ''}`}
+                onClick={onDetectBpm}
+                disabled={bpmDetecting}
+                title="Detect the current tempo from the playing audio"
+              >
+                {bpmDetecting ? 'listening…' : '◉ Detect'}
+              </button>
+              {bpmStatus && <span className="freak-tempo-status">{bpmStatus}</span>}
             </div>
             <FreakKnob
               label="Rate" value={synth.arpDiv / 5}
