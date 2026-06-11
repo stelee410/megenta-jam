@@ -1932,7 +1932,7 @@ function App() {
           key: String(sg.key ?? ''),
           sections: Array.isArray(sg.sections) ? sg.sections : [],
           songWave: Array.isArray(sg.wave) ? sg.wave : [],
-          stems: st.stems.map(x => ({ ...x, wave: [], source: '' })),
+          stems: st.stems.map(x => ({ ...x, wave: [], source: '', notes: 0, ribbon: [] })),
           error: null,
         }));
       }
@@ -1945,6 +1945,8 @@ function App() {
             ...x,
             wave: waves[i] ?? [],
             source: sources ? String(sources[i] ?? '') : x.source,
+            notes: 0,
+            ribbon: [],
           })),
         }));
       }
@@ -1972,6 +1974,16 @@ function App() {
           stage: String(stage ?? ''),
           pct: Number(pct ?? 0),
           busy: stage !== 'ready',
+        }));
+      }
+      if (state.studioNotes && typeof state.studioNotes === 'object') {
+        const { index, count, ribbon } = state.studioNotes;
+        setStudio(st => ({
+          ...st,
+          stems: st.stems.map((x, i) =>
+            i === index
+              ? { ...x, notes: Number(count ?? 0), ribbon: Array.isArray(ribbon) ? ribbon : [] }
+              : x),
         }));
       }
       if (state.studioPlayhead && typeof state.studioPlayhead === 'object') {
@@ -2528,6 +2540,7 @@ function App() {
             onMix={studioMix}
             onSeek={studioSeek}
             onImportStem={(i) => post({ type: 'studioImportStem', index: i })}
+            onTranscribe={(i) => post({ type: 'studioTranscribe', index: i })}
             onPackage={() => post({ type: 'studioPackage' })}
             onSepDownload={() => post({ type: 'studioSepDownload' })}
             onSepPick={() => post({ type: 'studioSepPick' })}

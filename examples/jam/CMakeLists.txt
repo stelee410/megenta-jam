@@ -45,6 +45,7 @@ add_executable(mrt2_jam MACOSX_BUNDLE
     JamApp.mm
     JamAppController.mm
     JamSeparate.mm
+    JamTranscribe.mm
     LyriaClient.mm
     LyriaConductor.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/magenta_paths.cpp
@@ -58,6 +59,7 @@ target_include_directories(mrt2_jam PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/objc
+    ${ONNXRUNTIME_DIR}/include
 )
 target_compile_options(mrt2_jam PRIVATE -fobjc-arc)
 # The separation wrapper instantiates Eigen kernels — keep it optimized.
@@ -66,6 +68,7 @@ set_source_files_properties(JamSeparate.mm PROPERTIES COMPILE_OPTIONS "-O3")
 target_link_libraries(mrt2_jam PRIVATE
     magentart::core
     demucscpp
+    "${ONNXRUNTIME_DIR}/lib/libonnxruntime.1.20.1.dylib"
     "-framework Accelerate"
     "-framework AppKit"
     "-framework AudioToolbox"
@@ -77,6 +80,7 @@ target_link_libraries(mrt2_jam PRIVATE
 )
 
 set_target_properties(mrt2_jam PROPERTIES
+    BUILD_RPATH "@executable_path/../Frameworks"
     MACOSX_BUNDLE TRUE
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/JamInfo.plist.in"
     MACOSX_BUNDLE_EXECUTABLE_NAME MRT2_Jam
@@ -107,7 +111,15 @@ add_custom_target(deploy_mrt2_jam
     COMMAND ${CMAKE_COMMAND} -E copy
         "${mlx_BINARY_DIR}/mlx/backend/metal/kernels/mlx.metallib"
         "$<TARGET_BUNDLE_DIR:mrt2_jam>/Contents/MacOS/mlx.metallib"
-    # Sign inside-out: nested mlx.metallib first, then the outer bundle.
+    # Bundle onnxruntime into Frameworks
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+        "$<TARGET_BUNDLE_DIR:mrt2_jam>/Contents/Frameworks"
+    COMMAND ${CMAKE_COMMAND} -E copy
+        "${ONNXRUNTIME_DIR}/lib/libonnxruntime.1.20.1.dylib"
+        "$<TARGET_BUNDLE_DIR:mrt2_jam>/Contents/Frameworks/libonnxruntime.1.20.1.dylib"
+    # Sign inside-out: nested binaries first, then the outer bundle.
+    COMMAND codesign ${CODESIGN_FLAGS}
+        "$<TARGET_BUNDLE_DIR:mrt2_jam>/Contents/Frameworks/libonnxruntime.1.20.1.dylib"
     COMMAND codesign ${CODESIGN_FLAGS}
         "$<TARGET_BUNDLE_DIR:mrt2_jam>/Contents/MacOS/mlx.metallib"
     COMMAND codesign ${CODESIGN_FLAGS}

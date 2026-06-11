@@ -31,6 +31,8 @@ export interface StudioStem {
   name: string;
   wave: number[];
   source: string;   // '' | 'neural' | 'hpss' | 'imported'
+  notes: number;                       // transcription note count (0 = none)
+  ribbon: Array<[number, number, number]>;   // [startSec, endSec, pitch]
 }
 
 export interface StudioState {
@@ -59,12 +61,12 @@ export const STUDIO_INIT: StudioState = {
   loaded: false, name: '', duration: 0, bpm: 0, key: '',
   sections: [], songWave: [],
   stems: [
-    { name: 'drums', wave: [], source: '' },
-    { name: 'bass', wave: [], source: '' },
-    { name: 'other', wave: [], source: '' },
-    { name: 'vocals', wave: [], source: '' },
-    { name: 'guitar', wave: [], source: '' },
-    { name: 'piano', wave: [], source: '' },
+    { name: 'drums', wave: [], source: '', notes: 0, ribbon: [] },
+    { name: 'bass', wave: [], source: '', notes: 0, ribbon: [] },
+    { name: 'other', wave: [], source: '', notes: 0, ribbon: [] },
+    { name: 'vocals', wave: [], source: '', notes: 0, ribbon: [] },
+    { name: 'guitar', wave: [], source: '', notes: 0, ribbon: [] },
+    { name: 'piano', wave: [], source: '', notes: 0, ribbon: [] },
   ],
   stage: '', pct: 0, busy: false, playMode: 'none', playing: false,
   mixer: Array.from({ length: 6 }, () => ({ mute: false, solo: false, gain: 1 })),
@@ -96,6 +98,32 @@ function Wave({ data, color }: { data: number[]; color: string }) {
   );
 }
 
+/** Mini piano-roll: transcribed notes as pitch-positioned blocks. */
+function NoteRibbon({ ribbon, duration }: {
+  ribbon: Array<[number, number, number]>;
+  duration: number;
+}) {
+  if (!ribbon.length || duration <= 0) return null;
+  const lo = Math.min(...ribbon.map(r => r[2]));
+  const hi = Math.max(...ribbon.map(r => r[2]));
+  const span = Math.max(1, hi - lo);
+  return (
+    <svg className="pgm-ribbon" viewBox="0 0 480 26" preserveAspectRatio="none">
+      {ribbon.map(([t0, t1, p], i) => (
+        <rect
+          key={i}
+          x={(t0 / duration) * 480}
+          width={Math.max(0.6, ((t1 - t0) / duration) * 480)}
+          y={24 - ((p - lo) / span) * 22}
+          height={2}
+          fill="#f8d35c"
+          opacity={0.85}
+        />
+      ))}
+    </svg>
+  );
+}
+
 export function StudioPanel({
   studio,
   onLoadSong,
@@ -106,6 +134,7 @@ export function StudioPanel({
   onMix,
   onSeek,
   onImportStem,
+  onTranscribe,
   onPackage,
   onSepDownload,
   onSepPick,
@@ -119,6 +148,7 @@ export function StudioPanel({
   onMix: (idx: number, patch: { mute?: boolean; solo?: boolean; gain?: number }) => void;
   onSeek: (sec: number) => void;
   onImportStem: (idx: number) => void;
+  onTranscribe: (idx: number) => void;
   onPackage: () => void;
   onSepDownload: () => void;
   onSepPick: () => void;
@@ -361,6 +391,19 @@ export function StudioPanel({
                       />
                     </>
                   )}
+                  {stem.wave.length > 0 && (
+                    <button
+                      className="pgm-mini is-midi"
+                      onClick={() => onTranscribe(i)}
+                      disabled={s.busy}
+                      title="音频→MIDI 转录（Basic Pitch / ONNX，CoreML 加速）"
+                    >
+                      ♪ MIDI
+                    </button>
+                  )}
+                  {stem.notes > 0 && (
+                    <span className="pgm-chip is-midi">{stem.notes}♪</span>
+                  )}
                   <button
                     className="pgm-mini"
                     onClick={() => onImportStem(i)}
@@ -375,6 +418,9 @@ export function StudioPanel({
                 <Wave data={stem.wave} color="rgba(111, 179, 255, 0.8)" />
                 {playhead(transportOn && stem.wave.length > 0, i === 0)}
               </div>
+              {stem.ribbon.length > 0 && (
+                <NoteRibbon ribbon={stem.ribbon} duration={s.duration} />
+              )}
             </div>
           ))}
           {s.loaded && !s.busy && !s.stems.some(x => x.wave.length) && (
@@ -385,8 +431,9 @@ export function StudioPanel({
 
           <p className="pgm-hint">
             顶部 ▶/⏸/⟲ 总控播放，各轨 M=静音 S=独奏 + 音量推子，
-            点击/拖动波形跳转进度；⬆ replace 可换第三方分轨 →
-            ◈ Package PGM 导出（program.json + song.wav + stems/*.wav）。
+            点击/拖动波形跳转进度；♪ MIDI 在本机转录该轨（Basic Pitch），
+            ⬆ replace 可换第三方分轨 → ◈ Package PGM 导出
+            （program.json + song.wav + stems/*.wav + midi/*.mid）。
           </p>
         </>
       )}

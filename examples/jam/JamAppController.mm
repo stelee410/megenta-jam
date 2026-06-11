@@ -28,6 +28,7 @@
 #import "LyriaConductor.h"
 #import "JamStudio.h"
 #import "JamSeparate.h"
+#import "JamTranscribe.h"
 #include "magenta_paths.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -109,6 +110,7 @@ static BOOL isDevServerRunning(void) {
     std::vector<float> _recBufL, _recBufR;    // active recording buffer
     jamstudio::Analysis _songAnalysis;
     NSString* _stemSource[6];   // nil | "neural" | "hpss" | "imported"
+    std::vector<JamNote> _stemNotes[6];   // audio→MIDI transcriptions
     NSString* _songName;
     NSURL* _songURL;
     double _songDur;
@@ -631,6 +633,10 @@ static BOOL isDevServerRunning(void) {
     else if ([type isEqualToString:@"studioImportStem"]) {
         NSNumber* idx = body[@"index"];
         if ([idx isKindOfClass:[NSNumber class]]) [self handleStudioImportStem:idx.intValue];
+    }
+    else if ([type isEqualToString:@"studioTranscribe"]) {
+        NSNumber* idx = body[@"index"];
+        if ([idx isKindOfClass:[NSNumber class]]) [self handleStudioTranscribe:idx.intValue];
     }
     else if ([type isEqualToString:@"studioCover"]) {
         NSNumber* idx = body[@"index"];
@@ -1589,7 +1595,12 @@ static NSString* const kJamKeyNames[12] = {@"C", @"C#", @"D", @"D#", @"E", @"F",
 
     // Decode + analysis done — separation is an explicit user action
     // (the ✂ Separate button), so a model downloaded later still applies.
-    for (int i = 0; i < 6; ++i) { _stems[i].clear(); _takeL[i].clear(); _takeR[i].clear(); }
+    for (int i = 0; i < 6; ++i) {
+        _stems[i].clear();
+        _takeL[i].clear();
+        _takeR[i].clear();
+        _stemNotes[i].clear();
+    }
     dispatch_async(dispatch_get_main_queue(), ^{
         self->_studioBusy = NO;
         [self studioProgress:@"ready" pct:1.0f];
@@ -1638,6 +1649,7 @@ static NSString* const kJamKeyNames[12] = {@"C", @"C#", @"D", @"D#", @"E", @"F",
     for (int i = 0; i < 6; ++i) {
         _takeL[i].clear();
         _takeR[i].clear();
+        _stemNotes[i].clear();
         _stemSource[i] = _stems[i].empty() ? nil : (neural ? @"neural" : @"hpss");
     }
 
@@ -1736,6 +1748,7 @@ static NSString* const kJamKeyNames[12] = {@"C", @"C#", @"D", @"D#", @"E", @"F",
                 self->_stems[idx][i * 2 + 1] = (int16_t)r;
             }
             self->_stemSource[idx] = @"imported";
+            self->_stemNotes[idx].clear();
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self studioPushStemWaves];
                 [self studioPublishStems];
@@ -1778,6 +1791,81 @@ static BOOL JamDecode48k(NSURL* url, std::vector<float>& L, std::vector<float>& 
     }
     ExtAudioFileDispose(f);
     return !L.empty();
+}
+
+// ── Audio→MIDI transcription (Basic Pitch on ONNX Runtime) ──────────────────
+
+static NSString* const kBpModelURL =
+    @"https://github.com/spotify/basic-pitch/raw/main/basic_pitch/saved_models/icassp_2022/nmp.onnx";
+
+- (NSString*)bpModelPath {
+    return [[self sepModelDir] stringByAppendingPathComponent:@"nmp.onnx"];
+}
+
+- (void)handleStudioTranscribe:(int)idx {
+    if (idx < 0 || idx > 5 || _studioBusy || _stems[idx].empty()) return;
+    NSString* model = [self bpModelPath];
+    NSDictionary* attrs = [[NSFileManager defaultManager]
+        attributesOfItemAtPath:model error:nil];
+    if (!attrs || [attrs fileSize] < 50 * 1024) {
+        // Tiny model (~225 KB) — fetch inline, then transcribe.
+        _studioBusy = YES;
+        [self studioProgress:@"fetching basic-pitch model" pct:0.1f];
+        NSURLSessionDataTask* task = [[NSURLSession sharedSession]
+            dataTaskWithURL:[NSURL URLWithString:kBpModelURL]
+          completionHandler:^(NSData* data, NSURLResponse* resp, NSError* err) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (err || data.length < 50 * 1024) {
+                    [self studioFail:@"could not download the transcription model"];
+                    return;
+                }
+                [data writeToFile:model atomically:YES];
+                self->_studioBusy = NO;
+                [self handleStudioTranscribe:idx];
+            });
+        }];
+        [task resume];
+        return;
+    }
+    _studioBusy = YES;
+    [self studioProgress:@"transcribing" pct:0.02f];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSString* err = nil;
+        std::vector<JamNote> notes;
+        const BOOL ok = JamTranscribe(model,
+                                      self->_stems[idx].data(),
+                                      (long)self->_stems[idx].size() / 2,
+                                      notes,
+                                      ^(float p) { [self studioProgress:@"transcribing"
+                                                                    pct:0.02f + p * 0.95f]; },
+                                      &err);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!ok) {
+                [self studioFail:err ?: @"transcription failed"];
+                return;
+            }
+            self->_stemNotes[idx] = std::move(notes);
+            [self studioPushNotes:idx];
+            self->_studioBusy = NO;
+            [self studioProgress:@"ready" pct:1.0f];
+        });
+    });
+}
+
+// Compact piano-roll ribbon for the UI: [startSec, endSec, pitch] triples.
+- (void)studioPushNotes:(int)idx {
+    const auto& notes = _stemNotes[idx];
+    NSMutableArray* ribbon = [NSMutableArray array];
+    const size_t step = MAX((size_t)1, notes.size() / 1000);
+    for (size_t i = 0; i < notes.size(); i += step) {
+        const auto& n = notes[i];
+        [ribbon addObject:@[@(n.start), @(n.start + n.duration), @(n.pitch)]];
+    }
+    [self sendStateUpdate:@{@"studioNotes": @{
+        @"index": @(idx),
+        @"count": @((int)notes.size()),
+        @"ribbon": ribbon,
+    }}];
 }
 
 // 16-bit stereo 48 kHz WAV writer (AudioToolbox).
@@ -2335,12 +2423,17 @@ static NSString* const kSepModelURL =
     NSMutableArray* stems = [NSMutableArray array];
     for (int i = 0; i < 6; ++i) {
         if (_stems[i].empty()) continue;
-        [stems addObject:@{
+        NSMutableDictionary* st = [@{
             @"name": stemNames[i],
             @"prompt": [NSString stringWithFormat:@"%@, %d bpm", tmpl[i], bpm],
             @"file": [NSString stringWithFormat:@"stems/%@.wav", stemNames[i]],
             @"source": _stemSource[i] ?: @"",
-        }];
+        } mutableCopy];
+        if (!_stemNotes[i].empty()) {
+            st[@"midi"] = [NSString stringWithFormat:@"midi/%@.mid", stemNames[i]];
+            st[@"notes"] = @((int)_stemNotes[i].size());
+        }
+        [stems addObject:st];
     }
     NSDictionary* pgm = @{
         @"app": @"megenta-jam",
@@ -2395,6 +2488,23 @@ static NSString* const kSepModelURL =
                 ok &= JamWriteWav(wav, self->_stems[i].data(),
                                   (long)self->_stems[i].size() / 2);
                 written++;
+            }
+            // MIDI transcriptions.
+            {
+                BOOL anyMidi = NO;
+                for (int i = 0; i < 6; ++i) anyMidi |= !self->_stemNotes[i].empty();
+                if (anyMidi) {
+                    NSURL* midiDir = [root URLByAppendingPathComponent:@"midi"];
+                    [fm createDirectoryAtURL:midiDir withIntermediateDirectories:YES
+                                  attributes:nil error:nil];
+                    for (int i = 0; i < 6; ++i) {
+                        if (self->_stemNotes[i].empty()) continue;
+                        JamWriteMidi([midiDir URLByAppendingPathComponent:
+                                      [names[i] stringByAppendingString:@".mid"]],
+                                     self->_stemNotes[i],
+                                     self->_songAnalysis.bpm);
+                    }
+                }
             }
             // Original song (enables full PGM re-import).
             if (!self->_songL.empty()) {

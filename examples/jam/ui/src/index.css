@@ -3478,3 +3478,15 @@ html[data-theme="famicom"] .pgm .pgm-mini, html[data-theme="famicom"] .pgm .pgm-
   accent-color: #75ebc7;
   cursor: pointer;
 }
+
+.pgm-mini.is-midi { border-color: rgba(248, 211, 92, 0.55); color: #f8d35c; }
+.pgm-mini.is-midi:hover:not(:disabled) { background: rgba(248, 211, 92, 0.12); }
+.pgm-chip.is-midi { color: #f8d35c; border-color: rgba(248, 211, 92, 0.45); }
+.pgm-ribbon {
+  display: block;
+  width: 100%;
+  height: 26px;
+  margin-top: 3px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.3);
+}

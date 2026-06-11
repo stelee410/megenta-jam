@@ -129,6 +129,19 @@ if(NOT eigen_POPULATED)
   FetchContent_Populate(eigen)
 endif()
 
+# ONNX Runtime (prebuilt, arm64) — neural inference for the PGM studio
+# (Basic Pitch audio→MIDI; future chord/separation models). CoreML EP included.
+FetchContent_Declare(
+  onnxruntime
+  URL https://github.com/microsoft/onnxruntime/releases/download/v1.20.1/onnxruntime-osx-arm64-1.20.1.tgz
+  DOWNLOAD_EXTRACT_TIMESTAMP ON
+)
+FetchContent_GetProperties(onnxruntime)
+if(NOT onnxruntime_POPULATED)
+  FetchContent_Populate(onnxruntime)
+endif()
+set(ONNXRUNTIME_DIR "${onnxruntime_SOURCE_DIR}" CACHE PATH "onnxruntime prebuilt root")
+
 
 
 # --- Host-shared settings -----------------------------------------------------
