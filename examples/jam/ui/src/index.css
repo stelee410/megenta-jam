@@ -1205,6 +1205,23 @@ input[type="range"]::-webkit-slider-thumb {
    rules with centered uppercase titles, decorative band + wordmark.
    ════════════════════════════════════════════════════════════════════ */
 .freak {
+  /* ── Theme tokens (overridden per html[data-theme]) ── */
+  --fk-bg0: #232427; --fk-bg1: #1a1b1e; --fk-bg2: #161719;
+  --fk-ink: #e8e8ea;                       /* text / lines (mixed to alphas) */
+  --fk-accent: #6fb3ff;                    /* shift-blue functions, tempo */
+  --fk-pot0: #3a3b3f; --fk-pot1: #232427; --fk-pot2: #101113;
+  --fk-pot-ptr: #f2f2f4;
+  --fk-osc0: #ff8a5c; --fk-osc1: #f55d2c; --fk-osc2: #b93a14;
+  --fk-osc-ptr: #2a1006;                   /* signature oscillator knobs */
+  --fk-enc0: #ffffff; --fk-enc1: #dfe0e2; --fk-enc2: #aaabb0;
+  --fk-enc-ptr: #232427;                   /* white encoders */
+  --fk-led: #ffffff;
+  --fk-oled: #e6f2ff;                      /* screen phosphor tint */
+  --fk-pos-rgb: 255, 244, 214;             /* matrix + / − LED colors */
+  --fk-neg-rgb: 120, 185, 255;
+  --fk-band0: #111214; --fk-band1: #0c0d0f;
+  --fk-band-ink: #ffffff;
+
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
@@ -1216,11 +1233,11 @@ input[type="range"]::-webkit-slider-thumb {
   box-sizing: border-box;
   border-radius: 12px;
   background:
-    radial-gradient(120% 90% at 50% 0%, rgba(255, 255, 255, 0.045), transparent 52%),
-    linear-gradient(180deg, #232427, #1a1b1e 60%, #161719);
-  border: 1px solid rgba(255, 255, 255, 0.10);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 18px 42px rgba(0, 0, 0, 0.5);
-  color: #e8e8ea;
+    radial-gradient(120% 90% at 50% 0%, color-mix(in srgb, var(--fk-ink) 5%, transparent), transparent 52%),
+    linear-gradient(180deg, var(--fk-bg0), var(--fk-bg1) 60%, var(--fk-bg2));
+  border: 1px solid color-mix(in srgb, var(--fk-ink) 12%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--fk-ink) 7%, transparent), 0 18px 42px rgba(0, 0, 0, 0.5);
+  color: var(--fk-ink);
   font-family: "Google Sans", system-ui, sans-serif;
 }
 
@@ -1252,14 +1269,14 @@ input[type="range"]::-webkit-slider-thumb {
   content: "";
   flex: 1 1 auto;
   height: 1px;
-  background: rgba(255, 255, 255, 0.22);
+  background: color-mix(in srgb, var(--fk-ink) 24%, transparent);
 }
 .freak-rule span {
   flex: 0 0 auto;
   font-size: 9.5px;
   font-weight: 700;
   letter-spacing: 2.2px;
-  color: rgba(255, 255, 255, 0.82);
+  color: color-mix(in srgb, var(--fk-ink) 84%, transparent);
   white-space: nowrap;
 }
 
@@ -1296,7 +1313,7 @@ input[type="range"]::-webkit-slider-thumb {
   border-radius: 50%;
   background:
     repeating-conic-gradient(from -135deg,
-      rgba(255, 255, 255, 0.35) 0deg 1.6deg,
+      color-mix(in srgb, var(--fk-ink) 38%, transparent) 0deg 1.6deg,
       transparent 1.6deg 24.4deg);
   -webkit-mask: radial-gradient(circle, transparent 58%, #000 60%, #000 100%);
   mask: radial-gradient(circle, transparent 58%, #000 60%, #000 100%);
@@ -1313,7 +1330,7 @@ input[type="range"]::-webkit-slider-thumb {
   border-radius: 50%;
   position: relative;
   background:
-    radial-gradient(circle at 32% 28%, #3a3b3f, #232427 58%, #101113);
+    radial-gradient(circle at 32% 28%, var(--fk-pot0), var(--fk-pot1) 58%, var(--fk-pot2));
   border: 1px solid rgba(0, 0, 0, 0.85);
   box-shadow:
     inset 0 1px 1px rgba(255, 255, 255, 0.16),
@@ -1330,48 +1347,48 @@ input[type="range"]::-webkit-slider-thumb {
   height: 36%;
   margin-left: -1.5px;
   border-radius: 2px;
-  background: #f2f2f4;
-  box-shadow: 0 0 4px rgba(255, 255, 255, 0.35);
+  background: var(--fk-pot-ptr);
+  box-shadow: 0 0 4px color-mix(in srgb, var(--fk-pot-ptr) 38%, transparent);
 }
 
 /* Orange oscillator knobs (the hardware signature) */
 .freak-knob.is-orange .freak-knob-body {
   background:
-    radial-gradient(circle at 32% 28%, #ff8a5c, #f55d2c 55%, #b93a14);
-  border-color: rgba(120, 35, 8, 0.9);
+    radial-gradient(circle at 32% 28%, var(--fk-osc0), var(--fk-osc1) 55%, var(--fk-osc2));
+  border-color: color-mix(in srgb, var(--fk-osc2) 75%, black);
   box-shadow:
     inset 0 1px 1px rgba(255, 255, 255, 0.35),
-    0 5px 12px rgba(245, 93, 44, 0.28),
+    0 5px 12px color-mix(in srgb, var(--fk-osc1) 30%, transparent),
     0 5px 10px rgba(0, 0, 0, 0.45);
 }
-.freak-knob.is-orange .freak-knob-pointer { background: #2a1006; box-shadow: none; }
+.freak-knob.is-orange .freak-knob-pointer { background: var(--fk-osc-ptr); box-shadow: none; }
 
 /* White encoder knobs (Rate / Preset) */
 .freak-knob.is-white .freak-knob-body {
   background:
-    radial-gradient(circle at 32% 28%, #ffffff, #dfe0e2 55%, #aaabb0);
+    radial-gradient(circle at 32% 28%, var(--fk-enc0), var(--fk-enc1) 55%, var(--fk-enc2));
   border-color: rgba(0, 0, 0, 0.55);
   box-shadow:
-    inset 0 1px 1px rgba(255, 255, 255, 0.9),
+    inset 0 1px 1px color-mix(in srgb, var(--fk-enc0) 90%, transparent),
     0 5px 10px rgba(0, 0, 0, 0.5);
 }
-.freak-knob.is-white .freak-knob-pointer { background: #232427; box-shadow: none; }
+.freak-knob.is-white .freak-knob-pointer { background: var(--fk-enc-ptr); box-shadow: none; }
 
 .freak-knob-label {
   font-size: 9px;
   font-weight: 600;
   letter-spacing: 0.6px;
-  color: rgba(255, 255, 255, 0.8);
+  color: color-mix(in srgb, var(--fk-ink) 82%, transparent);
   text-align: center;
   white-space: nowrap;
 }
-.freak-knob-label.is-accent { color: #6fb3ff; }   /* blue shift-labels like the hardware */
+.freak-knob-label.is-accent { color: var(--fk-accent); }   /* blue shift-labels like the hardware */
 .freak-knob-value {
   font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
   font-size: 8.5px;
-  color: rgba(255, 255, 255, 0.42);
+  color: color-mix(in srgb, var(--fk-ink) 45%, transparent);
 }
-.freak-knob:focus-visible .freak-knob-body { box-shadow: 0 0 0 2px rgba(111, 179, 255, 0.6); }
+.freak-knob:focus-visible .freak-knob-body { box-shadow: 0 0 0 2px color-mix(in srgb, var(--fk-accent) 60%, transparent); }
 
 /* ── LED selectors ── */
 .freak-leds {
@@ -1389,7 +1406,7 @@ input[type="range"]::-webkit-slider-thumb {
   padding: 2px 4px;
   border: none;
   background: transparent;
-  color: rgba(255, 255, 255, 0.55);
+  color: color-mix(in srgb, var(--fk-ink) 58%, transparent);
   font-family: "Google Sans", system-ui, sans-serif;
   font-size: 9px;
   letter-spacing: 0.5px;
@@ -1401,15 +1418,15 @@ input[type="range"]::-webkit-slider-thumb {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.10);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2);
+  background: color-mix(in srgb, var(--fk-ink) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fk-ink) 25%, transparent);
   flex: 0 0 auto;
 }
 
-.freak-led.is-on { color: #fff; }
+.freak-led.is-on { color: var(--fk-ink); }
 .freak-led.is-on .freak-led-dot {
-  background: #fff;
-  box-shadow: 0 0 7px 2px rgba(255, 255, 255, 0.55);
+  background: var(--fk-led);
+  box-shadow: 0 0 7px 2px color-mix(in srgb, var(--fk-led) 60%, transparent);
 }
 
 /* ── Top row ── */
@@ -1438,7 +1455,7 @@ input[type="range"]::-webkit-slider-thumb {
 .freak-grain {
   font-size: 10px;
   font-style: italic;
-  color: rgba(255, 255, 255, 0.4);
+  color: color-mix(in srgb, var(--fk-ink) 45%, transparent);
   letter-spacing: 0.5px;
 }
 
@@ -1447,9 +1464,9 @@ input[type="range"]::-webkit-slider-thumb {
   height: 30px;
   padding: 0 14px;
   border-radius: 15px;
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(0, 0, 0, 0.25));
-  color: rgba(255, 255, 255, 0.66);
+  border: 1px solid color-mix(in srgb, var(--fk-ink) 25%, transparent);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--fk-ink) 8%, transparent), rgba(0, 0, 0, 0.25));
+  color: color-mix(in srgb, var(--fk-ink) 70%, transparent);
   font-family: "Google Sans", system-ui, sans-serif;
   font-size: 10px;
   font-weight: 600;
@@ -1459,9 +1476,10 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .freak-soft:disabled { opacity: 0.35; cursor: default; }
 .freak-soft.is-lit {
-  border-color: rgba(140, 200, 255, 0.85);
-  color: #cfe7ff;
-  box-shadow: 0 0 9px rgba(120, 185, 255, 0.5), inset 0 0 5px rgba(120, 185, 255, 0.25);
+  border-color: var(--fk-accent);
+  color: color-mix(in srgb, var(--fk-accent) 55%, var(--fk-ink));
+  box-shadow: 0 0 9px color-mix(in srgb, var(--fk-accent) 50%, transparent),
+              inset 0 0 5px color-mix(in srgb, var(--fk-accent) 25%, transparent);
 }
 .freak-soft.is-danger { color: #ff8095; border-color: rgba(255, 95, 120, 0.5); }
 
@@ -1474,7 +1492,7 @@ input[type="range"]::-webkit-slider-thumb {
   padding: 7px 9px 8px;
   border-radius: 5px;
   background: #04060a;
-  border: 1px solid rgba(255, 255, 255, 0.18);
+  border: 1px solid color-mix(in srgb, var(--fk-ink) 20%, transparent);
   box-shadow: inset 0 0 14px rgba(0, 0, 0, 0.9), 0 0 0 3px #101113;
   display: flex;
   flex-direction: column;
@@ -1484,7 +1502,7 @@ input[type="range"]::-webkit-slider-thumb {
 .freak-oled-title {
   align-self: flex-start;
   padding: 1px 7px;
-  background: #e6f2ff;
+  background: var(--fk-oled);
   color: #04060a;
   font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
   font-size: 8.5px;
@@ -1495,19 +1513,19 @@ input[type="range"]::-webkit-slider-thumb {
   border: none;
   outline: none;
   background: transparent;
-  color: #e6f2ff;
+  color: var(--fk-oled);
   font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
   font-size: 15px;
   font-weight: 700;
   letter-spacing: 0.5px;
-  text-shadow: 0 0 8px rgba(160, 215, 255, 0.55);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--fk-oled) 55%, transparent);
   width: 100%;
 }
 
 .freak-oled-engine {
   font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
   font-size: 8.5px;
-  color: rgba(190, 225, 255, 0.55);
+  color: color-mix(in srgb, var(--fk-oled) 58%, transparent);
 }
 
 /* ── Matrix (LED grid, hardware top-left) ── */
@@ -1527,7 +1545,7 @@ input[type="range"]::-webkit-slider-thumb {
   font-size: 7.5px;
   letter-spacing: 0.4px;
   text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.5);
+  color: color-mix(in srgb, var(--fk-ink) 52%, transparent);
   transform: rotate(-38deg);
   transform-origin: 30% 100%;
   white-space: nowrap;
@@ -1537,7 +1555,7 @@ input[type="range"]::-webkit-slider-thumb {
   font-size: 7.5px;
   letter-spacing: 0.4px;
   text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.5);
+  color: color-mix(in srgb, var(--fk-ink) 52%, transparent);
   text-align: right;
   padding-right: 2px;
 }
@@ -1546,8 +1564,8 @@ input[type="range"]::-webkit-slider-thumb {
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid color-mix(in srgb, var(--fk-ink) 22%, transparent);
+  background: color-mix(in srgb, var(--fk-ink) 6%, transparent);
   cursor: ns-resize;
   user-select: none;
   -webkit-user-select: none;
@@ -1556,15 +1574,15 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 .freak-matrix-cell.is-pos {
-  background: rgba(255, 244, 214, calc(0.18 + var(--mag) * 0.8));
-  border-color: rgba(255, 244, 214, 0.8);
-  box-shadow: 0 0 calc(var(--mag) * 10px) rgba(255, 240, 200, 0.7);
+  background: rgba(var(--fk-pos-rgb), calc(0.18 + var(--mag) * 0.8));
+  border-color: rgba(var(--fk-pos-rgb), 0.8);
+  box-shadow: 0 0 calc(var(--mag) * 10px) rgba(var(--fk-pos-rgb), 0.7);
 }
 
 .freak-matrix-cell.is-neg {
-  background: rgba(120, 185, 255, calc(0.18 + var(--mag) * 0.8));
-  border-color: rgba(120, 185, 255, 0.8);
-  box-shadow: 0 0 calc(var(--mag) * 10px) rgba(120, 185, 255, 0.7);
+  background: rgba(var(--fk-neg-rgb), calc(0.18 + var(--mag) * 0.8));
+  border-color: rgba(var(--fk-neg-rgb), 0.8);
+  box-shadow: 0 0 calc(var(--mag) * 10px) rgba(var(--fk-neg-rgb), 0.7);
 }
 
 /* ── Octave ── */
@@ -1586,19 +1604,19 @@ input[type="range"]::-webkit-slider-thumb {
   border-radius: 50%;
   border: 1px solid rgba(0, 0, 0, 0.85);
   background:
-    radial-gradient(circle at 34% 26%, #45464b, #26272b 56%, #121316);
+    radial-gradient(circle at 34% 26%, color-mix(in srgb, var(--fk-pot0) 86%, white), var(--fk-pot1) 56%, var(--fk-pot2));
   box-shadow:
-    inset 0 1.5px 1px rgba(255, 255, 255, 0.2),
+    inset 0 1.5px 1px color-mix(in srgb, var(--fk-ink) 22%, transparent),
     inset 0 -2px 3px rgba(0, 0, 0, 0.6),
     0 5px 10px rgba(0, 0, 0, 0.55),
     0 0 0 3px rgba(255, 255, 255, 0.04);
-  color: rgba(255, 255, 255, 0.85);
+  color: color-mix(in srgb, var(--fk-ink) 86%, transparent);
   font-size: 14px;
   line-height: 1;
   cursor: pointer;
   transition: transform 0.05s ease, box-shadow 0.12s ease;
 }
-.freak-round:hover { color: #fff; box-shadow:
+.freak-round:hover { color: var(--fk-ink); box-shadow:
   inset 0 1.5px 1px rgba(255, 255, 255, 0.25),
   inset 0 -2px 3px rgba(0, 0, 0, 0.6),
   0 5px 12px rgba(0, 0, 0, 0.6),
@@ -1610,17 +1628,17 @@ input[type="range"]::-webkit-slider-thumb {
   font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
   font-size: 12px;
   font-weight: 700;
-  color: #6fb3ff;
+  color: var(--fk-accent);
 }
 
-/* Shift button: blue halo when engaged (hardware-style) */
+/* Shift button: accent halo when engaged (hardware-style) */
 .freak-shift.is-lit {
-  border-color: rgba(120, 185, 255, 0.95);
-  color: #cfe7ff;
+  border-color: var(--fk-accent);
+  color: color-mix(in srgb, var(--fk-accent) 55%, var(--fk-ink));
   box-shadow:
-    0 0 10px rgba(120, 185, 255, 0.65),
-    inset 0 0 6px rgba(120, 185, 255, 0.35),
-    inset 0 1px 1px rgba(255, 255, 255, 0.16);
+    0 0 10px color-mix(in srgb, var(--fk-accent) 65%, transparent),
+    inset 0 0 6px color-mix(in srgb, var(--fk-accent) 35%, transparent),
+    inset 0 1px 1px color-mix(in srgb, var(--fk-ink) 18%, transparent);
 }
 
 /* ── Tempo cluster (global BPM readout + detect) ── */
@@ -1636,14 +1654,14 @@ input[type="range"]::-webkit-slider-thumb {
   font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
   font-size: 20px;
   font-weight: 700;
-  color: #6fb3ff;
-  text-shadow: 0 0 10px rgba(111, 179, 255, 0.45);
+  color: var(--fk-accent);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--fk-accent) 45%, transparent);
   line-height: 1;
 }
 .freak-tempo-read small {
   font-size: 9px;
   margin-left: 3px;
-  color: rgba(111, 179, 255, 0.6);
+  color: color-mix(in srgb, var(--fk-accent) 65%, transparent);
 }
 
 .freak-tempo-status {
@@ -1674,8 +1692,8 @@ input[type="range"]::-webkit-slider-thumb {
   flex: 0 0 auto;
   padding: 3px 8px;
   border-radius: 4px;
-  background: #f55d2c;
-  color: #1a0c05;
+  background: var(--fk-osc1);
+  color: var(--fk-osc-ptr);
   font-size: 9px;
   font-weight: 800;
   letter-spacing: 1.5px;
@@ -1684,15 +1702,15 @@ input[type="range"]::-webkit-slider-thumb {
   flex: 1 1 auto;
   min-width: 0;
   padding: 8px 11px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
+  border: 1px solid color-mix(in srgb, var(--fk-ink) 18%, transparent);
   border-radius: 6px;
   background: rgba(0, 0, 0, 0.4);
-  color: #e8e8ea;
+  color: var(--fk-ink);
   font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
   font-size: 11.5px;
   outline: none;
 }
-.freak-ai-input:focus { border-color: rgba(245, 93, 44, 0.65); }
+.freak-ai-input:focus { border-color: color-mix(in srgb, var(--fk-osc1) 65%, transparent); }
 .freak-ai-error { font-size: 10px; color: #ff8095; }
 
 /* ── Decorative band + wordmark (the Arturia strip) ── */
@@ -1703,24 +1721,24 @@ input[type="range"]::-webkit-slider-thumb {
   align-items: baseline;
   justify-content: flex-end;
   gap: 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.14);
+  border-top: 1px solid color-mix(in srgb, var(--fk-ink) 16%, transparent);
   background:
     repeating-linear-gradient(135deg,
-      rgba(255, 255, 255, 0.05) 0 2px, transparent 2px 6px),
-    linear-gradient(180deg, #111214, #0c0d0f);
+      color-mix(in srgb, var(--fk-band-ink) 6%, transparent) 0 2px, transparent 2px 6px),
+    linear-gradient(180deg, var(--fk-band0), var(--fk-band1));
   border-radius: 0 0 12px 12px;
 }
 .freak-wordmark {
   font-size: 12px;
   font-weight: 800;
   letter-spacing: 3.5px;
-  color: rgba(255, 255, 255, 0.85);
+  color: color-mix(in srgb, var(--fk-band-ink) 88%, transparent);
 }
 .freak-wordsub {
   font-size: 8.5px;
   font-style: italic;
   letter-spacing: 1px;
-  color: rgba(255, 255, 255, 0.38);
+  color: color-mix(in srgb, var(--fk-band-ink) 42%, transparent);
 }
 
 /* ── Punch-in FX pads (EP-133 style) ── */
@@ -3068,4 +3086,95 @@ html[data-theme="nana"] .jam-lyria-status.is-error { color: #ff5d5d; }
   color: rgba(255, 255, 255, 0.5);
   pointer-events: none;
   white-space: nowrap;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   INSTRUMENT panel — per-theme token overrides
+   ════════════════════════════════════════════════════════════════════ */
+
+/* Light: aluminum panel, dark pots, classic orange oscillators */
+html[data-theme="light"] .freak {
+  --fk-bg0: #f2f3f6; --fk-bg1: #e9eaee; --fk-bg2: #dddfe5;
+  --fk-ink: #1b1c20;
+  --fk-accent: #2462d6;
+  --fk-led: #2462d6;
+  --fk-pos-rgb: 245, 93, 44;
+  --fk-neg-rgb: 36, 98, 214;
+  --fk-band0: #d6d8dd; --fk-band1: #c8cad0;
+  --fk-band-ink: #1b1c20;
+}
+
+/* Famicom: cream console shell, signature red knobs */
+html[data-theme="famicom"] .freak {
+  --fk-bg0: #f0e7d4; --fk-bg1: #e9e1cf; --fk-bg2: #dcd2bb;
+  --fk-ink: #2a2118;
+  --fk-accent: #b81414;
+  --fk-osc0: #e85a5a; --fk-osc1: #b81414; --fk-osc2: #7a0d0d;
+  --fk-osc-ptr: #f7ecd8;
+  --fk-enc0: #fffdf5; --fk-enc1: #efe6d2; --fk-enc2: #c9bfa6;
+  --fk-enc-ptr: #7a0d0d;
+  --fk-pot0: #5a5048; --fk-pot1: #3b332b; --fk-pot2: #241e17;
+  --fk-led: #b81414;
+  --fk-oled: #ffd9c9;
+  --fk-pos-rgb: 184, 20, 20;
+  --fk-neg-rgb: 143, 100, 0;
+  --fk-band0: #b81414; --fk-band1: #8f1010;
+  --fk-band-ink: #fff6e8;
+}
+
+/* Yamaha: stage-black panel, amber everything */
+html[data-theme="yamaha"] .freak {
+  --fk-bg0: #1e1f24; --fk-bg1: #17181c; --fk-bg2: #101114;
+  --fk-ink: #f0ede4;
+  --fk-accent: #ffb000;
+  --fk-osc0: #ffd25e; --fk-osc1: #ffb000; --fk-osc2: #8f6400;
+  --fk-osc-ptr: #1a1206;
+  --fk-led: #ffb000;
+  --fk-oled: #ffd76e;
+  --fk-pos-rgb: 255, 176, 0;
+  --fk-neg-rgb: 111, 179, 255;
+}
+
+/* Casio: silver chassis, blue accents */
+html[data-theme="casio"] .freak {
+  --fk-bg0: #d8dbe0; --fk-bg1: #cfd2d8; --fk-bg2: #c0c3ca;
+  --fk-ink: #1f2125;
+  --fk-accent: #2462d6;
+  --fk-osc0: #5b8bea; --fk-osc1: #2462d6; --fk-osc2: #163e8a;
+  --fk-osc-ptr: #eef3ff;
+  --fk-led: #2462d6;
+  --fk-pos-rgb: 36, 98, 214;
+  --fk-neg-rgb: 214, 36, 67;
+  --fk-band0: #3a3c40; --fk-band1: #2e3034;
+  --fk-band-ink: #f0f1f4;
+}
+
+/* Cyberpunk: violet panel, magenta knobs, cyan glow */
+html[data-theme="cyberpunk"] .freak {
+  --fk-bg0: #1e0c36; --fk-bg1: #120726; --fk-bg2: #0b0418;
+  --fk-ink: #e8f6ff;
+  --fk-accent: #19e3ff;
+  --fk-osc0: #ff6ae4; --fk-osc1: #ff2bd6; --fk-osc2: #8a0f73;
+  --fk-osc-ptr: #14001c;
+  --fk-pot0: #3c2a55; --fk-pot1: #241638; --fk-pot2: #130a20;
+  --fk-led: #19e3ff;
+  --fk-oled: #9ff3ff;
+  --fk-pos-rgb: 255, 43, 214;
+  --fk-neg-rgb: 25, 227, 255;
+  --fk-band0: #0b0418; --fk-band1: #060011;
+}
+
+/* Nana: deep maroon, rose knobs */
+html[data-theme="nana"] .freak {
+  --fk-bg0: #251016; --fk-bg1: #1a0b10; --fk-bg2: #120709;
+  --fk-ink: #f4eef0;
+  --fk-accent: #ff7d9e;
+  --fk-osc0: #ff5f7e; --fk-osc1: #d6244a; --fk-osc2: #7e1029;
+  --fk-osc-ptr: #fff0f3;
+  --fk-pot0: #4a3038; --fk-pot1: #2e1c22; --fk-pot2: #190e12;
+  --fk-led: #ff7d9e;
+  --fk-oled: #ffd9e2;
+  --fk-pos-rgb: 214, 36, 74;
+  --fk-neg-rgb: 122, 180, 255;
+  --fk-band0: #2a1218; --fk-band1: #190b0f;
 }
