@@ -116,6 +116,8 @@ struct JamSynth {
     float heldVel[kHeldMax] = {};
     int heldCount = 0;
     int physCount = 0;
+    bool physNote[128] = {};      // which notes are physically held right now
+    bool holdWasOn = false;       // arp-hold edge detect (latch release)
 
     // Arp state
     float arpPhase = 1.0f;
@@ -189,6 +191,7 @@ struct JamSynth {
         }
         heldCount = 0;
         physCount = 0;
+        for (int i = 0; i < 128; ++i) physNote[i] = false;
         arpPlaying = -1;
         arpIdx = -1;
         fstage = 4;
@@ -270,12 +273,12 @@ struct JamSynth {
         const bool hold = arpHold.load(std::memory_order_relaxed);
         const float vel01 = ev.vel / 127.0f;
         if (ev.on) {
-            if (hold && physCount == 0) heldCount = 0;
-            physCount++;
+            if (hold && physCount == 0) heldCount = 0;   // re-latch a fresh chord
+            if (ev.note < 128 && !physNote[ev.note]) { physNote[ev.note] = true; physCount++; }
             heldAdd(ev.note, vel01);
             if (!arpOn) voiceOn(ev.note, vel01, mono);
         } else {
-            if (physCount > 0) physCount--;
+            if (ev.note < 128 && physNote[ev.note]) { physNote[ev.note] = false; if (physCount > 0) physCount--; }
             if (!hold) heldRemove(ev.note);
             if (!arpOn) {
                 voiceOff(ev.note);
@@ -381,6 +384,26 @@ struct JamSynth {
         if (arpOn && !arpWasOn) { arpPhase = 1.0f; arpIdx = -1; arpDirDown = 0; }
         if (!arpOn && arpWasOn && arpPlaying >= 0) { voiceOff(arpPlaying); arpPlaying = -1; }
         arpWasOn = arpOn;
+
+        // Hold released: drop latched notes whose keys are no longer physically
+        // down (otherwise the arp / latch keeps sounding forever).
+        const bool holdOn = arpHold.load(std::memory_order_relaxed);
+        if (!holdOn && holdWasOn) {
+            int w = 0;
+            for (int i = 0; i < heldCount; ++i) {
+                if (held[i] >= 0 && held[i] < 128 && physNote[held[i]]) {
+                    held[w] = held[i]; heldVel[w] = heldVel[i]; w++;
+                }
+            }
+            heldCount = w;
+            if (!arpOn) {
+                // Paraphonic: silence any voice whose key isn't held anymore.
+                for (auto& v : voices)
+                    if (v.note >= 0 && (v.note >= 128 || !physNote[v.note])) voiceOff(v.note);
+            }
+        }
+        holdWasOn = holdOn;
+
         if (arpOn && heldCount == 0 && arpPlaying >= 0) { voiceOff(arpPlaying); arpPlaying = -1; }
 
         // Keep running through chorus/reverb tails, then sleep.
