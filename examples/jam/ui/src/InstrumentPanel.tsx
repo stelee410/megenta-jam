@@ -281,6 +281,8 @@ export function InstrumentPanel({
   aiBusy,
   aiError,
   onAiPatch,
+  followJam,
+  onFollowJam,
 }: {
   synth: SynthParams;
   matrix: number[];
@@ -303,6 +305,8 @@ export function InstrumentPanel({
   aiBusy: boolean;
   aiError: string | null;
   onAiPatch: (desc: string) => void;
+  followJam: boolean;
+  onFollowJam: (on: boolean) => void;
 }) {
   const [desc, setDesc] = useState('');
   // Hardware Shift: flips the Rise/Fall knobs to their Shape functions.
@@ -331,6 +335,16 @@ export function InstrumentPanel({
             title="Paraphonic (6 voices) / mono (last-note priority)"
           >
             Paraphonic
+          </button>
+
+          <button
+            className={`freak-soft ${followJam ? 'is-lit' : ''}`}
+            onClick={() => onFollowJam(!followJam)}
+            title={followJam
+              ? '跟随 Jam：开 — 你弹的音符同时驱动生成引擎，AI 跟着你的和声即兴。点击切到独奏。'
+              : '跟随 Jam：关 — 乐器独奏，不影响 jam。点击切到跟随。'}
+          >
+            跟随Jam · {followJam ? '开' : '关'}
           </button>
 
           <div className="freak-oled">

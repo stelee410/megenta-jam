@@ -493,6 +493,10 @@ function App() {
 
   // ─── Main tabs: JAM (mix) · INSTRUMENT (synth) · PGM (show studio) ────────
   const [mainTab, setMainTab] = useState<'jam' | 'instrument' | 'pgm'>('jam');
+  const [instrumentFollowJam, setInstrumentFollowJam] = useState(false);
+  // Tell native which tab is active so live MIDI only conditions the
+  // generative engine on the jam tab (never starts an AI jam from pgm).
+  useEffect(() => { post({ type: 'activeTab', tab: mainTab }); }, [mainTab]);
   const mainTabRef = useRef(mainTab);
   mainTabRef.current = mainTab;
   // Gate native note routing: instrument tab → notes play the synth.
@@ -2918,6 +2922,11 @@ function App() {
             aiBusy={aiPatchBusy}
             aiError={aiPatchError}
             onAiPatch={requestAiPatch}
+            followJam={instrumentFollowJam}
+            onFollowJam={(on) => {
+              setInstrumentFollowJam(on);
+              post({ type: 'instrumentFollowJam', value: on });
+            }}
           />
         )}
 

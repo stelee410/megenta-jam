@@ -1008,19 +1008,30 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                         uint8_t statusNibble = statusByte & 0xF0;
                         uint8_t note = (word >> 8) & 0x7F;
                         uint8_t velocity = word & 0x7F;
+                        // Routing:
+                        //   synth   when the synth is active, or off the jam tab
+                        //   engine  on the jam tab with synth inactive (pure
+                        //           jam), OR when the instrument follows the jam
+                        // (both can fire: instrument + follow plays the synth
+                        //  AND conditions the engine).
+                        const bool synthActive =
+                            shared->synth.active.load(std::memory_order_relaxed);
+                        const bool jamActive =
+                            shared->jamTabActive.load(std::memory_order_relaxed);
+                        const bool follow =
+                            shared->instrumentFollowsJam.load(std::memory_order_relaxed);
+                        const bool toSynth = synthActive || !jamActive;
+                        const bool toEngine =
+                            (jamActive && !synthActive) || (synthActive && follow);
                         if (statusNibble == 0x90 && velocity > 0) {
-                            if (shared->synth.active.load(std::memory_order_relaxed)) {
-                                shared->synth.pushNote(note, velocity, true);
-                            } else {
-                                engine->set_note_on(note);
-                                shared->noteOn(note);
-                            }
+                            if (toSynth) shared->synth.pushNote(note, velocity, true);
+                            if (toEngine) { engine->set_note_on(note); shared->noteOn(note); }
                         } else if (statusNibble == 0x80 || (statusNibble == 0x90 && velocity == 0)) {
                             // Note-offs always reach the synth too, so keys
                             // released after a tab switch never leave stale
                             // held notes (harmless when the note is unknown).
                             shared->synth.pushNote(note, 0, false);
-                            if (!shared->synth.active.load(std::memory_order_relaxed)) {
+                            if (toEngine) {
                                 engine->set_note_off(note);
                                 shared->noteOff(note);
                             }
@@ -1046,19 +1057,30 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                         uint8_t statusNibble = statusByte & 0xF0;
                         uint8_t note = (word >> 8) & 0x7F;
                         uint8_t velocity = word & 0x7F;
+                        // Routing:
+                        //   synth   when the synth is active, or off the jam tab
+                        //   engine  on the jam tab with synth inactive (pure
+                        //           jam), OR when the instrument follows the jam
+                        // (both can fire: instrument + follow plays the synth
+                        //  AND conditions the engine).
+                        const bool synthActive =
+                            shared->synth.active.load(std::memory_order_relaxed);
+                        const bool jamActive =
+                            shared->jamTabActive.load(std::memory_order_relaxed);
+                        const bool follow =
+                            shared->instrumentFollowsJam.load(std::memory_order_relaxed);
+                        const bool toSynth = synthActive || !jamActive;
+                        const bool toEngine =
+                            (jamActive && !synthActive) || (synthActive && follow);
                         if (statusNibble == 0x90 && velocity > 0) {
-                            if (shared->synth.active.load(std::memory_order_relaxed)) {
-                                shared->synth.pushNote(note, velocity, true);
-                            } else {
-                                engine->set_note_on(note);
-                                shared->noteOn(note);
-                            }
+                            if (toSynth) shared->synth.pushNote(note, velocity, true);
+                            if (toEngine) { engine->set_note_on(note); shared->noteOn(note); }
                         } else if (statusNibble == 0x80 || (statusNibble == 0x90 && velocity == 0)) {
                             // Note-offs always reach the synth too, so keys
                             // released after a tab switch never leave stale
                             // held notes (harmless when the note is unknown).
                             shared->synth.pushNote(note, 0, false);
-                            if (!shared->synth.active.load(std::memory_order_relaxed)) {
+                            if (toEngine) {
                                 engine->set_note_off(note);
                                 shared->noteOff(note);
                             }

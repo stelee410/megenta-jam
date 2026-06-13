@@ -629,6 +629,13 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
             self.sharedState->fxTempo.store(value.floatValue, std::memory_order_relaxed);
         }
     }
+    else if ([type isEqualToString:@"instrumentFollowJam"]) {
+        NSNumber* value = body[@"value"];
+        if ([value isKindOfClass:[NSNumber class]] && self.sharedState) {
+            self.sharedState->instrumentFollowsJam.store(
+                value.boolValue, std::memory_order_relaxed);
+        }
+    }
     else if ([type isEqualToString:@"instrumentActive"]) {
         NSNumber* value = body[@"value"];
         if ([value isKindOfClass:[NSNumber class]] && self.sharedState) {
@@ -1177,6 +1184,13 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
             }];
         });
     }
+    else if ([type isEqualToString:@"activeTab"]) {
+        NSString* tab = body[@"tab"];
+        if ([tab isKindOfClass:[NSString class]] && self.sharedState) {
+            self.sharedState->jamTabActive.store(
+                [tab isEqualToString:@"jam"], std::memory_order_relaxed);
+        }
+    }
     else if ([type isEqualToString:@"kbdNote"]) {
         NSNumber* noteVal = body[@"note"];
         NSNumber* onVal = body[@"on"];
@@ -1187,24 +1201,31 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
         // BPM-lock metronome pulses condition the generative engine ONLY —
         // never the synth (they'd stomp the arp's held notes / hold latch).
         BOOL isPulse = [pulseVal isKindOfClass:[NSNumber class]] && pulseVal.boolValue;
-        // Instrument tab: note-ons play the performance synth instead of
-        // conditioning the generative engine.
-        if (!isPulse && self.sharedState &&
-            self.sharedState->synth.active.load(std::memory_order_relaxed)) {
-            self.sharedState->synth.pushNote(note, 100, on);
-            return;
+        // Routing (see the MIDI port handler for the full rationale):
+        //   synth   when the synth is active, or off the jam tab
+        //   engine  when on the jam tab with synth inactive (pure jam), OR the
+        //           instrument is set to follow the jam
+        // Metronome pulses always condition the engine and never the synth.
+        const BOOL jamActive = self.sharedState &&
+            self.sharedState->jamTabActive.load(std::memory_order_relaxed);
+        const BOOL synthActive = self.sharedState &&
+            self.sharedState->synth.active.load(std::memory_order_relaxed);
+        const BOOL follow = self.sharedState &&
+            self.sharedState->instrumentFollowsJam.load(std::memory_order_relaxed);
+        const BOOL toSynth = !isPulse && (synthActive || !jamActive);
+        const BOOL toEngine = isPulse ||
+            (jamActive && !synthActive) || (synthActive && follow);
+        if (self.sharedState && (toSynth || !on)) {
+            self.sharedState->synth.pushNote(note, on ? 100 : 0, on);
         }
-        // Note-offs also reach the synth so keys released after a tab switch
-        // never leave stale held notes behind (harmless if unknown).
-        if (!on && !isPulse && self.sharedState) {
-            self.sharedState->synth.pushNote(note, 0, false);
-        }
-        if (on) {
-            self.engine->set_note_on(note);
-            if (self.sharedState) self.sharedState->noteOn(note);
-        } else {
-            self.engine->set_note_off(note);
-            if (self.sharedState) self.sharedState->noteOff(note);
+        if (toEngine) {
+            if (on) {
+                self.engine->set_note_on(note);
+                if (self.sharedState) self.sharedState->noteOn(note);
+            } else {
+                self.engine->set_note_off(note);
+                if (self.sharedState) self.sharedState->noteOff(note);
+            }
         }
     }
     else if ([type isEqualToString:@"togglePlay"]) {

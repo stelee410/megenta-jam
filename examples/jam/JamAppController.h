@@ -31,6 +31,14 @@ struct JamSharedState {
     static constexpr int kLaneBlockMax = 4096;
 
     std::atomic<bool> midiNotes[128] = {};
+    // Only the jam tab conditions the generative engine from live MIDI; on
+    // other tabs (instrument/pgm) keys play the performance synth instead of
+    // starting an AI jam.
+    std::atomic<bool> jamTabActive{true};
+    // Instrument tab: when true, keys played on the performance synth ALSO
+    // condition the generative engine (the AI jam follows along). Off = the
+    // instrument plays solo without driving the jam.
+    std::atomic<bool> instrumentFollowsJam{false};
 
     // Live-performance synth (Instrument tab). When `synth.active`, incoming
     // notes route here instead of conditioning the generative engine.
