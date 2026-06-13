@@ -44,6 +44,35 @@ struct JamSharedState {
     // notes route here instead of conditioning the generative engine.
     JamSynth synth;
 
+    // PGM live MIDI-input instrument source: the built-in synth, or an SF2
+    // GM program. SF2 note events flow through a lock-free queue applied on
+    // the audio thread (tsf voice state is not safe to touch from MIDI threads).
+    std::atomic<int> liveSource{0};        // 0 = built-in synth, 1 = SF2
+    std::atomic<void*> liveSf{nullptr};    // tsf* (live input)
+    std::atomic<int> liveSfProgram{0};     // GM program 0..127
+    std::atomic<float> liveGain{0.9f};     // PGM live-input volume (0..1.2)
+    JamLaneFx liveFx;                      // PGM live-input reverb + echo
+    int liveSfProgApplied = -1;            // render-thread
+    int liveSourceSeen = 0;                // render-thread (flush on change)
+    bool liveHeld[128] = {};               // render-thread held SF2 notes
+    struct LiveEv { uint8_t note; uint8_t vel; bool on; };
+    LiveEv liveEv[256] = {};
+    std::atomic<int> liveEvW{0}, liveEvR{0};
+    void pushLiveNote(uint8_t note, uint8_t vel, bool on) {
+        const int w = liveEvW.load(std::memory_order_relaxed);
+        const int n = (w + 1) & 255;
+        if (n == liveEvR.load(std::memory_order_acquire)) return;
+        liveEv[w] = {note, vel, on};
+        liveEvW.store(n, std::memory_order_release);
+    }
+    // Route a live note to the selected source. Note-offs go to BOTH so a
+    // source switch mid-hold never strands a sounding note.
+    void routeLiveNote(uint8_t note, uint8_t vel, bool on) {
+        if (!on) { synth.pushNote(note, 0, false); pushLiveNote(note, 0, false); return; }
+        if (liveSource.load(std::memory_order_relaxed) == 1) pushLiveNote(note, vel, true);
+        else synth.pushNote(note, vel, true);
+    }
+
     // ── PGM studio I/O (render-thread side) ─────────────────────────────
     // Preview player: one-shot stereo playback of an original stem or a cover
     // take. Buffers are owned by the controller, which never frees them while
@@ -66,12 +95,15 @@ struct JamSharedState {
     float stemSmoothG[kStems] = {};             // render-thread gain smoothing
     // Count-in (预备拍) + click metronome for the stem transport.
     std::atomic<int> countInBeats{0};      // setting: 0 / 4 / 8 beats
-    std::atomic<long> countInLeft{0};      // samples remaining before playback
-    std::atomic<long> countInTotal{0};
+    std::atomic<long> countInUntil{-1};    // rolled-back region: force click until this sample
+    std::atomic<long> countInLeft{0};      // frozen pre-roll samples remaining (no room to roll back)
+    std::atomic<long> countInVPos{0};      // virtual sample swept during the frozen pre-roll
     std::atomic<bool> clickOn{false};      // metronome during playback
     std::atomic<float> stemBpm{120.0f};    // song tempo driving click/count-in
+    std::atomic<int> beatsPerBar{4};       // metronome time signature: 4 (4/4) or 3 (3/4)
     std::atomic<long> stemBeatOff{0};      // first-beat offset (samples)
     std::atomic<int> stemBarPhase{0};      // beat index 0..3 that is a downbeat
+    std::atomic<long> stemCue{-1};         // cue point (samples; -1 = none)
     // render-local click synth state:
     float clickPhase = 0.0f, clickEnv = 0.0f, clickFreq = 1000.0f;
     // Output routing: the main mix and the click can target different device

@@ -497,6 +497,12 @@ function App() {
   // Tell native which tab is active so live MIDI only conditions the
   // generative engine on the jam tab (never starts an AI jam from pgm).
   useEffect(() => { post({ type: 'activeTab', tab: mainTab }); }, [mainTab]);
+  // PGM live MIDI-input instrument source.
+  const [liveSource, setLiveSource] = useState(0);       // 0 synth · 1 SF2
+  const [liveSfProgram, setLiveSfProgram] = useState(0); // GM program
+  const [liveGain, setLiveGain] = useState(0.9);
+  const [liveReverb, setLiveReverb] = useState(0);
+  const [liveEcho, setLiveEcho] = useState(0);
   const mainTabRef = useRef(mainTab);
   mainTabRef.current = mainTab;
   // Gate native note routing: instrument tab → notes play the synth.
@@ -594,10 +600,10 @@ function App() {
   // AI MIDI composition (piano-roll ✨ 写MIDI)
   const [composeBusy, setComposeBusy] = useState(false);
   const [composeResult, setComposeResult] = useState<{
-    seq: number; mode: 'all' | 'continue';
+    seq: number; mode: 'all' | 'continue' | 'range';
     notes: [number, number, number, number][];
   } | null>(null);
-  const composeModeRef = useRef<'all' | 'continue'>('all');
+  const composeModeRef = useRef<'all' | 'continue' | 'range'>('all');
   const composeSeqRef = useRef(0);
   // Lane whose clip regeneration is pending (refetch the open editor's clip
   // when its transcription lands; editor-originated edits must NOT refetch).
@@ -2119,6 +2125,27 @@ function App() {
           rfPresent: !!sp.rfPresent,
         }));
       }
+      if (state.studioLive && typeof state.studioLive === 'object') {
+        const lv = state.studioLive;
+        setLiveSource(Number(lv.source ?? 0));
+        setLiveSfProgram(Number(lv.program ?? 0));
+        if (typeof lv.gain === 'number') setLiveGain(lv.gain);
+        if (typeof lv.reverb === 'number') setLiveReverb(lv.reverb);
+        if (typeof lv.echo === 'number') setLiveEcho(lv.echo);
+      }
+      if (state.studioCue && typeof state.studioCue === 'object') {
+        const c = state.studioCue;
+        setStudio(st => ({
+          ...st,
+          cue: c.has ? Number(c.sec) : -1,
+          clickAnchor: c.hasAnchor ? Number(c.anchor) : -1,
+          timeSig: Number(c.timeSig) === 3 ? 3 : 4,
+        }));
+      }
+      if (typeof state.studioBpm === 'number') {
+        const b = state.studioBpm;
+        setStudio(st => ({ ...st, bpm: b }));
+      }
       if (typeof state.studioSepEngine === 'string') {
         const eng = state.studioSepEngine;
         setStudio(st => ({ ...st, sepEngine: eng }));
@@ -2757,6 +2784,9 @@ function App() {
               setStudio(st => ({ ...st, click: on }));
               post({ type: 'studioClick', on });
             }}
+            onCue={(action, sec) => post({ type: 'studioCue', action, sec: sec ?? -1 })}
+            onBpm={(bpm) => { setStudio(st => ({ ...st, bpm })); post({ type: 'studioBpm', bpm }); }}
+            onTimeSig={(beats) => { setStudio(st => ({ ...st, timeSig: beats })); post({ type: 'studioTimeSig', beats }); }}
             onRoute={(patch) => {
               setStudio(st => {
                 const next = {
@@ -2886,6 +2916,35 @@ function App() {
                 `the chord changes. Preserve the original musical intent, register and rhythmic ` +
                 `feel; do NOT rewrite it into something new. Return the full improved note list.`;
               composeModeRef.current = 'all';
+              setComposeBusy(true);
+              setComposeError(null);
+              post({ type: 'aiCompose', value: ctx, lane: idx });
+            }}
+            onClipAiRange={(idx, notes, startSec, endSec) => {
+              const st = studioRef.current;
+              const beat = 60 / Math.max(40, st.bpm || 120);
+              const toBeat = (sec: number) => (sec / beat).toFixed(2);
+              const win = 8 * beat;   // 8 beats of context each side
+              const ser = (ns: typeof notes) => ns.map(([s0, d, p, v]) =>
+                `[${(s0 / beat).toFixed(2)},${(d / beat).toFixed(2)},${p},${v.toFixed(2)}]`).join(',');
+              const before = notes.filter(n => n[0] < startSec && n[0] >= startSec - win);
+              const after = notes.filter(n => n[0] >= endSec && n[0] < endSec + win);
+              const inside = notes.filter(n => n[0] >= startSec - 1e-3 && n[0] < endSec);
+              let ctx = buildSongContext(st, idx, beat, toBeat);
+              ctx += `REWRITE RANGE: beats ${toBeat(startSec)}..${toBeat(endSec)}.
+` +
+                `Context BEFORE the range (keep, for continuity): [${ser(before)}]
+` +
+                `Context AFTER the range (keep, for continuity): [${ser(after)}]
+` +
+                `Current notes inside the range (replace these): [${ser(inside)}]
+` +
+                `TASK: rewrite ONLY the notes inside the range. Stay musically ` +
+                `consistent with the before/after context (motif, rhythm, register, ` +
+                `density) and follow the chord timeline. Make the boundaries flow ` +
+                `naturally into the surrounding material. Return notes ONLY within ` +
+                `beats ${toBeat(startSec)}..${toBeat(endSec)}.`;
+              composeModeRef.current = 'range';
               setComposeBusy(true);
               setComposeError(null);
               post({ type: 'aiCompose', value: ctx, lane: idx });
@@ -3691,7 +3750,7 @@ function App() {
           boxSizing: 'border-box',
         }}
       >
-        {/* Left cluster: MIDI Input */}
+        {/* Left cluster: MIDI Input (+ PGM live-input instrument source) */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <MidiSelector
             midiSources={midiSources}
@@ -3699,6 +3758,50 @@ function App() {
             onSelectSource={(endpoint) => post({ type: 'selectMidiSource', endpoint })}
             midiActive={activeNotes.length > 0}
           />
+          {mainTab === 'pgm' && (
+            <span className="pgm-livesrc" title="PGM 现场弹奏音源：内置合成器 或 SoundFont 乐器">
+              <span className="pgm-livesrc-label">SOURCE</span>
+              <select
+                value={liveSource === 1 ? `sf2:${liveSfProgram}` : 'syn'}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === 'syn') { setLiveSource(0); post({ type: 'liveSource', source: 0 }); }
+                  else {
+                    const prog = Number(v.slice(4));
+                    setLiveSource(1); setLiveSfProgram(prog);
+                    post({ type: 'liveSource', source: 1, program: prog });
+                  }
+                }}
+              >
+                <option value="syn">内置合成器（instrument）</option>
+                {GM_FAMILIES.map(([fam, names], fi) => (
+                  <optgroup key={fam} label={fam}>
+                    {names.map((nm, ni) => (
+                      <option key={nm} value={`sf2:${fi * 8 + ni}`}>{nm}</option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+              <label className="pgm-livesrc-knob" title={`音量 ${Math.round(liveGain * 100)}%`}>
+                VOL
+                <input type="range" min={0} max={1.2} step={0.01} value={liveGain}
+                  onChange={(e) => { const v = Number(e.target.value); setLiveGain(v);
+                    post({ type: 'liveSource', gain: v }); }} />
+              </label>
+              <label className="pgm-livesrc-knob" title={`混响 ${Math.round(liveReverb * 100)}%`}>
+                R
+                <input type="range" min={0} max={1} step={0.01} value={liveReverb}
+                  onChange={(e) => { const v = Number(e.target.value); setLiveReverb(v);
+                    post({ type: 'liveSource', reverb: v }); }} />
+              </label>
+              <label className="pgm-livesrc-knob" title={`回声 ${Math.round(liveEcho * 100)}%（附点八分，BPM 同步）`}>
+                E
+                <input type="range" min={0} max={1} step={0.01} value={liveEcho}
+                  onChange={(e) => { const v = Number(e.target.value); setLiveEcho(v);
+                    post({ type: 'liveSource', echo: v }); }} />
+              </label>
+            </span>
+          )}
         </div>
 
         {/* Spacer */}

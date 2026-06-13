@@ -20,7 +20,7 @@
  * A/B each cover against the original, and package everything as a live PGM.
  */
 
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { MidiEditor } from './MidiEditor';
 import type { ClipNote } from './MidiEditor';
 
@@ -64,6 +64,9 @@ export interface StudioState {
   playhead: { pos: number; len: number };
   sepPipeline: 'auto' | 'hpss' | 'demucs' | 'rf' | 'rf2';   // separation pipeline
   rfPresent: boolean;         // BS-RoFormer model on disk
+  cue: number;                // cue (playback start) seconds (-1 = none)
+  clickAnchor: number;        // click beat-grid anchor seconds (-1 = follow cue)
+  timeSig: 3 | 4;             // metronome time signature
   countIn: 0 | 4 | 8;         // 预备拍 beats before playback
   click: boolean;             // metronome during playback
   outChannels: number;        // device output channel count
@@ -92,7 +95,7 @@ export const STUDIO_INIT: StudioState = {
   chords: [],
   mixer: Array.from({ length: 8 }, () => ({ mute: false, solo: false, gain: 1 })),
   playhead: { pos: 0, len: 0 },
-  sepPipeline: 'auto', rfPresent: false,
+  sepPipeline: 'auto', rfPresent: false, cue: -1, clickAnchor: -1, timeSig: 4,
   countIn: 0, click: false,
   outChannels: 2, routeMain: 0x3, routeClick: 0x3,
   sepEngine: '', sepModel: { present: false, sources: 0, downloading: false, pct: 0, mb: 0 },
@@ -180,6 +183,9 @@ export function StudioPanel({
   onTransport,
   onCountIn,
   onClick,
+  onCue,
+  onBpm,
+  onTimeSig,
   onRoute,
   onMix,
   onSeek,
@@ -205,6 +211,7 @@ export function StudioPanel({
   composeResult,
   onClipRegen,
   onClipAiOptimize,
+  onClipAiRange,
   onPackage,
   onSepDownload,
   onSepPick,
@@ -218,6 +225,9 @@ export function StudioPanel({
   onTransport: (action: 'play' | 'pause' | 'restart') => void;
   onCountIn: (beats: 0 | 4 | 8) => void;
   onClick: (on: boolean) => void;
+  onCue: (action: 'auto' | 'set' | 'clear' | 'anchor' | 'anchorReset', sec?: number) => void;
+  onBpm: (bpm: number) => void;
+  onTimeSig: (beats: 3 | 4) => void;
   onRoute: (patch: { main?: number; click?: number }) => void;
   onMix: (idx: number, patch: { mute?: boolean; solo?: boolean; gain?: number }) => void;
   onSeek: (sec: number) => void;
@@ -240,9 +250,10 @@ export function StudioPanel({
   onClipAiCompose: (idx: number, prompt: string, mode: 'all' | 'continue') => void;
   composeBusy: boolean;
   composeError: string | null;
-  composeResult: { seq: number; mode: 'all' | 'continue'; notes: ClipNote[] } | null;
+  composeResult: { seq: number; mode: 'all' | 'continue' | 'range'; notes: ClipNote[] } | null;
   onClipRegen: (idx: number) => void;
   onClipAiOptimize: (idx: number, notes: ClipNote[]) => void;
+  onClipAiRange: (idx: number, notes: ClipNote[], startSec: number, endSec: number) => void;
   onPackage: () => void;
   onSepDownload: () => void;
   onSepPick: () => void;
@@ -251,6 +262,23 @@ export function StudioPanel({
   // ✨ AI patch prompt dialog: which lane is being asked, + the user's text.
   const [aiAsk, setAiAsk] = useState<number | null>(null);
   const [aiText, setAiText] = useState('');
+  // Tap tempo: average the recent inter-tap intervals → BPM.
+  const tapTimes = useRef<number[]>([]);
+  const [tapHint, setTapHint] = useState(0);   // taps counted in the current burst
+  const onTap = () => {
+    const now = performance.now();
+    const t = tapTimes.current;
+    if (t.length && now - t[t.length - 1] > 2000) t.length = 0;   // gap → new burst
+    t.push(now);
+    if (t.length > 8) t.shift();
+    if (t.length >= 2) {
+      const intervals = t.slice(1).map((x, i) => x - t[i]);
+      const avg = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+      const bpm = 60000 / avg;
+      if (bpm >= 40 && bpm <= 300) onBpm(Math.round(bpm));
+    }
+    setTapHint(t.length);
+  };
   const [routeOpen, setRouteOpen] = useState(false);
 
   const songOn = s.playMode === 'song';
@@ -302,7 +330,22 @@ export function StudioPanel({
           {s.loaded && (
             <>
               <span className="pgm-chip">{s.name}</span>
-              <span className="pgm-chip is-blue">{s.bpm} bpm</span>
+              <span className="pgm-bpmcal" title="手动校准 BPM（±1，或 ÷2 / ×2 修正倍速误判）">
+                <button onClick={() => onBpm(Math.max(40, Math.round(s.bpm / 2)))} title="减半">÷2</button>
+                <button onClick={() => onBpm(Math.max(40, Math.round(s.bpm) - 1))}>−</button>
+                <input
+                  type="number" min={40} max={300} value={Math.round(s.bpm)}
+                  onChange={(e) => { const v = Number(e.target.value); if (v >= 40 && v <= 300) onBpm(v); }}
+                  onKeyDown={(e) => e.stopPropagation()}
+                />
+                <small>bpm</small>
+                <button onClick={() => onBpm(Math.min(300, Math.round(s.bpm) + 1))}>＋</button>
+                <button onClick={() => onBpm(Math.min(300, Math.round(s.bpm * 2)))} title="加倍">×2</button>
+                <button className="pgm-tap" onClick={onTap}
+                  title="点击跟拍：连续按节奏点 2 次以上即可测出 BPM">
+                  {tapHint >= 2 ? `TAP·${tapHint}` : 'TAP'}
+                </button>
+              </span>
               <span className="pgm-chip is-blue">{s.key}</span>
               <span className="pgm-chip">{mmss(s.duration)}</span>
             </>
@@ -445,10 +488,51 @@ export function StudioPanel({
           <button
             className={`pgm-mini ${s.click ? 'is-active is-midi' : ''}`}
             onClick={() => onClick(!s.click)}
-            title="节拍器：播放中按歌曲 BPM 出 click（每 4 拍重音）"
+            title="节拍器：播放中按歌曲 BPM 出 click（每小节首拍重音）"
           >
             ♩ click
           </button>
+          <span className="pgm-srcswitch" title="节拍器拍号">
+            <button className={s.timeSig === 4 ? 'is-on' : ''} onClick={() => onTimeSig(4)}>4/4</button>
+            <button className={s.timeSig === 3 ? 'is-on' : ''} onClick={() => onTimeSig(3)}>3/4</button>
+          </span>
+          <span className="pgm-cue" title="Cue：标记歌曲真正的起拍“1”，跳过不定长的前奏；click/预备拍以此对齐">
+            <button
+              className={`pgm-mini ${s.cue >= 0 ? 'is-active' : ''}`}
+              onClick={() => onCue('auto')}
+              title="自动 Cue：检测音乐起点并对齐到最近正拍"
+            >
+              ◎ Auto Cue
+            </button>
+            <button
+              className="pgm-mini"
+              onClick={() => onCue('set', s.playhead.len > 0 ? s.playhead.pos : 0)}
+              title="手动 Cue：把当前播放头设为起拍点（吸附最近正拍）"
+            >
+              ⊕ 设 Cue
+            </button>
+            {s.cue >= 0 && (
+              <>
+                <span className="pgm-chip is-blue">Cue {mmss(s.cue)}</span>
+                <button className="pgm-mini is-del" onClick={() => onCue('clear')}
+                  title="清除 Cue">✕</button>
+              </>
+            )}
+            <button
+              className={`pgm-mini ${s.clickAnchor >= 0 ? 'is-active' : ''}`}
+              onClick={() => onCue('anchor', s.playhead.len > 0 ? s.playhead.pos : 0)}
+              title="click 计算点：在你听到的某个正拍上标注，click 的第一拍/重音由它倒推（默认与 Cue 同位置，可独立设置）"
+            >
+              ⊙ 计算点
+            </button>
+            {s.clickAnchor >= 0 && (
+              <>
+                <span className="pgm-chip">⊙ {mmss(s.clickAnchor)}</span>
+                <button className="pgm-mini is-del" onClick={() => onCue('anchorReset')}
+                  title="计算点恢复跟随 Cue">✕</button>
+              </>
+            )}
+          </span>
           <span className="pgm-route">
             <button
               className={`pgm-mini ${(s.routeMain !== 0x3 || s.routeClick !== 0x3) ? 'is-active' : ''}`}
@@ -527,6 +611,15 @@ export function StudioPanel({
             <div className="pgm-song-stack" {...seekHandlers}>
               <Wave data={s.songWave} color="rgba(232, 232, 234, 0.75)" />
               {playhead(songOn, true)}
+              {s.cue >= 0 && s.duration > 0 && (
+                <span className="pgm-cue-marker" style={{ left: `${(s.cue / s.duration) * 100}%` }}
+                      title={`Cue ${mmss(s.cue)}`} />
+              )}
+              {s.clickAnchor >= 0 && s.duration > 0 && (
+                <span className="pgm-anchor-marker"
+                      style={{ left: `${(s.clickAnchor / s.duration) * 100}%` }}
+                      title={`click 计算点 ${mmss(s.clickAnchor)}`} />
+              )}
               <div className="pgm-sections">
                 {s.sections.map((sec, i) => (
                   <div
@@ -867,6 +960,7 @@ export function StudioPanel({
           composeResult={composeResult}
           onRegenerate={() => onClipRegen(clip.index)}
           onAiOptimize={(notes) => onClipAiOptimize(clip.index, notes)}
+          onAiRange={(notes, s0, e0) => onClipAiRange(clip.index, notes, s0, e0)}
         />
       )}
     </div>

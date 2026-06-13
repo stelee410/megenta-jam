@@ -124,6 +124,8 @@ static BOOL isDevServerRunning(void) {
     BOOL _lanePatched[8];                 // lane synth patch applied
     NSDictionary* _lanePatchInfo[8];      // chosen patch {name, origin, params, matrix}
     int _lastPushedOutCh;
+    double _cueSec;                       // PGM cue (playback start; -1 = none)
+    double _clickAnchorSec;               // click beat-grid anchor (-1 = follow cue)
     tsf* _sfMaster;                       // master SoundFont (lanes share samples)
     BOOL _sfBusy;                         // download/load in flight
     NSString* _songName;
@@ -755,50 +757,52 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
         NSString* action = body[@"action"];
         JamSharedState* sh = self.sharedState;
         if ([action isKindOfClass:[NSString class]] && sh) {
-            // Arm the count-in (预备拍): the count is back-derived from the
-            // song's beat grid — the entry point snaps forward to the next
-            // bar downbeat, so "…3, 4" flows straight into the song's "1"
-            // exactly one beat later.
-            const auto armCountIn = ^{
+            // Begin playback at `entry`, with a back-calculated count-in: the
+            // transport actually rolls from `entry − N beats` (on the click
+            // grid) with the click forced on until `entry`. It's continuous
+            // playback — no freeze, no phase gap into the song — so any audio
+            // in the pre-roll region (a pickup, the song's real start) plays.
+            const auto startAt = ^(long entry) {
+                const long len = sh->stemLen.load(std::memory_order_relaxed);
+                if (len <= 0) return;
+                entry = MAX(0L, MIN(entry, len - 1));
                 const int beats = sh->countInBeats.load(std::memory_order_relaxed);
-                if (beats <= 0) return;
-                const float bpm = sh->stemBpm.load(std::memory_order_relaxed);
-                const long B = (long)(60.0 / ((bpm < 40 || bpm > 300) ? 120.0 : bpm)
-                                      * 48000.0);
-                const long bar = 4 * B;
-                const long off = sh->stemBeatOff.load(std::memory_order_relaxed);
-                const int ph = sh->stemBarPhase.load(std::memory_order_relaxed);
-                const long len = sh->stemLen.load(std::memory_order_relaxed);
-                const long pos = sh->stemPos.load(std::memory_order_relaxed);
-                const long firstDown = off + (long)ph * B;
-                long D = firstDown;
-                if (pos > firstDown) {
-                    const long m = (pos - firstDown + bar - 1) / bar;
-                    D = firstDown + m * bar;
+                if (beats > 0) {
+                    const float bpm = sh->stemBpm.load(std::memory_order_relaxed);
+                    const long B = (long)(60.0 / ((bpm < 40 || bpm > 300) ? 120.0 : bpm)
+                                          * 48000.0);
+                    const long total = (long)beats * B;
+                    // Roll the transport back as far as there's room; the rest
+                    // is a frozen click pre-roll (when the entry is near 0).
+                    // Both halves click on the same grid → always N beats, no gap.
+                    const long rollback = MIN(total, entry);
+                    const long frozen = total - rollback;
+                    sh->stemPos.store(entry - rollback, std::memory_order_relaxed);
+                    sh->countInUntil.store(entry, std::memory_order_relaxed);
+                    sh->countInVPos.store(entry - total, std::memory_order_relaxed);
+                    sh->countInLeft.store(frozen, std::memory_order_release);
+                } else {
+                    sh->stemPos.store(entry, std::memory_order_relaxed);
+                    sh->countInUntil.store(-1, std::memory_order_relaxed);
+                    sh->countInLeft.store(0, std::memory_order_relaxed);
                 }
-                if (D < len) sh->stemPos.store(D, std::memory_order_relaxed);
-                sh->countInTotal.store(beats * B, std::memory_order_relaxed);
-                sh->countInLeft.store(beats * B, std::memory_order_release);
+                sh->prevActive.store(false, std::memory_order_relaxed);
+                sh->stemActive.store(true, std::memory_order_release);
             };
+            const long cue = sh->stemCue.load(std::memory_order_relaxed);
             if ([action isEqualToString:@"restart"]) {
-                sh->prevActive.store(false, std::memory_order_relaxed);
-                sh->stemPos.store(0, std::memory_order_relaxed);
-                if (sh->stemLen.load(std::memory_order_relaxed) > 0) {
-                    armCountIn();
-                    sh->stemActive.store(true, std::memory_order_release);
-                }
+                startAt(cue >= 0 ? cue : 0);     // ⟲ → the cue (song's real "1")
             } else if ([action isEqualToString:@"play"]) {
-                sh->prevActive.store(false, std::memory_order_relaxed);
                 const long len = sh->stemLen.load(std::memory_order_relaxed);
-                if (len > 0) {
-                    if (sh->stemPos.load(std::memory_order_relaxed) >= len) {
-                        sh->stemPos.store(0, std::memory_order_relaxed);
-                    }
-                    armCountIn();
-                    sh->stemActive.store(true, std::memory_order_release);
-                }
+                long pos = sh->stemPos.load(std::memory_order_relaxed);
+                if (pos >= len) pos = 0;
+                // From the top with a cue set → enter at the cue (skip intro);
+                // a scrubbed position past the cue is kept.
+                if (cue >= 0 && pos < cue) pos = cue;
+                startAt(pos);
             } else {   // pause
                 sh->stemActive.store(false, std::memory_order_relaxed);
+                sh->countInUntil.store(-1, std::memory_order_relaxed);
                 sh->countInLeft.store(0, std::memory_order_relaxed);
             }
         }
@@ -829,6 +833,69 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
         NSNumber* on = body[@"on"];
         if ([on isKindOfClass:[NSNumber class]] && self.sharedState) {
             self.sharedState->clickOn.store(on.boolValue, std::memory_order_relaxed);
+        }
+    }
+    else if ([type isEqualToString:@"studioTimeSig"]) {
+        NSNumber* beats = body[@"beats"];
+        if ([beats isKindOfClass:[NSNumber class]] && self.sharedState) {
+            self.sharedState->beatsPerBar.store(beats.intValue == 3 ? 3 : 4,
+                                                std::memory_order_relaxed);
+        }
+    }
+    else if ([type isEqualToString:@"studioBpm"]) {
+        NSNumber* bpm = body[@"bpm"];
+        if ([bpm isKindOfClass:[NSNumber class]] && self.sharedState) {
+            const double v = bpm.doubleValue;
+            if (v >= 40.0 && v <= 300.0) {
+                // Manual calibration: drives the click/count-in grid, MIDI
+                // export tempo and chord voicing — keep them in sync.
+                self->_songAnalysis.bpm = (float)v;
+                self.sharedState->stemBpm.store((float)v, std::memory_order_relaxed);
+                [self sendStateUpdate:@{@"studioBpm": @(v)}];
+            }
+        }
+    }
+    else if ([type isEqualToString:@"liveSource"]) {
+        NSNumber* src = body[@"source"];
+        NSNumber* prog = body[@"program"];
+        NSNumber* gain = body[@"gain"];
+        if (self.sharedState) {
+            if ([prog isKindOfClass:[NSNumber class]]) {
+                self.sharedState->liveSfProgram.store(MAX(0, MIN(127, prog.intValue)),
+                                                      std::memory_order_relaxed);
+            }
+            if ([gain isKindOfClass:[NSNumber class]]) {
+                const float g = MAX(0.0f, MIN(1.2f, gain.floatValue));
+                self.sharedState->liveGain.store(g, std::memory_order_relaxed);
+                // The built-in synth (the other live source) has no separate
+                // gain stage — drive its master volume from the same control.
+                self.sharedState->synth.volume.store(g, std::memory_order_relaxed);
+            }
+            NSNumber* rev = body[@"reverb"];
+            NSNumber* ech = body[@"echo"];
+            if ([rev isKindOfClass:[NSNumber class]]) {
+                const float v = MAX(0.0f, MIN(1.0f, rev.floatValue));
+                self.sharedState->liveFx.reverb.store(v, std::memory_order_relaxed);
+                // Built-in synth has its own plate — mirror the reverb there.
+                self.sharedState->synth.space.store(v, std::memory_order_relaxed);
+            }
+            if ([ech isKindOfClass:[NSNumber class]]) {
+                self.sharedState->liveFx.echo.store(MAX(0.0f, MIN(1.0f, ech.floatValue)),
+                                                    std::memory_order_relaxed);
+            }
+            if ([src isKindOfClass:[NSNumber class]]) {
+                [self handleLiveSource:src.intValue];
+            } else {
+                [self studioPushLive];
+            }
+        }
+    }
+    else if ([type isEqualToString:@"studioCue"]) {
+        NSString* action = body[@"action"];
+        NSNumber* sec = body[@"sec"];
+        if ([action isKindOfClass:[NSString class]]) {
+            [self handleStudioCue:action
+                              sec:([sec isKindOfClass:[NSNumber class]] ? sec.doubleValue : -1.0)];
         }
     }
     else if ([type isEqualToString:@"studioMix"]) {
@@ -1216,7 +1283,7 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
         const BOOL toEngine = isPulse ||
             (jamActive && !synthActive) || (synthActive && follow);
         if (self.sharedState && (toSynth || !on)) {
-            self.sharedState->synth.pushNote(note, on ? 100 : 0, on);
+            self.sharedState->routeLiveNote(note, on ? 100 : 0, on);
         }
         if (toEngine) {
             if (on) {
@@ -1285,6 +1352,7 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [self connectToEngine];
             [self studioPushSepPipeline];
+            [self studioPushLive];
         });
     }
     else if ([type isEqualToString:@"sepPipeline"]) {
@@ -1811,6 +1879,9 @@ static NSString* const kJamKeyNames[12] = {@"C", @"C#", @"D", @"D#", @"E", @"F",
         _stemNotes[i].clear();
     }
     _chords.clear();
+    _cueSec = -1.0;
+    _clickAnchorSec = -1.0;
+    self.sharedState->stemCue.store(-1, std::memory_order_relaxed);
     // Drop all MIDI lanes (the new song invalidates every clip).
     for (int t = 0; t < 8; ++t) {
         _laneClip[t].clear();
@@ -1829,6 +1900,7 @@ static NSString* const kJamKeyNames[12] = {@"C", @"C#", @"D", @"D#", @"E", @"F",
         });
         [self studioPushChords];
         [self studioPushSources];
+        [self studioPushCue];
         self->_studioBusy = NO;
         [self studioProgress:@"ready" pct:1.0f];
     });
@@ -2014,6 +2086,142 @@ static NSString* const kJamKeyNames[12] = {@"C", @"C#", @"D", @"D#", @"E", @"F",
     self.sharedState->stemBarPhase.store(bg.barPhase, std::memory_order_relaxed);
     NSLog(@"Jam studio: drum beat grid — %.3f bpm, offset %.3fs, bar phase %d",
           bg.bpm, bg.offsetSec, bg.barPhase);
+}
+
+// ── Cue point ──
+// A live cue marks the song's real downbeat-"1" past an unmetered intro of
+// uncontrollable length. Setting it re-anchors the click/count-in grid there
+// (clicks start exactly at the cue) and makes ▶/⟲ enter at the cue.
+
+// Find the musical start: first sustained onset (prefer the drums stem).
+- (double)detectCueSec {
+    const int16_t* src = !_stems[0].empty() ? _stems[0].data() : nullptr;
+    long nf = src ? (long)_stems[0].size() / 2 : (long)_songL.size();
+    if (nf < 48000) return 0.0;
+    const int hop = 512;
+    const long frames = nf / hop;
+    std::vector<float> e(frames, 0.0f);
+    float peak = 1e-9f;
+    for (long f = 0; f < frames; ++f) {
+        double acc = 0;
+        for (int i = 0; i < hop; ++i) {
+            const long k = f * hop + i;
+            float s = src ? (src[k * 2] + src[k * 2 + 1]) * (0.5f / 32768.0f)
+                          : (_songL[k] + _songR[k]) * 0.5f;
+            acc += (double)s * s;
+        }
+        e[f] = (float)std::sqrt(acc / hop);
+        peak = MAX(peak, e[f]);
+    }
+    const float thr = peak * 0.18f;        // 18% of the loudest = "music here"
+    for (long f = 0; f < frames - 3; ++f) {
+        if (e[f] > thr && e[f + 1] > thr && e[f + 2] > thr) {
+            return (double)(f * hop) / 48000.0;
+        }
+    }
+    return 0.0;
+}
+
+// Snap a time to the nearest beat of the detected grid (keeps the cue clean).
+- (double)snapToBeatSec:(double)sec {
+    const float bpm = _songAnalysis.bpm;
+    if (bpm < 40 || bpm > 300) return MAX(0.0, sec);
+    const double B = 60.0 / bpm;
+    const double off = self.sharedState
+        ? self.sharedState->stemBeatOff.load(std::memory_order_relaxed) / 48000.0 : 0.0;
+    double k = std::round((sec - off) / B);
+    return MAX(0.0, off + k * B);
+}
+
+// Apply the click beat-grid anchor (samples) — the reference from which the
+// click's beats are back-derived. The anchor is treated as a downbeat.
+- (void)applyClickAnchorSamples:(long)cs {
+    JamSharedState* sh = self.sharedState;
+    sh->stemBeatOff.store(cs, std::memory_order_relaxed);
+    sh->stemBarPhase.store(0, std::memory_order_relaxed);
+}
+
+// PGM live MIDI-input instrument source: 0 = built-in synth, 1 = SF2.
+- (void)handleLiveSource:(int)source {
+    JamSharedState* sh = self.sharedState;
+    if (!sh) return;
+    if (source == 1) {
+        [self laneEnsureSf:^(BOOL ok) {
+            if (!ok) return;
+            sh->liveSource.store(1, std::memory_order_relaxed);
+            [self studioPushLive];
+        }];
+        sh->liveSource.store(1, std::memory_order_relaxed);   // optimistic
+        [self studioPushLive];
+        return;
+    }
+    sh->liveSource.store(0, std::memory_order_relaxed);
+    [self studioPushLive];
+}
+
+- (void)studioPushLive {
+    JamSharedState* sh = self.sharedState;
+    [self sendStateUpdate:@{@"studioLive": @{
+        @"source": @(sh->liveSource.load(std::memory_order_relaxed)),
+        @"program": @(sh->liveSfProgram.load(std::memory_order_relaxed)),
+        @"gain": @(sh->liveGain.load(std::memory_order_relaxed)),
+        @"reverb": @(sh->liveFx.reverb.load(std::memory_order_relaxed)),
+        @"echo": @(sh->liveFx.echo.load(std::memory_order_relaxed)),
+    }}];
+}
+
+- (void)handleStudioCue:(NSString*)action sec:(double)sec {
+    JamSharedState* sh = self.sharedState;
+    if (!sh) return;
+
+    // ── Click beat-grid anchor (计算点) ──
+    if ([action isEqualToString:@"anchor"]) {
+        // Manual on-beat reference; NOT snapped (it defines the grid phase).
+        _clickAnchorSec = MAX(0.0, sec);
+        [self applyClickAnchorSamples:(long)(_clickAnchorSec * 48000.0)];
+        [self studioPushCue];
+        [self sendStateUpdate:@{@"studioNotice":
+            [NSString stringWithFormat:@"⊙ click 计算点 @ %.2fs（click 第一拍由此倒推）",
+             _clickAnchorSec]}];
+        return;
+    }
+    if ([action isEqualToString:@"anchorReset"]) {
+        // Revert the anchor to the cue (the default), or the detected grid.
+        _clickAnchorSec = -1.0;
+        if (_cueSec >= 0) [self applyClickAnchorSamples:(long)(_cueSec * 48000.0)];
+        else if (!_stems[0].empty()) [self studioRefineBeatGridFromDrums];
+        [self studioPushCue];
+        return;
+    }
+
+    // ── Cue (playback start) ──
+    if ([action isEqualToString:@"clear"]) {
+        _cueSec = -1.0;
+        sh->stemCue.store(-1, std::memory_order_relaxed);
+        if (_clickAnchorSec < 0) {   // anchor follows the cue → restore grid
+            if (!_stems[0].empty()) [self studioRefineBeatGridFromDrums];
+        }
+        [self studioPushCue];
+        return;
+    }
+    double cue = [action isEqualToString:@"auto"] ? [self detectCueSec] : MAX(0.0, sec);
+    cue = [self snapToBeatSec:cue];
+    _cueSec = cue;
+    const long cs = (long)(cue * 48000.0);
+    sh->stemCue.store(cs, std::memory_order_relaxed);
+    // Default: the click anchor follows the cue (same position) unless the
+    // user has pinned an independent计算点.
+    if (_clickAnchorSec < 0) [self applyClickAnchorSamples:cs];
+    [self studioPushCue];
+    [self sendStateUpdate:@{@"studioNotice":
+        [NSString stringWithFormat:@"◎ Cue @ %.2fs", cue]}];
+}
+
+- (void)studioPushCue {
+    [self sendStateUpdate:@{@"studioCue": @{
+        @"sec": @(_cueSec), @"has": @(_cueSec >= 0),
+        @"anchor": @(_clickAnchorSec), @"hasAnchor": @(_clickAnchorSec >= 0),
+        @"timeSig": @(self.sharedState->beatsPerBar.load(std::memory_order_relaxed))}}];
 }
 
 // Push all stem waveforms + per-stem sources to the UI (main thread).
@@ -2618,6 +2826,15 @@ static int JamLaneDefaultProgram(int stem) {
                     self.sharedState->laneSfProgApplied[k] = prog;
                     self.sharedState->laneSf[k].store(c, std::memory_order_release);
                 }
+                // Live MIDI-input SF2 instance (PGM live source).
+                if (!self.sharedState->liveSf.load(std::memory_order_relaxed)) {
+                    tsf* lv = tsf_copy(master);
+                    tsf_set_output(lv, TSF_STEREO_UNWEAVED, 48000, 0.0f);
+                    tsf_set_max_voices(lv, 32);
+                    tsf_channel_set_presetnumber(lv, 0,
+                        self.sharedState->liveSfProgram.load(std::memory_order_relaxed), 0);
+                    self.sharedState->liveSf.store(lv, std::memory_order_release);
+                }
                 self->_sfBusy = NO;
                 [self studioProgress:@"ready" pct:1.0f];
                 [self sendStateUpdate:@{@"studioNotice":
@@ -2917,6 +3134,32 @@ static BOOL JamWriteWav(NSURL* url, const int16_t* interleaved, long frames) {
                 self.sharedState->stemBarPhase.store(bg.barPhase,
                                                      std::memory_order_relaxed);
             }
+            // Cue point: re-anchors the grid to the packaged "1" if present.
+            self->_cueSec = -1.0;
+            self.sharedState->stemCue.store(-1, std::memory_order_relaxed);
+            NSNumber* cue = [song isKindOfClass:[NSDictionary class]] ? song[@"cue"] : nil;
+            if ([cue isKindOfClass:[NSNumber class]] && cue.doubleValue >= 0) {
+                self->_cueSec = cue.doubleValue;
+                self.sharedState->stemCue.store((long)(self->_cueSec * 48000.0),
+                                                std::memory_order_relaxed);
+            }
+            // Click anchor (计算点): explicit value wins, else follows the cue.
+            self->_clickAnchorSec = -1.0;
+            NSNumber* anc = [song isKindOfClass:[NSDictionary class]] ? song[@"clickAnchor"] : nil;
+            if ([anc isKindOfClass:[NSNumber class]] && anc.doubleValue >= 0) {
+                self->_clickAnchorSec = anc.doubleValue;
+                self.sharedState->stemBeatOff.store((long)(self->_clickAnchorSec * 48000.0),
+                                                    std::memory_order_relaxed);
+                self.sharedState->stemBarPhase.store(0, std::memory_order_relaxed);
+            } else if (self->_cueSec >= 0) {
+                self.sharedState->stemBeatOff.store((long)(self->_cueSec * 48000.0),
+                                                    std::memory_order_relaxed);
+                self.sharedState->stemBarPhase.store(0, std::memory_order_relaxed);
+            }
+            NSNumber* tsig = [song isKindOfClass:[NSDictionary class]] ? song[@"timeSig"] : nil;
+            self.sharedState->beatsPerBar.store(
+                ([tsig isKindOfClass:[NSNumber class]] && tsig.intValue == 3) ? 3 : 4,
+                std::memory_order_relaxed);
             self->_songAnalysis.sections.clear();
             NSArray* sections = pgm[@"sections"];
             if ([sections isKindOfClass:[NSArray class]]) {
@@ -2988,6 +3231,7 @@ static BOOL JamWriteWav(NSURL* url, const int16_t* interleaved, long frames) {
                 [self studioPushStemWaves];
                 [self studioPublishStems];
                 [self studioPushChords];
+                [self studioPushCue];
                 for (int i = 0; i < 8; ++i) {
                     if (!self->_stemNotes[i].empty()) [self studioPushNotes:i];
                 }
@@ -3562,6 +3806,9 @@ static NSString* const kRfModelURL =
                    @"key": [NSString stringWithFormat:@"%@ %@",
                             kJamKeyNames[_songAnalysis.keyIdx],
                             _songAnalysis.minor ? @"minor" : @"major"],
+                   @"cue": @(_cueSec),
+                   @"clickAnchor": @(_clickAnchorSec),
+                   @"timeSig": @(self.sharedState->beatsPerBar.load(std::memory_order_relaxed)),
                    @"file": _songL.empty() ? @"" : @"song.wav"},
         @"sections": sections,
         @"stems": stems,

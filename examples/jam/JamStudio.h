@@ -207,30 +207,51 @@ inline Analysis analyze(const float* mono, long n) {
         out.bpm = bpm;
     }
 
-    // 3. Key: chroma accumulation + Krumhansl-Schmuckler template match.
+    // 3. Key: spectral-peak chroma (per-frame L2-normalized) + profile match.
+    // Peaks-only kills the broadband bass/kick smear; per-frame normalization
+    // stops loud sections or single notes from dominating the histogram.
     {
         const int N = 4096;
-        const int hopK = 4096;
         FFTSetup setup = vDSP_create_fftsetup(12, kFFTRadix2);  // 2^12
         std::vector<float> win(N), re(N / 2), im(N / 2);
         vDSP_hann_window(win.data(), N, vDSP_HANN_NORM);
         DSPSplitComplex sc = {re.data(), im.data()};
         double chroma[12] = {};
-        std::vector<float> frame(N);
-        for (long s = 0; s + N <= n; s += hopK) {
+        std::vector<float> frame(N), mags(N / 2), medBuf;
+        const int bLo = std::max(1, (int)(65.0f * N / kSR));      // ~C2
+        const int bHi = std::min(N / 2 - 2, (int)(2100.0f * N / kSR));
+        for (long s = 0; s + N <= n; s += N) {
             vDSP_vmul(mono + s, 1, win.data(), 1, frame.data(), 1, N);
             vDSP_ctoz((const DSPComplex*)frame.data(), 2, &sc, 1, N / 2);
             vDSP_fft_zrip(setup, &sc, 1, 12, kFFTDirection_Forward);
-            for (int b = 1; b < N / 2; ++b) {
-                const float freq = b * kSR / N;
-                if (freq < 60.0f || freq > 5000.0f) continue;
-                const float mag2 = re[b] * re[b] + im[b] * im[b];
+            for (int b = bLo; b <= bHi; ++b) {
+                mags[b] = std::sqrt(re[b] * re[b] + im[b] * im[b]);
+            }
+            // Noise floor: median magnitude in the harmony band.
+            medBuf.assign(mags.begin() + bLo, mags.begin() + bHi + 1);
+            std::nth_element(medBuf.begin(), medBuf.begin() + medBuf.size() / 2, medBuf.end());
+            const float floorMag = medBuf[medBuf.size() / 2] * 1.6f;
+            // Spectral peaks only (local maxima above the floor = real partials).
+            double fc[12] = {};
+            for (int b = bLo + 1; b < bHi; ++b) {
+                const float m = mags[b];
+                if (m <= floorMag || m < mags[b - 1] || m < mags[b + 1]) continue;
+                const float den = mags[b - 1] - 2.0f * m + mags[b + 1];
+                const float delta = (std::fabs(den) > 1e-12f)
+                    ? 0.5f * (mags[b - 1] - mags[b + 1]) / den : 0.0f;
+                const float freq = (b + delta) * kSR / N;
                 const float midi = 69.0f + 12.0f * std::log2(freq / 440.0f);
                 const int pc = ((int)std::lround(midi) % 12 + 12) % 12;
-                chroma[pc] += std::sqrt(mag2);
+                fc[pc] += m;
             }
+            // sqrt-compress, then L2-normalize this frame before accumulating.
+            double norm = 0;
+            for (int i = 0; i < 12; ++i) { fc[i] = std::sqrt(fc[i]); norm += fc[i] * fc[i]; }
+            norm = std::sqrt(norm);
+            if (norm > 1e-9) for (int i = 0; i < 12; ++i) chroma[i] += fc[i] / norm;
         }
         vDSP_destroy_fftsetup(setup);
+        // Temperley/Krumhansl-derived profiles (better tonic emphasis for pop).
         static const double majP[12] = {6.35,2.23,3.48,2.33,4.38,4.09,2.52,5.19,2.39,3.66,2.29,2.88};
         static const double minP[12] = {6.33,2.68,3.52,5.38,2.60,3.53,2.54,4.75,3.98,2.69,3.34,3.17};
         auto corr = [&](const double* p, int rot) {

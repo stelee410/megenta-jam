@@ -3943,3 +3943,115 @@ html[data-theme="famicom"] .pgm .pgm-mini, html[data-theme="famicom"] .pgm .pgm-
   padding: 5px 10px;
   cursor: pointer;
 }
+
+/* PGM cue: transport controls group + waveform marker */
+.pgm-cue { display: inline-flex; align-items: center; gap: 4px; }
+.pgm-cue-marker {
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 2px;
+  background: #75ebc7;
+  box-shadow: 0 0 5px rgba(117, 235, 199, 0.7);
+  pointer-events: none;
+  z-index: 3;
+}
+.pgm-cue-marker::before {
+  content: '◎';
+  position: absolute;
+  top: -2px; left: -5px;
+  font-size: 10px;
+  color: #75ebc7;
+}
+
+/* Piano-roll range marquee (AI rewrite selection) */
+.midiedit-sel {
+  fill: rgba(186, 130, 255, 0.16);
+  stroke: rgba(186, 130, 255, 0.6);
+  stroke-width: 1;
+  pointer-events: none;
+}
+
+.pgm-anchor-marker {
+  position: absolute;
+  top: 0; bottom: 0;
+  width: 2px;
+  background: #f8d35c;
+  box-shadow: 0 0 5px rgba(248, 211, 92, 0.7);
+  pointer-events: none;
+  z-index: 3;
+}
+.pgm-anchor-marker::before {
+  content: '⊙';
+  position: absolute;
+  top: -2px; left: -5px;
+  font-size: 10px;
+  color: #f8d35c;
+}
+
+/* PGM live-input instrument source selector (footer) */
+.pgm-livesrc { display: inline-flex; align-items: center; gap: 6px; }
+.pgm-livesrc-label {
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.4);
+}
+.pgm-livesrc select {
+  appearance: none;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 6px;
+  color: #e8e8ea;
+  font-size: 11px;
+  padding: 4px 9px;
+  cursor: pointer;
+  max-width: 200px;
+}
+
+.pgm-livesrc-knob {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 9px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.5);
+}
+.pgm-livesrc-knob input[type="range"] { width: 46px; height: 3px; accent-color: #75ebc7; }
+
+/* Manual BPM calibration chip */
+.pgm-bpmcal {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: 1px solid rgba(111, 179, 255, 0.4);
+  border-radius: 999px;
+  padding: 2px 6px;
+  color: #6fb3ff;
+  font-size: 11px;
+}
+.pgm-bpmcal button {
+  appearance: none; background: transparent; border: none;
+  color: #6fb3ff; font-size: 11px; cursor: pointer; padding: 0 2px;
+  font-family: "SFMono-Regular", ui-monospace, monospace;
+}
+.pgm-bpmcal input {
+  width: 34px; background: transparent; border: none; color: #e8e8ea;
+  font-size: 12px; text-align: center;
+  font-family: "SFMono-Regular", ui-monospace, monospace;
+  -moz-appearance: textfield;
+}
+.pgm-bpmcal input::-webkit-outer-spin-button,
+.pgm-bpmcal input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.pgm-bpmcal small { color: rgba(255,255,255,0.4); font-size: 9px; }
+
+.pgm-bpmcal .pgm-tap {
+  border: 1px solid rgba(111, 179, 255, 0.4);
+  border-radius: 5px;
+  padding: 1px 0;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  min-width: 46px;        /* fixed so "TAP" / "TAP·3" never shift the button */
+  text-align: center;
+  box-sizing: border-box;
+}

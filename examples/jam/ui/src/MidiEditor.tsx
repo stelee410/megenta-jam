@@ -124,7 +124,7 @@ function snapToChord(
 export function MidiEditor({
   laneName, patchName, notes, chords, keyStr, bpm, duration,
   playPos, playing, onApply, onClose, onSeek, onToggle,
-  onAiCompose, composeBusy, composeError, composeResult, onRegenerate, onAiOptimize,
+  onAiCompose, composeBusy, composeError, composeResult, onRegenerate, onAiOptimize, onAiRange,
 }: {
   laneName: string;
   patchName: string | null;
@@ -142,9 +142,10 @@ export function MidiEditor({
   onAiCompose: (prompt: string, mode: 'all' | 'continue') => void;
   composeBusy: boolean;
   composeError: string | null;
-  composeResult: { seq: number; mode: 'all' | 'continue'; notes: ClipNote[] } | null;
+  composeResult: { seq: number; mode: 'all' | 'continue' | 'range'; notes: ClipNote[] } | null;
   onRegenerate: () => void;
   onAiOptimize: (notes: ClipNote[]) => void;
+  onAiRange: (notes: ClipNote[], startSec: number, endSec: number) => void;
 }) {
   const [clip, setClip] = useState<ClipNote[]>(notes);
   const [sel, setSel] = useState<number | null>(null);
@@ -256,6 +257,19 @@ export function MidiEditor({
     x0: number; y0: number; orig: ClipNote;
   } | null>(null);
 
+  // Range marquee: drag on empty grid to select a time span for AI rewrite.
+  const [selRange, setSelRange] = useState<{ s: number; e: number } | null>(null);
+  const selDragRef = useRef<{ x0: number; rect: DOMRect; moved: boolean } | null>(null);
+  const composeRangeRef = useRef<{ s: number; e: number }>({ s: 0, e: 0 });
+
+  const onSurfaceDown = (e: React.PointerEvent<SVGSVGElement>) => {
+    // Notes/playhead stopPropagation, so this only fires on empty grid.
+    const el = e.currentTarget;
+    el.setPointerCapture(e.pointerId);
+    const rect = el.getBoundingClientRect();
+    selDragRef.current = { x0: e.clientX - rect.left, rect, moved: false };
+  };
+
   const onNoteDown = (e: React.PointerEvent, idx: number) => {
     e.stopPropagation();
     (e.currentTarget as Element).setPointerCapture(e.pointerId);
@@ -269,6 +283,14 @@ export function MidiEditor({
     setSel(idx);
   };
   const onNoteMove = (e: React.PointerEvent) => {
+    const sd = selDragRef.current;
+    if (sd) {
+      const x = e.clientX - sd.rect.left;
+      if (Math.abs(x - sd.x0) > 3) sd.moved = true;
+      const a = Math.min(sd.x0, x), b = Math.max(sd.x0, x);
+      setSelRange({ s: Math.max(0, a / pps), e: b / pps });
+      return;
+    }
     const d = dragRef.current;
     if (!d) return;
     const dx = (e.clientX - d.x0) / pps;
@@ -284,6 +306,12 @@ export function MidiEditor({
     setClip(next);
   };
   const onNoteUp = () => {
+    if (selDragRef.current) {
+      const moved = selDragRef.current.moved;
+      selDragRef.current = null;
+      if (!moved) setSelRange(null);   // a click on empty grid clears the selection
+      return;
+    }
     if (!dragRef.current) return;
     dragRef.current = null;
     scheduleApply(clip);
@@ -427,6 +455,13 @@ export function MidiEditor({
         ...clip.filter(n => n[0] < from),
         ...fresh.filter(n => n[0] >= from - 1e-3),
       ]);
+    } else if (composeResult.mode === 'range') {
+      // Replace only the notes inside the selected span; keep the rest.
+      const { s, e } = composeRangeRef.current;
+      commit([
+        ...clip.filter(n => n[0] < s - 1e-3 || n[0] >= e - 1e-3),
+        ...fresh.filter(n => n[0] >= s - 1e-3 && n[0] < e + 1e-3),
+      ].sort((a, b) => a[0] - b[0]));
     } else {
       commit(fresh);
     }
@@ -522,6 +557,15 @@ export function MidiEditor({
               title="AI 优化：交给模型清理这段转录 — 修时值、断音整理成连贯乐句、贴合曲风（保留原意）">
               {composeBusy ? '✨ …' : '✨ AI优化'}
             </button>
+            {selRange && selRange.e > selRange.s && (
+              <button
+                className="is-ai"
+                onClick={() => { composeRangeRef.current = selRange; onAiRange(clip, selRange.s, selRange.e); }}
+                disabled={composeBusy}
+                title="AI 改写选区：只重写框选范围内的音符，参考选区前后的乐句与和弦保持连贯">
+                {composeBusy ? '✨ …' : `✨ 改写选区 ${mmss(selRange.s)}–${mmss(selRange.e)}`}
+              </button>
+            )}
             <button onClick={onClose} title="关闭（Esc）">✕</button>
           </div>
         </div>
@@ -556,6 +600,7 @@ export function MidiEditor({
               width={W} height={svgH}
               className="midiedit-svg"
               onDoubleClick={onGridDouble}
+              onPointerDown={onSurfaceDown}
               onPointerMove={onNoteMove}
               onPointerUp={onNoteUp}
             >
@@ -610,6 +655,12 @@ export function MidiEditor({
                   />
                 );
               })}
+              {/* Range marquee (drag on empty grid → AI rewrite span) */}
+              {selRange && selRange.e > selRange.s && (
+                <rect className="midiedit-sel"
+                      x={selRange.s * pps} y={chordH}
+                      width={(selRange.e - selRange.s) * pps} height={svgH - chordH} />
+              )}
               {/* Playhead: draggable scrubber (wide invisible grab strip) */}
               <g
                 className="midiedit-ph"

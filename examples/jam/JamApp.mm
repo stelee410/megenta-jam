@@ -630,6 +630,52 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
         shared->synth.render(outL, outR, frameCount,
                              shared->fxTempo.load(std::memory_order_relaxed));
 
+        // PGM live MIDI-input SF2 source: drain queued note events into the
+        // live tsf instance and mix its render in. (Built-in synth source uses
+        // the path above.)
+        {
+            tsf* lsf = (tsf*)shared->liveSf.load(std::memory_order_acquire);
+            const int src = shared->liveSource.load(std::memory_order_relaxed);
+            if (lsf) {
+                // Flush held SF2 notes when switching away from the SF2 source.
+                if (src != shared->liveSourceSeen) {
+                    if (src != 1) {
+                        for (int nn = 0; nn < 128; ++nn)
+                            if (shared->liveHeld[nn]) { tsf_channel_note_off(lsf, 0, nn);
+                                                        shared->liveHeld[nn] = false; }
+                    }
+                    shared->liveSourceSeen = src;
+                }
+                int r = shared->liveEvR.load(std::memory_order_relaxed);
+                while (r != shared->liveEvW.load(std::memory_order_acquire)) {
+                    const auto ev = shared->liveEv[r];
+                    r = (r + 1) & 255;
+                    if (ev.on) { tsf_channel_note_on(lsf, 0, ev.note, ev.vel / 127.0f);
+                                 shared->liveHeld[ev.note] = true; }
+                    else { tsf_channel_note_off(lsf, 0, ev.note);
+                           shared->liveHeld[ev.note] = false; }
+                }
+                shared->liveEvR.store(r, std::memory_order_release);
+                if (src == 1 && frameCount <= (AVAudioFrameCount)JamSharedState::kLaneBlockMax) {
+                    const int prog = shared->liveSfProgram.load(std::memory_order_relaxed);
+                    if (prog != shared->liveSfProgApplied) {
+                        tsf_channel_set_presetnumber(lsf, 0, prog, 0);
+                        shared->liveSfProgApplied = prog;
+                    }
+                    tsf_render_float(lsf, shared->laneSfTmp, (int)frameCount, 0);
+                    // Per-source reverb + echo on the unweaved [L..][R..] halves.
+                    shared->liveFx.process(shared->laneSfTmp,
+                                           shared->laneSfTmp + frameCount, (int)frameCount,
+                                           shared->stemBpm.load(std::memory_order_relaxed));
+                    const float g = shared->liveGain.load(std::memory_order_relaxed) * 1.8f;
+                    for (AVAudioFrameCount i = 0; i < frameCount; ++i) {
+                        outL[i] += shared->laneSfTmp[i] * g;
+                        outR[i] += shared->laneSfTmp[frameCount + i] * g;
+                    }
+                }
+            }
+        }
+
         shared->processPerformanceFX(outL, outR, frameCount);
 
         // PGM studio preview player: dry one-shot playback (post-FX) of an
@@ -649,33 +695,41 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
             }
         }
 
-        // Count-in (预备拍): play N click beats before the transport rolls.
-        // While samples remain, the sequencer and mixer below stay idle.
+        // Count-in (预备拍): back-calculated pre-roll on the click grid. The
+        // transport rolls back as far as there's room (continuous playback,
+        // plays any pickup audio); the remaining beats with no room before the
+        // entry are a FROZEN click pre-roll, swept on the same grid so it flows
+        // seamlessly into the rolled-back/real clicks. Always N beats.
         {
-            long ci = shared->countInLeft.load(std::memory_order_relaxed);
-            if (ci > 0 && shared->stemActive.load(std::memory_order_relaxed)) {
+            long left = shared->countInLeft.load(std::memory_order_relaxed);
+            if (left > 0 && shared->stemActive.load(std::memory_order_relaxed)) {
                 const float bpm = shared->stemBpm.load(std::memory_order_relaxed);
                 const long B = (long)(60.0 / ((bpm < 40 || bpm > 300) ? 120.0 : bpm)
                                       * 48000.0);
-                const long total = shared->countInTotal.load(std::memory_order_relaxed);
-                for (AVAudioFrameCount i = 0; i < frameCount && ci > 0; ++i, --ci) {
-                    const long played = total - ci;
-                    if (played % B == 0) {
+                const long beatOff = shared->stemBeatOff.load(std::memory_order_relaxed);
+                const int barPh = shared->stemBarPhase.load(std::memory_order_relaxed);
+                const int bpb = shared->beatsPerBar.load(std::memory_order_relaxed);
+                long v = shared->countInVPos.load(std::memory_order_relaxed);
+                for (AVAudioFrameCount i = 0; i < frameCount && left > 0; ++i, --left, ++v) {
+                    const long rel = v - beatOff;
+                    const long m = ((rel % B) + B) % B;
+                    if (m == 0) {
+                        const long bi = (rel - m) / B;
+                        const int phase = (int)(((bi % bpb) + bpb) % bpb);
                         shared->clickEnv = 1.0f;
                         shared->clickPhase = 0.0f;
-                        // Accent the first beat of each group of 4.
-                        shared->clickFreq = ((played / B) % 4 == 0) ? 1760.0f : 1175.0f;
+                        shared->clickFreq = (phase == barPh) ? 1760.0f : 1175.0f;
                     }
                     if (shared->clickEnv > 0.0005f) {
                         shared->clickPhase += shared->clickFreq / 48000.0f;
                         if (shared->clickPhase >= 1.0f) shared->clickPhase -= 1.0f;
-                        const float c = sinf(shared->clickPhase * 2.0f * (float)M_PI)
-                                        * shared->clickEnv * 0.5f;
-                        shared->clickEnv *= 0.9988f;   // ~25 ms decay
-                        shared->clickBus[i] += c;
+                        shared->clickBus[i] += sinf(shared->clickPhase * 2.0f * (float)M_PI)
+                                               * shared->clickEnv * 0.5f;
+                        shared->clickEnv *= 0.9988f;
                     }
                 }
-                shared->countInLeft.store(ci, std::memory_order_relaxed);
+                shared->countInVPos.store(v, std::memory_order_relaxed);
+                shared->countInLeft.store(left, std::memory_order_relaxed);
             }
         }
 
@@ -807,12 +861,16 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
             }
             if (len > 0 && shared->stemActive.load(std::memory_order_relaxed) &&
                 shared->countInLeft.load(std::memory_order_relaxed) <= 0) {
-                const bool click = shared->clickOn.load(std::memory_order_relaxed);
+                // Click during normal playback (clickOn) OR through the rolled-
+                // back count-in region (pos before the cue), on the same grid.
+                const long ciUntil = shared->countInUntil.load(std::memory_order_relaxed);
+                const bool clickToggle = shared->clickOn.load(std::memory_order_relaxed);
                 const float bpmC = shared->stemBpm.load(std::memory_order_relaxed);
                 const long B = (long)(60.0 / ((bpmC < 40 || bpmC > 300) ? 120.0 : bpmC)
                                       * 48000.0);
                 const long beatOff = shared->stemBeatOff.load(std::memory_order_relaxed);
                 const int barPh = shared->stemBarPhase.load(std::memory_order_relaxed);
+                const int bpb = shared->beatsPerBar.load(std::memory_order_relaxed);
                 long pos = shared->stemPos.load(std::memory_order_relaxed);
                 for (AVAudioFrameCount i = 0; i < frameCount && pos < len; ++i, ++pos) {
                     float l = 0.0f, r = 0.0f;
@@ -825,13 +883,19 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                             r += bufs[t][pos * 2 + 1] * g * (0.9f / 32768.0f);
                         }
                     }
+                    const bool click = clickToggle || (ciUntil >= 0 && pos < ciUntil);
                     if (click) {
+                        // Beats are derived from the anchor (cue/first-beat) in
+                        // BOTH directions, so the metronome ticks through the
+                        // lead-in and the downbeat "1" lands exactly on it.
                         const long rel = pos - beatOff;
-                        if (rel >= 0 && rel % B == 0) {
+                        const long m = ((rel % B) + B) % B;
+                        if (m == 0) {
+                            const long bi = (rel - m) / B;     // beat index (may be <0)
+                            const int phase = (int)(((bi % bpb) + bpb) % bpb);
                             shared->clickEnv = 1.0f;
                             shared->clickPhase = 0.0f;
-                            shared->clickFreq =
-                                ((rel / B) % 4 == barPh) ? 1760.0f : 1175.0f;
+                            shared->clickFreq = (phase == barPh) ? 1760.0f : 1175.0f;
                         }
                         if (shared->clickEnv > 0.0005f) {
                             shared->clickPhase += shared->clickFreq / 48000.0f;
@@ -1024,13 +1088,13 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                         const bool toEngine =
                             (jamActive && !synthActive) || (synthActive && follow);
                         if (statusNibble == 0x90 && velocity > 0) {
-                            if (toSynth) shared->synth.pushNote(note, velocity, true);
+                            if (toSynth) shared->routeLiveNote(note, velocity, true);
                             if (toEngine) { engine->set_note_on(note); shared->noteOn(note); }
                         } else if (statusNibble == 0x80 || (statusNibble == 0x90 && velocity == 0)) {
                             // Note-offs always reach the synth too, so keys
                             // released after a tab switch never leave stale
                             // held notes (harmless when the note is unknown).
-                            shared->synth.pushNote(note, 0, false);
+                            shared->routeLiveNote(note, 0, false);
                             if (toEngine) {
                                 engine->set_note_off(note);
                                 shared->noteOff(note);
@@ -1073,13 +1137,13 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                         const bool toEngine =
                             (jamActive && !synthActive) || (synthActive && follow);
                         if (statusNibble == 0x90 && velocity > 0) {
-                            if (toSynth) shared->synth.pushNote(note, velocity, true);
+                            if (toSynth) shared->routeLiveNote(note, velocity, true);
                             if (toEngine) { engine->set_note_on(note); shared->noteOn(note); }
                         } else if (statusNibble == 0x80 || (statusNibble == 0x90 && velocity == 0)) {
                             // Note-offs always reach the synth too, so keys
                             // released after a tab switch never leave stale
                             // held notes (harmless when the note is unknown).
-                            shared->synth.pushNote(note, 0, false);
+                            shared->routeLiveNote(note, 0, false);
                             if (toEngine) {
                                 engine->set_note_off(note);
                                 shared->noteOff(note);
