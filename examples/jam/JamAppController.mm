@@ -29,6 +29,10 @@
 #import "JamStudio.h"
 #import "JamSeparate.h"
 #import "JamTranscribe.h"
+#import "JamTranscribePiano.h"
+#import "JamRoformer.h"
+
+static BOOL JamWriteWav(NSURL* url, const int16_t* interleaved, long frames);
 #import "JamChords.h"
 #define TSF_IMPLEMENTATION
 #include "vendor/tsf/tsf.h"
@@ -711,6 +715,12 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
             [self studioPushLanes];
         }
     }
+    else if ([type isEqualToString:@"laneRegen"]) {
+        NSNumber* idx = body[@"index"];
+        if ([idx isKindOfClass:[NSNumber class]]) {
+            [self handleLaneRegen:idx.intValue];
+        }
+    }
     else if ([type isEqualToString:@"laneClear"]) {
         NSNumber* idx = body[@"index"];
         if ([idx isKindOfClass:[NSNumber class]]) {
@@ -1253,7 +1263,14 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
     else if ([type isEqualToString:@"uiReady"]) {
         dispatch_async(dispatch_get_main_queue(), ^{
             [self connectToEngine];
+            [self studioPushSepPipeline];
         });
+    }
+    else if ([type isEqualToString:@"sepPipeline"]) {
+        NSString* mode = body[@"mode"];
+        if ([mode isKindOfClass:[NSString class]]) {
+            [self handleSepPipeline:mode];
+        }
     }
 }
 
@@ -1816,15 +1833,117 @@ static NSString* const kJamKeyNames[12] = {@"C", @"C#", @"D", @"D#", @"E", @"F",
     const long n = (long)_songL.size();
     NSString* sepPath = [self sepModelPath];
     BOOL neural = NO;
+    BOOL usedRf = NO;
     int nSources = 3;
-    if (JamDemucsAvailable(sepPath)) {
-        [self studioProgress:@"separating (neural htdemucs)" pct:0.02f];
+
+    // Stage A (optional, model-gated): BS-RoFormer vocals — SOTA vocal
+    // isolation. The instrumental (mix − vocals) then goes to htdemucs,
+    // which separates the rest cleaner without vocal interference.
+    NSString* pipeline = [self sepPipeline];
+    NSString* rfPath = [self rfModelPath];
+    const BOOL rfOnly = [pipeline isEqualToString:@"rf2"];
+    const BOOL wantDemucs = !rfOnly && ![pipeline isEqualToString:@"hpss"];
+    const BOOL wantRf = [pipeline isEqualToString:@"rf"] ||
+        ([pipeline isEqualToString:@"auto"] &&
+         [[NSFileManager defaultManager] fileExistsAtPath:rfPath]);
+
+    // RF-only 2-stem pipeline: vocals + instrumental, no demucs pass.
+    if (rfOnly) {
+        if (![[NSFileManager defaultManager] fileExistsAtPath:rfPath]) {
+            [self studioFail:@"BS-RoFormer 模型未下载（在管线菜单重新选择以下载）"];
+            return;
+        }
+        [self studioProgress:@"separating (BS-RoFormer 2-stem)" pct:0.01f];
+        NSString* rfErr = nil;
+        std::vector<float> vL, vR;
+        if (!JamRoformerVocals(rfPath, _songL.data(), _songR.data(), n, vL, vR,
+                               ^(float p) { [self studioProgress:@"separating (BS-RoFormer 2-stem)"
+                                                             pct:0.01f + p * 0.95f]; },
+                               &rfErr)) {
+            [self studioFail:rfErr ?: @"BS-RoFormer separation failed"];
+            return;
+        }
+        for (int i = 0; i < 8; ++i) {
+            if (i < 6) _stems[i].clear();
+            _takeL[i].clear();
+            _takeR[i].clear();
+            _stemNotes[i].clear();
+        }
+        _stems[3].assign(n * 2, 0);    // vocals
+        _stems[2].assign(n * 2, 0);    // other = instrumental
+        for (long i = 0; i < n; ++i) {
+            const float vl = vL[i] * 32767.0f, vr = vR[i] * 32767.0f;
+            const float ol = (_songL[i] - vL[i]) * 32767.0f;
+            const float orr = (_songR[i] - vR[i]) * 32767.0f;
+            _stems[3][i * 2] = (int16_t)MAX(-32768.0f, MIN(32767.0f, vl));
+            _stems[3][i * 2 + 1] = (int16_t)MAX(-32768.0f, MIN(32767.0f, vr));
+            _stems[2][i * 2] = (int16_t)MAX(-32768.0f, MIN(32767.0f, ol));
+            _stems[2][i * 2 + 1] = (int16_t)MAX(-32768.0f, MIN(32767.0f, orr));
+        }
+        _stemSource[2] = _stemSource[3] = @"neural";
+        for (int i : {0, 1, 4, 5}) _stemSource[i] = nil;
+        [self studioRefineBeatGridFromDrums];   // no drums → keeps song grid
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self studioPushStemWaves];
+            [self sendStateUpdate:@{@"studioSepEngine": @"BS-RoFormer"}];
+            [self studioPublishStems];
+            self->_studioBusy = NO;
+            [self studioProgress:@"ready" pct:1.0f];
+        });
+        return;
+    }
+    std::vector<float> rfVocL, rfVocR;
+    NSURL* demucsURL = _songURL;
+    NSURL* rfTmpURL = nil;
+    if (wantRf &&
+        [[NSFileManager defaultManager] fileExistsAtPath:rfPath] &&
+        JamDemucsAvailable(sepPath)) {
+        [self studioProgress:@"separating vocals (BS-RoFormer)" pct:0.01f];
+        NSString* rfErr = nil;
+        if (JamRoformerVocals(rfPath, _songL.data(), _songR.data(), n,
+                              rfVocL, rfVocR,
+                              ^(float p) { [self studioProgress:@"separating vocals (BS-RoFormer)"
+                                                            pct:0.01f + p * 0.55f]; },
+                              &rfErr)) {
+            // Write the instrumental to a temp wav for demucs.
+            std::vector<int16_t> inst(n * 2);
+            for (long i = 0; i < n; ++i) {
+                const float l = (_songL[i] - rfVocL[i]) * 32767.0f;
+                const float r = (_songR[i] - rfVocR[i]) * 32767.0f;
+                inst[i * 2] = (int16_t)MAX(-32768.0f, MIN(32767.0f, l));
+                inst[i * 2 + 1] = (int16_t)MAX(-32768.0f, MIN(32767.0f, r));
+            }
+            rfTmpURL = [NSURL fileURLWithPath:
+                [NSTemporaryDirectory() stringByAppendingPathComponent:@"jam_rf_inst.wav"]];
+            if (JamWriteWav(rfTmpURL, inst.data(), n)) {
+                demucsURL = rfTmpURL;
+                usedRf = YES;
+            }
+        } else {
+            NSLog(@"Jam studio: BS-RoFormer failed (%@) — plain htdemucs", rfErr);
+        }
+    }
+
+    if (wantDemucs && JamDemucsAvailable(sepPath)) {
+        const float base = usedRf ? 0.56f : 0.02f;
+        const float span = usedRf ? 0.42f : 0.96f;
+        [self studioProgress:@"separating (neural htdemucs)" pct:base];
         NSString* err = nil;
-        neural = JamDemucsSeparate(sepPath, _songURL, _stems, &nSources,
+        neural = JamDemucsSeparate(sepPath, demucsURL, _stems, &nSources,
                                    ^(float p) { [self studioProgress:@"separating (neural htdemucs)"
-                                                                 pct:0.02f + p * 0.96f]; },
+                                                                 pct:base + p * span]; },
                                    &err);
         if (!neural) NSLog(@"Jam studio: neural separation failed (%@) — falling back to HPSS", err);
+        if (neural && usedRf) {
+            // Replace the vocals stem with the RoFormer extraction.
+            _stems[3].assign(n * 2, 0);
+            for (long i = 0; i < n; ++i) {
+                const float l = rfVocL[i] * 32767.0f, r = rfVocR[i] * 32767.0f;
+                _stems[3][i * 2] = (int16_t)MAX(-32768.0f, MIN(32767.0f, l));
+                _stems[3][i * 2 + 1] = (int16_t)MAX(-32768.0f, MIN(32767.0f, r));
+            }
+        }
+        if (rfTmpURL) [[NSFileManager defaultManager] removeItemAtURL:rfTmpURL error:nil];
     }
     if (!neural) {
         [self studioProgress:@"separating (fast hpss)" pct:0.05f];
@@ -1845,9 +1964,11 @@ static NSString* const kJamKeyNames[12] = {@"C", @"C#", @"D", @"D#", @"E", @"F",
     [self studioRefineBeatGridFromDrums];
 
     const BOOL isNeural = neural;
+    const BOOL isRf = usedRf && neural;
     dispatch_async(dispatch_get_main_queue(), ^{
         [self studioPushStemWaves];
-        [self sendStateUpdate:@{@"studioSepEngine": isNeural ? @"htdemucs" : @"hpss"}];
+        [self sendStateUpdate:@{@"studioSepEngine":
+            isRf ? @"htdemucs+RF" : (isNeural ? @"htdemucs" : @"hpss")}];
         [self studioPublishStems];
         self->_studioBusy = NO;
         [self studioProgress:@"ready" pct:1.0f];
@@ -2043,18 +2164,45 @@ static NSString* const kBpModelURL =
         [task resume];
         return;
     }
+    // Piano stem: prefer the piano-specialized high-resolution CRNN
+    // (ByteDance/Kong 2020 — onset F1 96.7% on MAESTRO vs Basic Pitch's
+    // general-purpose model) when its ONNX export is present.
+    NSString* pianoModel =
+        [[self sepModelDir] stringByAppendingPathComponent:@"piano_crnn.onnx"];
+    const BOOL usePiano = (idx == 5) &&
+        [[NSFileManager defaultManager] fileExistsAtPath:pianoModel];
+
     _studioBusy = YES;
-    [self studioProgress:@"transcribing" pct:0.02f];
+    [self studioProgress:(usePiano ? @"transcribing (piano hi-res)" : @"transcribing")
+                     pct:0.02f];
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         NSString* err = nil;
         std::vector<JamNote> notes;
-        const BOOL ok = JamTranscribe(model,
-                                      self->_stems[idx].data(),
-                                      (long)self->_stems[idx].size() / 2,
-                                      notes,
-                                      ^(float p) { [self studioProgress:@"transcribing"
-                                                                    pct:0.02f + p * 0.95f]; },
-                                      &err);
+        BOOL ok;
+        if (usePiano) {
+            ok = JamTranscribePiano(pianoModel,
+                                    self->_stems[idx].data(),
+                                    (long)self->_stems[idx].size() / 2,
+                                    notes,
+                                    ^(float p) { [self studioProgress:@"transcribing (piano hi-res)"
+                                                                  pct:0.02f + p * 0.95f]; },
+                                    &err);
+            if (!ok) {
+                NSLog(@"Jam studio: piano model failed (%@) — falling back to Basic Pitch", err);
+            }
+        } else {
+            ok = NO;
+        }
+        if (!ok) {
+            err = nil;
+            ok = JamTranscribe(model,
+                               self->_stems[idx].data(),
+                               (long)self->_stems[idx].size() / 2,
+                               notes,
+                               ^(float p) { [self studioProgress:@"transcribing"
+                                                             pct:0.02f + p * 0.95f]; },
+                               &err);
+        }
         dispatch_async(dispatch_get_main_queue(), ^{
             if (!ok) {
                 [self studioFail:err ?: @"transcription failed"];
@@ -2062,6 +2210,11 @@ static NSString* const kBpModelURL =
             }
             self->_stemNotes[idx] = std::move(notes);
             [self studioPushNotes:idx];
+            if (usePiano) {
+                [self sendStateUpdate:@{@"studioNotice":
+                    [NSString stringWithFormat:@"✓ 钢琴高精度转写：%d 个音符",
+                     (int)self->_stemNotes[idx].size()]}];
+            }
             // If this lane already plays MIDI (e.g. a chord-voiced fallback),
             // swap in the fresh transcription.
             if (idx >= 1 && idx <= 7 && !self->_laneEvBuf[idx].empty()) {
@@ -2289,6 +2442,26 @@ static int JamLaneDefaultStyle(int stem) {
     }
     sh->stemSource[stem].store(midi ? 1 : 0, std::memory_order_relaxed);
     [self studioPushSources];
+}
+
+// Regenerate a lane's MIDI from its source: re-transcribe the stem audio,
+// or re-voice from the chord chart (audio-less lanes). Overwrites the clip —
+// the escape hatch after an over-aggressive ✨ 优化.
+- (void)handleLaneRegen:(int)stem {
+    if (stem < 1 || stem > 7) return;
+    if (!_stems[stem].empty()) {
+        [self handleStudioTranscribe:stem];   // async; UI refetches the clip
+        return;
+    }
+    if (stem <= 5 && !_chords.empty()) {
+        _stemNotes[stem].clear();
+        if ([self lanePublish:stem]) {
+            [self handleLaneClipGet:stem];
+            return;
+        }
+    }
+    [self sendStateUpdate:@{@"studioError":
+        @"无音频也无和弦表，无法重新生成（AUX 轨可用 ✨ AI 重写）"}];
 }
 
 // Remove an AUX lane's content entirely (audio + MIDI + patch).
@@ -2904,6 +3077,76 @@ static NSString* const kSepModelURL =
     _sepRetries = 0;
     _sepResumeData = nil;
     [self sepStartDownload];
+}
+
+// ── Separation pipeline selection (auto / hpss / demucs / rf) ──
+
+static NSString* const kRfModelURL =
+    @"https://huggingface.co/bgkb/bs_polarformer/resolve/main/bs_polarformer.onnx";
+
+- (NSString*)rfModelPath {
+    return [[self sepModelDir] stringByAppendingPathComponent:@"bs_polarformer.onnx"];
+}
+
+- (NSString*)sepPipeline {
+    NSString* m = [[NSUserDefaults standardUserDefaults] stringForKey:@"Jam_SepPipeline"];
+    return ([@[@"auto", @"hpss", @"demucs", @"rf", @"rf2"] containsObject:m]) ? m : @"auto";
+}
+
+- (void)handleSepPipeline:(NSString*)mode {
+    if (![@[@"auto", @"hpss", @"demucs", @"rf", @"rf2"] containsObject:mode]) return;
+    [[NSUserDefaults standardUserDefaults] setObject:mode forKey:@"Jam_SepPipeline"];
+    [self studioPushSepPipeline];
+    // Selecting RF with no model on disk: fetch it (~201 MB).
+    if (([mode isEqualToString:@"rf"] || [mode isEqualToString:@"rf2"]) &&
+        ![[NSFileManager defaultManager] fileExistsAtPath:[self rfModelPath]] &&
+        !_sfBusy) {
+        [self rfModelDownload];
+    }
+}
+
+- (void)studioPushSepPipeline {
+    [self sendStateUpdate:@{@"studioSepPipeline": @{
+        @"mode": [self sepPipeline],
+        @"rfPresent": @([[NSFileManager defaultManager]
+                            fileExistsAtPath:[self rfModelPath]]),
+    }}];
+}
+
+- (void)rfModelDownload {
+    NSString* path = [self rfModelPath];
+    [self studioProgress:@"downloading BS-RoFormer (201MB)" pct:0.02f];
+    NSURLSessionDownloadTask* task = [[NSURLSession sharedSession]
+        downloadTaskWithURL:[NSURL URLWithString:kRfModelURL]
+          completionHandler:^(NSURL* loc, NSURLResponse* resp, NSError* err) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (err || !loc) {
+                    [self sendStateUpdate:@{@"studioError":
+                        [NSString stringWithFormat:@"BS-RoFormer 下载失败: %@",
+                         err.localizedDescription ?: @"no data"]}];
+                    [self studioProgress:@"ready" pct:1.0f];
+                    return;
+                }
+                [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+                [[NSFileManager defaultManager]
+                    moveItemAtURL:loc toURL:[NSURL fileURLWithPath:path] error:nil];
+                [self studioProgress:@"ready" pct:1.0f];
+                [self sendStateUpdate:@{@"studioNotice": @"✓ BS-RoFormer 模型就绪"}];
+                [self studioPushSepPipeline];
+            });
+        }];
+    [task resume];
+    __weak NSURLSessionDownloadTask* wTask = task;
+    [NSTimer scheduledTimerWithTimeInterval:0.3 repeats:YES block:^(NSTimer* t) {
+        NSURLSessionDownloadTask* st = wTask;
+        if (!st || st.state != NSURLSessionTaskStateRunning) { [t invalidate]; return; }
+        const int64_t got = st.countOfBytesReceived;
+        const int64_t want = st.countOfBytesExpectedToReceive;
+        if (want > 0) {
+            [self studioProgress:@"downloading BS-RoFormer (201MB)"
+                             pct:0.02f + 0.95f * (float)got / (float)want];
+        }
+    }];
 }
 
 // Resume-capable download with a stall watchdog: if no bytes arrive for 20 s

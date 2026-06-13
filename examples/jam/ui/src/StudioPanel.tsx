@@ -62,6 +62,8 @@ export interface StudioState {
   chords: Array<{ start: number; end: number; label: string; none?: boolean }>;
   mixer: { mute: boolean; solo: boolean; gain: number }[];
   playhead: { pos: number; len: number };
+  sepPipeline: 'auto' | 'hpss' | 'demucs' | 'rf' | 'rf2';   // separation pipeline
+  rfPresent: boolean;         // BS-RoFormer model on disk
   countIn: 0 | 4 | 8;         // 预备拍 beats before playback
   click: boolean;             // metronome during playback
   outChannels: number;        // device output channel count
@@ -90,6 +92,7 @@ export const STUDIO_INIT: StudioState = {
   chords: [],
   mixer: Array.from({ length: 8 }, () => ({ mute: false, solo: false, gain: 1 })),
   playhead: { pos: 0, len: 0 },
+  sepPipeline: 'auto', rfPresent: false,
   countIn: 0, click: false,
   outChannels: 2, routeMain: 0x3, routeClick: 0x3,
   sepEngine: '', sepModel: { present: false, sources: 0, downloading: false, pct: 0, mb: 0 },
@@ -172,6 +175,7 @@ export function StudioPanel({
   onLoadSong,
   onLoadPgm,
   onSeparate,
+  onSepPipeline,
   onSongToggle,
   onTransport,
   onCountIn,
@@ -199,6 +203,7 @@ export function StudioPanel({
   composeBusy,
   composeError,
   composeResult,
+  onClipRegen,
   onPackage,
   onSepDownload,
   onSepPick,
@@ -207,6 +212,7 @@ export function StudioPanel({
   onLoadSong: () => void;
   onLoadPgm: () => void;
   onSeparate: () => void;
+  onSepPipeline: (mode: 'auto' | 'hpss' | 'demucs' | 'rf' | 'rf2') => void;
   onSongToggle: (on: boolean) => void;
   onTransport: (action: 'play' | 'pause' | 'restart') => void;
   onCountIn: (beats: 0 | 4 | 8) => void;
@@ -234,6 +240,7 @@ export function StudioPanel({
   composeBusy: boolean;
   composeError: string | null;
   composeResult: { seq: number; mode: 'all' | 'continue'; notes: ClipNote[] } | null;
+  onClipRegen: (idx: number) => void;
   onPackage: () => void;
   onSepDownload: () => void;
   onSepPick: () => void;
@@ -343,6 +350,21 @@ export function StudioPanel({
           >
             ⬇ Load PGM
           </button>
+          {s.loaded && (
+            <select
+              className="pgm-pipeline"
+              value={s.sepPipeline}
+              disabled={s.busy}
+              onChange={(e) => onSepPipeline(e.target.value as any)}
+              title={'分轨管线：\n自动 = 装了什么用什么（RF 模型在则启用 HQ）\n快速 = HPSS（秒级，3 轨）\nhtdemucs = 神经网络 6 轨\n+RF人声HQ = BS-RoFormer 先提人声再 htdemucs（最干净，约 1.5× 歌曲时长' + (s.rfPresent ? '' : '；首次选择自动下载 201MB') + '）'}
+            >
+              <option value="auto">管线: 自动</option>
+              <option value="hpss">管线: 快速 HPSS</option>
+              <option value="demucs">管线: htdemucs</option>
+              <option value="rf">管线: +RF人声 HQ{s.rfPresent ? '' : ' ⬇'}</option>
+              <option value="rf2">管线: RF 纯2轨{s.rfPresent ? '' : ' ⬇'}</option>
+            </select>
+          )}
           {s.loaded && (
             <button
               className="freak-soft is-lit"
@@ -841,6 +863,7 @@ export function StudioPanel({
           composeBusy={composeBusy}
           composeError={composeError}
           composeResult={composeResult}
+          onRegenerate={() => onClipRegen(clip.index)}
         />
       )}
     </div>

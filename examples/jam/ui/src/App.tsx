@@ -557,6 +557,9 @@ function App() {
   } | null>(null);
   const composeModeRef = useRef<'all' | 'continue'>('all');
   const composeSeqRef = useRef(0);
+  // Lane whose clip regeneration is pending (refetch the open editor's clip
+  // when its transcription lands; editor-originated edits must NOT refetch).
+  const clipRegenPendingRef = useRef<number | null>(null);
   const [composeError, setComposeError] = useState<string | null>(null);
   const requestAiPatch = useCallback((desc: string) => {
     setAiPatchBusy(true);
@@ -2065,6 +2068,15 @@ function App() {
           })),
         }));
       }
+      if (state.studioSepPipeline && typeof state.studioSepPipeline === 'object') {
+        const sp = state.studioSepPipeline;
+        setStudio(st => ({
+          ...st,
+          sepPipeline: ['auto', 'hpss', 'demucs', 'rf', 'rf2'].includes(sp.mode)
+            ? sp.mode : st.sepPipeline,
+          rfPresent: !!sp.rfPresent,
+        }));
+      }
       if (typeof state.studioSepEngine === 'string') {
         const eng = state.studioSepEngine;
         setStudio(st => ({ ...st, sepEngine: eng }));
@@ -2107,6 +2119,11 @@ function App() {
       }
       if (state.studioNotes && typeof state.studioNotes === 'object') {
         const { index, count, ribbon } = state.studioNotes;
+        if (clipRegenPendingRef.current === Number(index) &&
+            studioClipRef.current?.index === Number(index)) {
+          clipRegenPendingRef.current = null;
+          post({ type: 'laneClipGet', index: Number(index) });
+        }
         setStudio(st => ({
           ...st,
           stems: st.stems.map((x, i) =>
@@ -2684,6 +2701,10 @@ function App() {
             onLoadSong={() => post({ type: 'studioLoadSong' })}
             onLoadPgm={() => post({ type: 'studioLoadPgm' })}
             onSeparate={() => post({ type: 'studioSeparate' })}
+            onSepPipeline={(mode) => {
+              setStudio(st => ({ ...st, sepPipeline: mode }));
+              post({ type: 'sepPipeline', mode });
+            }}
             onSongToggle={studioSongToggle}
             onTransport={studioTransport}
             onCountIn={(beats) => {
@@ -2786,6 +2807,10 @@ function App() {
               post({ type: 'laneClipSet', index: idx, notes });
             }}
             onClipClose={() => setStudioClip(null)}
+            onClipRegen={(idx) => {
+              clipRegenPendingRef.current = idx;
+              post({ type: 'laneRegen', index: idx });
+            }}
             onClipAiCompose={(idx, prompt, mode) => {
               const st = studioRef.current;
               const beat = 60 / Math.max(40, st.bpm || 120);

@@ -3931,3 +3931,15 @@ html[data-theme="famicom"] .pgm .pgm-mini, html[data-theme="famicom"] .pgm .pgm-
   line-height: 1.6;
   color: rgba(255, 255, 255, 0.4);
 }
+
+/* Separation pipeline picker */
+.pgm-pipeline {
+  appearance: none;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 7px;
+  color: #e8e8ea;
+  font-size: 11px;
+  padding: 5px 10px;
+  cursor: pointer;
+}

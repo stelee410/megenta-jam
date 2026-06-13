@@ -124,7 +124,7 @@ function snapToChord(
 export function MidiEditor({
   laneName, patchName, notes, chords, keyStr, bpm, duration,
   playPos, playing, onApply, onClose, onSeek, onToggle,
-  onAiCompose, composeBusy, composeError, composeResult,
+  onAiCompose, composeBusy, composeError, composeResult, onRegenerate,
 }: {
   laneName: string;
   patchName: string | null;
@@ -143,6 +143,7 @@ export function MidiEditor({
   composeBusy: boolean;
   composeError: string | null;
   composeResult: { seq: number; mode: 'all' | 'continue'; notes: ClipNote[] } | null;
+  onRegenerate: () => void;
 }) {
   const [clip, setClip] = useState<ClipNote[]>(notes);
   const [sel, setSel] = useState<number | null>(null);
@@ -301,20 +302,46 @@ export function MidiEditor({
   const [optReport, setOptReport] = useState<string | null>(null);
   const optimize = () => {
     pushUndo();
-    let dropped = 0, snapped = 0, quantized = 0;
-    let next: ClipNote[] = clip
-      .filter(([, dur]) => { const ok = dur >= 0.06; if (!ok) dropped++; return ok; })
-      .map(([s, d, p, v]) => {
-        const qs = Math.round(s / grid) * grid;
-        const qd = Math.max(grid * 0.5, Math.round(d / grid) * grid);
-        if (Math.abs(qs - s) > 1e-4 || Math.abs(qd - d) > 1e-4) quantized++;
-        let np = p;
-        if (harmony(qs, qd, p) === 'off') {
-          np = snapToChord(chords, keyStr, qs, qd, p);
-          if (np !== p) snapped++;
-        }
-        return [qs, qd, np, v] as ClipNote;
-      })
+    let dropped = 0, snapped = 0, quantized = 0, arpKept = 0;
+    const grid32 = grid / 2;
+    // Pass 1: drop crumbs, snap dissonant pitches, quantize onsets to 1/16.
+    type Tmp = { qs: number; orig: number; d: number; p: number; v: number };
+    const tmp: Tmp[] = [];
+    for (const [s, d, p, v] of clip) {
+      if (d < 0.06) { dropped++; continue; }
+      const qs = Math.round(s / grid) * grid;
+      const qd = Math.max(grid * 0.5, Math.round(d / grid) * grid);
+      if (Math.abs(qs - s) > 1e-4 || Math.abs(qd - d) > 1e-4) quantized++;
+      let np = p;
+      if (harmony(qs, qd, p) === 'off') {
+        np = snapToChord(chords, keyStr, qs, qd, p);
+        if (np !== p) snapped++;
+      }
+      tmp.push({ qs, orig: s, d: qd, p: np, v });
+    }
+    // Pass 2: arpeggio guard. Notes quantized onto the same grid cell whose
+    // ORIGINAL onsets were spread out (>30 ms) were an arpeggio/strum, not a
+    // block chord — keep their relative timing at 1/32 resolution instead of
+    // collapsing them onto one instant.
+    const byCell = new Map<number, Tmp[]>();
+    for (const n of tmp) {
+      const cell = Math.round(n.qs / grid);
+      const arr = byCell.get(cell);
+      if (arr) arr.push(n); else byCell.set(cell, [n]);
+    }
+    for (const group of byCell.values()) {
+      if (group.length < 2) continue;
+      group.sort((a, b) => a.orig - b.orig);
+      const spread = group[group.length - 1].orig - group[0].orig;
+      if (spread <= 0.03) continue;            // a true chord — leave aligned
+      arpKept += group.length;
+      const base = group[0].qs;
+      for (const n of group) {
+        n.qs = base + Math.round((n.orig - group[0].orig) / grid32) * grid32;
+      }
+    }
+    let next: ClipNote[] = tmp
+      .map(n => [n.qs, n.d, n.p, n.v] as ClipNote)
       .sort((a, b) => a[0] - b[0] || a[2] - b[2]);
     // Merge same-pitch overlaps created by quantize/snap.
     const merged: ClipNote[] = [];
@@ -331,6 +358,7 @@ export function MidiEditor({
     commit(merged);
     setOptReport(
       `✓ 量化 ${quantized} · 吸附 ${snapped} · 删短音 ${dropped} · 合并 ${mergedCount}` +
+      (arpKept ? ` · 琶音保护 ${arpKept}` : '') + `（⌘Z 撤销）` +
       (chords.filter(c => !c.none).length === 0 ? '（无和弦表，按调内音吸附 — 建议先 ♪ Chords）' : ''));
     window.setTimeout(() => setOptReport(null), 4000);
   };
@@ -428,6 +456,12 @@ export function MidiEditor({
               title="撤销（⌘Z）"
             >
               ↩
+            </button>
+            <button
+              onClick={onRegenerate}
+              title="重新生成：有音频的轨重新转写，无音频的轨按和弦重新配声（覆盖当前 clip）"
+            >
+              ↻ 重新生成
             </button>
             <button
               className="is-ai"

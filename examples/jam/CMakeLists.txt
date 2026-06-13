@@ -46,6 +46,8 @@ add_executable(mrt2_jam MACOSX_BUNDLE
     JamAppController.mm
     JamSeparate.mm
     JamTranscribe.mm
+    JamTranscribePiano.mm
+    JamRoformer.mm
     LyriaClient.mm
     LyriaConductor.mm
     ${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/magenta_paths.cpp
