@@ -3848,7 +3848,7 @@ static NSDictionary* JamParsePatchJson(NSString* jsonStr) {
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
 
     NSString* sys =
-        @"You are a MIDI composer writing one part for a live show backing track (4/4). "
+        @"You are a MIDI composer/editor for one part of a live show backing track (4/4). "
          "Reply with STRICT JSON only, no code fences, no prose: "
          "{\"notes\": [[start_beat, duration_beats, midi_pitch, velocity], ...]} "
          "where start_beat is a float counted from the song start at the given BPM, "
@@ -3857,9 +3857,17 @@ static NSDictionary* JamParsePatchJson(NSString* jsonStr) {
          "beats, scale passing tones on weak beats), stay in the song key, write idiomatic "
          "phrases for the requested instrument with breathing rests between phrases, vary the "
          "rhythm, prefer stepwise motion with occasional expressive leaps, and stay in a "
-         "practical register for the instrument. If the user names a song section (e.g. intro), "
-         "write ONLY inside that section's beat range and leave everything else empty. "
-         "Use at most 200 notes.";
+         "practical register for the instrument. MATCH THE SONG'S STYLE: respect the section "
+         "energies and fit the existing arrangement (similar density, register and rhythmic "
+         "feel as the other listed parts) - do not overplay quiet sections. "
+         "If the user names a song section (e.g. intro), write ONLY inside that section's beat "
+         "range and leave everything else empty. "
+         "WHEN 'EXISTING NOTES to IMPROVE' ARE GIVEN: revise THOSE notes, do not compose anew - "
+         "keep the same musical intent, register and phrase contour. Quantize sloppy timing, "
+         "snap dissonant pitches to chord tones, and turn broken/staccato transcription "
+         "fragments into smooth SUSTAINED LEGATO lines: extend or merge held notes so they ring "
+         "until the chord changes or the pitch is re-struck, closing unnatural gaps. "
+         "Use at most 300 notes.";
 
     NSDictionary* payload = @{
         @"model": @"c-music-express",

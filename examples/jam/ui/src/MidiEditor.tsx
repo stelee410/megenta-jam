@@ -124,7 +124,7 @@ function snapToChord(
 export function MidiEditor({
   laneName, patchName, notes, chords, keyStr, bpm, duration,
   playPos, playing, onApply, onClose, onSeek, onToggle,
-  onAiCompose, composeBusy, composeError, composeResult, onRegenerate,
+  onAiCompose, composeBusy, composeError, composeResult, onRegenerate, onAiOptimize,
 }: {
   laneName: string;
   patchName: string | null;
@@ -144,6 +144,7 @@ export function MidiEditor({
   composeError: string | null;
   composeResult: { seq: number; mode: 'all' | 'continue'; notes: ClipNote[] } | null;
   onRegenerate: () => void;
+  onAiOptimize: (notes: ClipNote[]) => void;
 }) {
   const [clip, setClip] = useState<ClipNote[]>(notes);
   const [sel, setSel] = useState<number | null>(null);
@@ -363,6 +364,41 @@ export function MidiEditor({
     window.setTimeout(() => setOptReport(null), 4000);
   };
 
+  // ── Legato / sustain fill (deterministic) ──
+  // Transcription chops held notes into staccato fragments. Extend each note
+  // so it rings until the next chord change OR the next time the same pitch is
+  // re-struck (whichever comes first) — held piano chords sustain through the
+  // bar instead of breaking up. With no chord chart, extend melodically to the
+  // next onset. Never shortens; capped at 2 bars.
+  const legato = () => {
+    pushUndo();
+    const hasChords = chords.some(c => !c.none);
+    const bounds: number[] = [];
+    for (const c of chords) if (!c.none) { bounds.push(c.start); bounds.push(c.end); }
+    bounds.sort((a, b) => a - b);
+    const sorted = [...clip].sort((a, b) => a[0] - b[0]);
+    const cap = beat * 8;                       // 2 bars
+    let filled = 0;
+    const out: ClipNote[] = sorted.map(([s, d, p, v]) => {
+      let nextSame = Infinity, nextAny = Infinity, nextBound = Infinity;
+      for (const [s2, , p2] of sorted) {
+        if (s2 <= s + 1e-4) continue;
+        if (nextAny === Infinity) nextAny = s2;
+        if (p2 === p) { nextSame = s2; break; }
+      }
+      for (const b of bounds) if (b > s + 1e-3) { nextBound = b; break; }
+      let end = hasChords ? Math.min(nextSame, nextBound) : Math.min(nextSame, nextAny);
+      if (!isFinite(end)) return [s, d, p, v] as ClipNote;
+      end = Math.min(end, s + cap);
+      const nd = Math.max(d, end - s - 0.01);   // tiny gap → clean re-articulation
+      if (nd > d + 1e-3) filled++;
+      return [s, nd, p, v] as ClipNote;
+    });
+    commit(out);
+    setOptReport(`⟐ 连奏：补延音 ${filled} 个音（撑到下个和弦 / 同音再触发，⌘Z 撤销）`);
+    window.setTimeout(() => setOptReport(null), 4000);
+  };
+
   // ── AI compose (✨ 写MIDI) ──
   const [aiOpen, setAiOpen] = useState(false);
   const [aiPrompt, setAiPrompt] = useState('');
@@ -471,9 +507,20 @@ export function MidiEditor({
             >
               {composeBusy ? '✨ …' : '✨ 写MIDI'}
             </button>
-            <button className="is-ai" onClick={optimize}
-              title="一键优化：量化到 1/16、删除超短音、不协调音吸附到最近和弦音">
-              ✨ 优化
+            <button onClick={legato}
+              title="连奏：把转录断音补成持续音（撑到下个和弦或同音再触发），适合钢琴/铺底">
+              ⟐ 连奏
+            </button>
+            <button onClick={optimize}
+              title="整理：量化到 1/16、删除超短音、不协调音吸附到和弦音（即时、确定性）">
+              ✓ 整理
+            </button>
+            <button
+              className="is-ai"
+              onClick={() => onAiOptimize(clip)}
+              disabled={composeBusy}
+              title="AI 优化：交给模型清理这段转录 — 修时值、断音整理成连贯乐句、贴合曲风（保留原意）">
+              {composeBusy ? '✨ …' : '✨ AI优化'}
             </button>
             <button onClick={onClose} title="关闭（Esc）">✕</button>
           </div>

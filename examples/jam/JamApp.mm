@@ -925,23 +925,35 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
 // count, so multichannel interfaces expose every output to the router.
 - (void)connectSourceNodeForCurrentDevice {
     AVAudioFormat* devFmt = [_audioEngine.outputNode outputFormatForBus:0];
-    UInt32 ch = devFmt.channelCount;
-    if (ch < 2) ch = 2;
-    if (ch > 16) ch = 16;
-    AVAudioFormat* srcFmt = [[AVAudioFormat alloc]
-        initStandardFormatWithSampleRate:48000.0 channels:ch];
+    const UInt32 devCh = devFmt.channelCount;
+
     if (_sourceNode) [_audioEngine detachNode:_sourceNode];
-    _sourceNode = [[AVAudioSourceNode alloc] initWithFormat:srcFmt
-                                                renderBlock:_renderBlock];
-    [_audioEngine attachNode:_sourceNode];
-    [_audioEngine connect:_sourceNode to:_audioEngine.mainMixerNode format:srcFmt];
-    if (devFmt.channelCount >= 2) {
-        [_audioEngine connect:_audioEngine.mainMixerNode
-                           to:_audioEngine.outputNode format:devFmt];
+
+    if (devCh > 2 && devCh <= 16) {
+        // Multichannel interface: drive every output channel directly off the
+        // source node (bypassing the stereo main mixer) so the router can send
+        // click to channels 3+. The output node resamples 48k → hardware rate.
+        AVAudioFormat* srcFmt = [[AVAudioFormat alloc]
+            initStandardFormatWithSampleRate:48000.0 channels:devCh];
+        _sourceNode = [[AVAudioSourceNode alloc] initWithFormat:srcFmt
+                                                    renderBlock:_renderBlock];
+        [_audioEngine attachNode:_sourceNode];
+        [_audioEngine connect:_sourceNode to:_audioEngine.outputNode format:srcFmt];
+        _sharedState.outChannels.store((int)devCh, std::memory_order_relaxed);
+    } else {
+        // Built-in / 2-channel device: the original known-good stereo graph —
+        // source → main mixer, engine handles mixer → output + sample-rate
+        // conversion. (Forcing those connections caused a playback slowdown.)
+        AVAudioFormat* srcFmt = [[AVAudioFormat alloc]
+            initStandardFormatWithSampleRate:48000.0 channels:2];
+        _sourceNode = [[AVAudioSourceNode alloc] initWithFormat:srcFmt
+                                                    renderBlock:_renderBlock];
+        [_audioEngine attachNode:_sourceNode];
+        [_audioEngine connect:_sourceNode to:_audioEngine.mainMixerNode format:srcFmt];
+        _sharedState.outChannels.store(2, std::memory_order_relaxed);
     }
-    _sharedState.outChannels.store((int)ch, std::memory_order_relaxed);
-    NSLog(@"Jam: source node connected — %u output channels @ %.0f Hz device rate",
-          (unsigned)ch, devFmt.sampleRate);
+    NSLog(@"Jam: source node connected — device %u ch @ %.0f Hz",
+          (unsigned)devCh, devFmt.sampleRate);
 }
 
 - (void)handleAudioEngineConfigChange:(NSNotification*)note {

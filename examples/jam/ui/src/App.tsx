@@ -100,6 +100,44 @@ function aiPatchToNumeric(p: any): {
   const name = typeof p.name === 'string' && p.name.trim() ? p.name.trim() : 'ai patch';
   return { params: next, matrix: cells, name };
 }
+
+/** Shared LLM context for AI compose / AI optimize: song key/tempo, sections
+ *  (with energy), chord timeline, the target instrument, AND the rest of the
+ *  arrangement (what the other lanes play) so a new/cleaned part fits the
+ *  whole song's style instead of being written in a vacuum. */
+function buildSongContext(
+  st: StudioState, idx: number, beat: number, toBeat: (s: number) => string,
+): string {
+  const stem = st.stems[idx];
+  const instrument = stem?.engine === 'sf2'
+    ? GM_FAMILIES[Math.floor(stem.sfProgram / 8)]?.[1][stem.sfProgram % 8] ?? 'synth'
+    : (stem?.patch?.name ?? `${stem?.name} synth patch`);
+  const sections = st.sections.map(sec =>
+    `${sec.label}(energy ${(sec.energy ?? 0).toFixed(2)}) beats ${toBeat(sec.start)}-${toBeat(sec.end)}`)
+    .join(', ');
+  const chordLine = st.chords.filter(c => !c.none).map(c =>
+    `${toBeat(c.start)}:${c.label}`).join(' ');
+  const bars = Math.max(1, st.duration / beat / 4);
+  const reg = (p: number) => p < 48 ? 'low' : p < 67 ? 'mid' : 'high';
+  const arrangement = st.stems
+    .map((x, j) => ({ x, j }))
+    .filter(({ x, j }) => j !== idx && x.notes > 0)
+    .map(({ x }) => {
+      const ps = x.ribbon.map(r => r[2]);
+      const lo = ps.length ? Math.min(...ps) : 60;
+      const hi = ps.length ? Math.max(...ps) : 60;
+      const dens = (x.notes / bars).toFixed(1);
+      return `${x.name}(${x.notes} notes, ~${dens}/bar, ${reg(lo)}–${reg(hi)})`;
+    }).join('; ');
+  return (
+    `Song: "${st.name}", key ${st.key || 'unknown'}, ${st.bpm || 120} BPM, ` +
+    `total ${toBeat(st.duration)} beats (4/4).\n` +
+    `Sections: ${sections || 'unknown'}.\n` +
+    `Chords (beat:label): ${chordLine || 'none detected'}.\n` +
+    `Instrument: ${instrument} (lane "${stem?.name}").\n` +
+    `Existing arrangement (match its style/density/register): ${arrangement || '(none yet)'}.\n`
+  );
+}
 import {
   IconButton,
   MenuItem,
@@ -2815,26 +2853,35 @@ function App() {
               const st = studioRef.current;
               const beat = 60 / Math.max(40, st.bpm || 120);
               const toBeat = (sec: number) => (sec / beat).toFixed(1);
-              const stem = st.stems[idx];
-              const instrument = stem?.engine === 'sf2'
-                ? GM_FAMILIES[Math.floor(stem.sfProgram / 8)]?.[1][stem.sfProgram % 8] ?? 'synth'
-                : (stem?.patch?.name ?? `${stem?.name} synth patch`);
-              const sections = st.sections.map(sec =>
-                `${sec.label} beats ${toBeat(sec.start)}-${toBeat(sec.end)}`).join(', ');
-              const chordLine = st.chords.filter(c => !c.none).map(c =>
-                `${toBeat(c.start)}:${c.label}`).join(' ');
-              let ctx =
-                `Song: "${st.name}", key ${st.key || 'unknown'}, ${st.bpm || 120} BPM, ` +
-                `total ${toBeat(st.duration)} beats (4/4).\n` +
-                `Sections: ${sections || 'unknown'}.\n` +
-                `Chords (beat:label): ${chordLine || 'none detected'}.\n` +
-                `Instrument: ${instrument} (lane "${stem?.name}").\n`;
+              let ctx = buildSongContext(st, idx, beat, toBeat);
               if (mode === 'continue') {
                 ctx += `CONTINUE MODE: write only notes with start_beat >= ` +
                   `${toBeat(st.playhead.pos)} (the current playhead).\n`;
               }
               ctx += `User request: ${prompt || '为这条轨写一段合适的乐句'}`;
               composeModeRef.current = mode;
+              setComposeBusy(true);
+              setComposeError(null);
+              post({ type: 'aiCompose', value: ctx, lane: idx });
+            }}
+            onClipAiOptimize={(idx, notes) => {
+              const st = studioRef.current;
+              const beat = 60 / Math.max(40, st.bpm || 120);
+              const toBeat = (sec: number) => (sec / beat).toFixed(1);
+              const stem = st.stems[idx];
+              const cap = 500;
+              const ser = notes.slice(0, cap).map(([s, d, p, v]) =>
+                `[${(s / beat).toFixed(2)},${(d / beat).toFixed(2)},${p},${v.toFixed(2)}]`).join(',');
+              let ctx = buildSongContext(st, idx, beat, toBeat);
+              ctx += `EXISTING NOTES to IMPROVE (beat,dur_beats,pitch,vel): [${ser}]` +
+                (notes.length > cap ? ` (+${notes.length - cap} more omitted)` : '') + '\n';
+              ctx += `TASK: clean up this transcribed clip for ${stem?.name}. Quantize timing ` +
+                `to the groove, fix dissonant pitches to chord tones, and especially repair ` +
+                `BROKEN/STACCATO notes into smooth SUSTAINED LEGATO phrasing idiomatic for this ` +
+                `instrument and the song's style — held accompaniment notes should ring until ` +
+                `the chord changes. Preserve the original musical intent, register and rhythmic ` +
+                `feel; do NOT rewrite it into something new. Return the full improved note list.`;
+              composeModeRef.current = 'all';
               setComposeBusy(true);
               setComposeError(null);
               post({ type: 'aiCompose', value: ctx, lane: idx });

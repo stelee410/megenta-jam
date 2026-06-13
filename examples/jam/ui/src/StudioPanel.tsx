@@ -204,6 +204,7 @@ export function StudioPanel({
   composeError,
   composeResult,
   onClipRegen,
+  onClipAiOptimize,
   onPackage,
   onSepDownload,
   onSepPick,
@@ -241,6 +242,7 @@ export function StudioPanel({
   composeError: string | null;
   composeResult: { seq: number; mode: 'all' | 'continue'; notes: ClipNote[] } | null;
   onClipRegen: (idx: number) => void;
+  onClipAiOptimize: (idx: number, notes: ClipNote[]) => void;
   onPackage: () => void;
   onSepDownload: () => void;
   onSepPick: () => void;
@@ -864,6 +866,7 @@ export function StudioPanel({
           composeError={composeError}
           composeResult={composeResult}
           onRegenerate={() => onClipRegen(clip.index)}
+          onAiOptimize={(notes) => onClipAiOptimize(clip.index, notes)}
         />
       )}
     </div>
