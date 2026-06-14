@@ -274,8 +274,31 @@ export function StudioPanel({
   const [aiText, setAiText] = useState('');
   // Manual key edit (null = not editing). The key chip is just a record.
   const [keyDraft, setKeyDraft] = useState<string | null>(null);
-  // Notes panel open + draft (committed to native on blur, persisted per song).
+  // Notes panel: a floating dialog the operator can park anywhere on screen.
   const [notesOpen, setNotesOpen] = useState(false);
+  const [notesPos, setNotesPos] = useState<{ x: number; y: number }>(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem('jamNotesPos') || 'null');
+      if (v && typeof v.x === 'number' && typeof v.y === 'number') return v;
+    } catch { /* ignore */ }
+    return { x: 180, y: 130 };
+  });
+  const notesDrag = useRef<{ dx: number; dy: number } | null>(null);
+  const startNotesDrag = (e: React.PointerEvent) => {
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    notesDrag.current = { dx: e.clientX - notesPos.x, dy: e.clientY - notesPos.y };
+  };
+  const moveNotesDrag = (e: React.PointerEvent) => {
+    if (!notesDrag.current) return;
+    const x = Math.max(0, Math.min(window.innerWidth - 220, e.clientX - notesDrag.current.dx));
+    const y = Math.max(0, Math.min(window.innerHeight - 48, e.clientY - notesDrag.current.dy));
+    setNotesPos({ x, y });
+  };
+  const endNotesDrag = () => {
+    if (!notesDrag.current) return;
+    notesDrag.current = null;
+    setNotesPos(p => { try { localStorage.setItem('jamNotesPos', JSON.stringify(p)); } catch { /* ignore */ } return p; });
+  };
   // Tap tempo: average the recent inter-tap intervals → BPM.
   const tapTimes = useRef<number[]>([]);
   const [tapHint, setTapHint] = useState(0);   // taps counted in the current burst
@@ -486,18 +509,35 @@ export function StudioPanel({
         </div>
       </div>
 
-      {/* ── Notes panel: free-text per-song memo (records, cues, reminders) ── */}
+      {/* ── Notes: floating dialog the operator can drag/park anywhere ── */}
       {notesOpen && (
-        <div className="pgm-notes-panel">
-          <div className="pgm-notes-head">
-            <span>备注 · NOTES{s.name ? ` — ${s.name}` : ''}</span>
-            <button onClick={() => setNotesOpen(false)} title="收起">✕</button>
+        <div className="pgm-notes-panel" style={{ left: notesPos.x, top: notesPos.y }}>
+          <div
+            className="pgm-notes-head"
+            onPointerDown={startNotesDrag}
+            onPointerMove={moveNotesDrag}
+            onPointerUp={endNotesDrag}
+            onPointerCancel={endNotesDrag}
+            title="拖动标题栏可移动到任意位置"
+          >
+            <span>📝 备注 · NOTES{s.name ? ` — ${s.name}` : ''}</span>
+            <button
+              onPointerDown={(e) => e.stopPropagation()}
+              onClick={() => setNotesOpen(false)}
+              title="收起"
+            >✕</button>
           </div>
           <textarea
             key={s.name}
             className="pgm-notes-area"
             placeholder="速记演出备注：起始段落、踏板、转调、设备路由、提醒事项…（自动随歌曲保存）"
             defaultValue={s.memo}
+            ref={(el) => { if (el) { el.style.height = 'auto'; el.style.height = `${el.scrollHeight}px`; } }}
+            onInput={(e) => {
+              const el = e.currentTarget;
+              el.style.height = 'auto';
+              el.style.height = `${el.scrollHeight}px`;
+            }}
             onKeyDown={(e) => e.stopPropagation()}
             onBlur={(e) => onMemo(e.target.value)}
           />

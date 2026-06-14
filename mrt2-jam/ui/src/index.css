@@ -4132,10 +4132,12 @@ button.pgm-notes-btn:hover { border-color: rgba(255,255,255,0.4); }
 button.pgm-notes-btn.has-notes { color: #f8d35c; border-color: rgba(248, 211, 92, 0.5); }
 
 .pgm-notes-panel {
-  margin: 6px 0 10px;
-  border: 1px solid rgba(248, 211, 92, 0.35);
+  position: fixed; z-index: 600;
+  width: 340px; max-width: 92vw;
+  border: 1px solid rgba(248, 211, 92, 0.4);
   border-radius: 10px;
-  background: rgba(0, 0, 0, 0.32);
+  background: rgba(18, 19, 23, 0.97);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
   overflow: hidden;
 }
 .pgm-notes-head {
@@ -4144,13 +4146,16 @@ button.pgm-notes-btn.has-notes { color: #f8d35c; border-color: rgba(248, 211, 92
   font-size: 11px; letter-spacing: 0.06em; color: #f8d35c;
   background: rgba(248, 211, 92, 0.08);
   border-bottom: 1px solid rgba(248, 211, 92, 0.18);
+  cursor: move; user-select: none; touch-action: none;
 }
 .pgm-notes-head button {
   background: none; border: none; color: #c4c6cd; cursor: pointer; font-size: 13px;
 }
 .pgm-notes-head button:hover { color: #fff; }
 .pgm-notes-area {
-  width: 100%; box-sizing: border-box; min-height: 90px; resize: vertical;
+  display: block;
+  width: 100%; box-sizing: border-box;
+  min-height: 64px; max-height: 60vh; resize: none; overflow-y: auto;
   border: none; outline: none; padding: 10px 12px;
   background: transparent; color: #ececf0;
   font-family: "Google Sans Text", system-ui, sans-serif; font-size: 13px; line-height: 1.55;
