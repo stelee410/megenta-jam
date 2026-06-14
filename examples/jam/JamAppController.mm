@@ -673,6 +673,10 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
         NSNumber* idx = body[@"index"];
         if ([idx isKindOfClass:[NSNumber class]]) [self handleStudioTranscribe:idx.intValue];
     }
+    else if ([type isEqualToString:@"studioExtractStem"]) {
+        NSNumber* idx = body[@"index"];
+        if ([idx isKindOfClass:[NSNumber class]]) [self handleStudioExtractStem:idx.intValue];
+    }
     else if ([type isEqualToString:@"studioDetectChords"]) {
         [self handleStudioDetectChords];
     }
@@ -3412,6 +3416,103 @@ static NSString* const kRfModelURL =
                              pct:0.02f + 0.95f * (float)got / (float)want];
         }
     }];
+}
+
+// ── On-demand HQ single-stem re-separation (BS-Roformer-SW 6-stem) ──
+// The user runs this per stem (currently piano) when the htdemucs split isn't
+// clean enough; it overwrites just that stem with the dedicated model.
+
+static NSString* const kSwModelURL =
+    @"https://huggingface.co/elicwhite/bs-roformer-sw-6stem-onnx/resolve/main/bs_roformer_sw_6stem_fp16.onnx";
+
+- (NSString*)swModelPath {
+    return [[self sepModelDir] stringByAppendingPathComponent:@"bs_roformer_sw_6stem_fp16.onnx"];
+}
+
+- (void)handleStudioExtractStem:(int)idx {
+    if (_studioBusy) return;
+    if (idx < 0 || idx > 5) return;            // app stem index (vocals via RF2)
+    if (_songL.empty()) {
+        [self sendStateUpdate:@{@"studioError": @"load a song first"}];
+        return;
+    }
+    // App stems are [drums,bass,other,vocals,guitar,piano]; the SW model emits
+    // [bass,drums,other,vocals,guitar,piano] — map the requested app stem to
+    // the model's output channel.
+    static const int kAppToSw[6] = {1, 0, 2, 3, 4, 5};
+    const int swIdx = kAppToSw[idx];
+    NSString* path = [self swModelPath];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        // Fetch the 336 MB model once, then retry the extraction.
+        _studioBusy = YES;
+        [self studioProgress:@"downloading 钢琴HQ model (336MB)" pct:0.01f];
+        NSURLSessionDownloadTask* task = [[NSURLSession sharedSession]
+            downloadTaskWithURL:[NSURL URLWithString:kSwModelURL]
+              completionHandler:^(NSURL* loc, NSURLResponse* resp, NSError* err) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    self->_studioBusy = NO;
+                    if (err || !loc) {
+                        [self studioFail:[NSString stringWithFormat:@"模型下载失败: %@",
+                                          err.localizedDescription ?: @"no data"]];
+                        return;
+                    }
+                    [[NSFileManager defaultManager] removeItemAtPath:path error:nil];
+                    [[NSFileManager defaultManager]
+                        moveItemAtURL:loc toURL:[NSURL fileURLWithPath:path] error:nil];
+                    [self studioProgress:@"ready" pct:1.0f];
+                    [self handleStudioExtractStem:idx];   // retry
+                });
+            }];
+        [task resume];
+        __weak NSURLSessionDownloadTask* wTask = task;
+        [NSTimer scheduledTimerWithTimeInterval:0.4 repeats:YES block:^(NSTimer* t) {
+            NSURLSessionDownloadTask* st = wTask;
+            if (!st || st.state != NSURLSessionTaskStateRunning) { [t invalidate]; return; }
+            const int64_t got = st.countOfBytesReceived, want = st.countOfBytesExpectedToReceive;
+            if (want > 0) [self studioProgress:@"downloading 钢琴HQ model (336MB)"
+                                           pct:0.01f + 0.95f * (float)got / (float)want];
+        }];
+        return;
+    }
+
+    static NSString* const kAppNames[6] = {@"drums", @"bass", @"other", @"vocals",
+                                           @"guitar", @"piano"};
+    _studioBusy = YES;
+    [self studioProgress:[NSString stringWithFormat:@"%@ HQ 分离中 (BS-Roformer-SW)",
+                          kAppNames[idx]] pct:0.02f];
+    const long n = (long)_songL.size();
+    std::vector<float> songL = _songL, songR = _songR;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        std::vector<float> oL, oR;
+        NSString* err = nil;
+        const BOOL ok = JamRoformerSWStem(path, swIdx, songL.data(), songR.data(), n, oL, oR,
+            ^(float p) { [self studioProgress:[NSString stringWithFormat:
+                @"%@ HQ 分离中", kAppNames[idx]] pct:0.02f + p * 0.95f]; }, &err);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!ok) { [self studioFail:err ?: @"HQ 分离失败"]; return; }
+            // Overwrite the stem, length-aligned to the existing stems (the
+            // mixer requires equal lengths). Fall back to the song length.
+            long frames = 0;
+            for (int t = 0; t < 8; ++t) frames = MAX(frames, (long)self->_stems[t].size() / 2);
+            if (frames == 0) frames = n;
+            self->_stems[idx].assign(frames * 2, 0);
+            const long copyN = MIN(frames, (long)oL.size());
+            for (long i = 0; i < copyN; ++i) {
+                float l = oL[i] * 32767.0f, r = oR[i] * 32767.0f;
+                self->_stems[idx][i * 2]     = (int16_t)MAX(-32768.0f, MIN(32767.0f, l));
+                self->_stems[idx][i * 2 + 1] = (int16_t)MAX(-32768.0f, MIN(32767.0f, r));
+            }
+            self->_stemSource[idx] = @"neural";
+            self->_stemNotes[idx].clear();    // transcription is now stale
+            [self studioPushStemWaves];
+            [self studioPushNotes:idx];
+            [self studioPublishStems];
+            self->_studioBusy = NO;
+            [self studioProgress:@"ready" pct:1.0f];
+            [self sendStateUpdate:@{@"studioNotice":
+                [NSString stringWithFormat:@"✓ %@ HQ 重分离完成", kAppNames[idx]]}];
+        });
+    });
 }
 
 // Resume-capable download with a stall watchdog: if no bytes arrive for 20 s

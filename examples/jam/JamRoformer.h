@@ -28,3 +28,11 @@ BOOL JamRoformerVocals(NSString* modelPath,
                        std::vector<float>& vocL, std::vector<float>& vocR,
                        void (^progress)(float),
                        NSString* __strong * error);
+
+/// BS-Roformer-SW 6-stem: extract one stem (0 bass · 1 drums · 2 other ·
+/// 3 vocals · 4 guitar · 5 piano) from a stereo 48 kHz mix.
+BOOL JamRoformerSWStem(NSString* modelPath, int stemIndex,
+                       const float* inL, const float* inR, long frames48k,
+                       std::vector<float>& outL, std::vector<float>& outR,
+                       void (^progress)(float),
+                       NSString* __strong * error);

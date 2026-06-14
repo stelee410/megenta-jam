@@ -191,6 +191,7 @@ export function StudioPanel({
   onSeek,
   onImportStem,
   onTranscribe,
+  onExtractStem,
   onDetectChords,
   onLaneSource,
   patchOptions,
@@ -233,6 +234,7 @@ export function StudioPanel({
   onSeek: (sec: number) => void;
   onImportStem: (idx: number) => void;
   onTranscribe: (idx: number) => void;
+  onExtractStem: (idx: number) => void;
   onDetectChords: () => void;
   onLaneSource: (idx: number, src: 'audio' | 'midi') => void;
   patchOptions: { name: string; category: string }[];
@@ -787,7 +789,7 @@ export function StudioPanel({
                       <button
                         className={`pgm-ms ${s.mixer[i].mute ? 'is-mute' : ''}`}
                         onClick={() => onMix(i, { mute: !s.mixer[i].mute })}
-                        title="Mute"
+                        title={`静音 / 播放（⌘${i + 1}）`}
                       >
                         M
                       </button>
@@ -833,6 +835,16 @@ export function StudioPanel({
                         : '打开钢琴卷 MIDI 编辑器（也可双击轨道）'}
                     >
                       ✎
+                    </button>
+                  )}
+                  {(i === 0 || i === 1 || i === 2 || i === 4 || i === 5) && (
+                    <button
+                      className="pgm-mini is-neural"
+                      onClick={() => onExtractStem(i)}
+                      disabled={s.busy}
+                      title={`${stem.name} HQ 重分离：用 BS-Roformer-SW 模型单独重做这条轨（对 htdemucs 不满意时用；首次约下载 336MB，约 1× 歌曲时长）`}
+                    >
+                      ♫ HQ
                     </button>
                   )}
                   <button

@@ -279,3 +279,147 @@ BOOL JamRoformerVocals(NSString* modelPath,
     vocR.resize(frames48k, 0.0f);
     return YES;
 }
+
+// ── BS-Roformer-SW 6-stem (bass/drums/other/vocals/guitar/piano) ──
+// Different ONNX contract from the vocal model above: separate real/imag spec
+// inputs [1,2,1025,T] and an already-masked per-stem spec output
+// [1,6,2,1025,T] at a FIXED 4 s chunk (T=345). Reuses the same vDSP STFT.
+
+static constexpr long kSwChunk = 176400;        // 4 s @ 44.1k
+static constexpr long kSwT = 1 + kSwChunk / kHop;   // 345 frames
+static constexpr long kSwStep = (kSwChunk * 3) / 4; // 25% overlap
+
+static std::mutex gSwMutex;
+static std::unique_ptr<Ort::Env> gSwEnv;
+static std::unique_ptr<Ort::Session> gSwSession;
+static NSString* gSwModelPath = nil;
+
+static bool ensureSwSession(NSString* modelPath, NSString* __strong * error) {
+    if (gSwSession && [gSwModelPath isEqualToString:modelPath]) return true;
+    try {
+        if (!gSwEnv) gSwEnv = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_ERROR, "jam-sw");
+        Ort::SessionOptions opts;
+        gSwSession = std::make_unique<Ort::Session>(
+            *gSwEnv, modelPath.fileSystemRepresentation, opts);
+        gSwModelPath = [modelPath copy];
+        return true;
+    } catch (const std::exception& e) {
+        if (error) *error = [NSString stringWithFormat:@"roformer-sw load failed: %s", e.what()];
+        gSwSession.reset();
+        return false;
+    }
+}
+
+BOOL JamRoformerSWStem(NSString* modelPath, int stemIndex,
+                       const float* inL, const float* inR, long frames48k,
+                       std::vector<float>& outL, std::vector<float>& outR,
+                       void (^progress)(float),
+                       NSString* __strong * error) {
+    outL.clear();
+    outR.clear();
+    if (stemIndex < 0 || stemIndex > 5 || !inL || !inR || frames48k < 48000) {
+        if (error) *error = @"bad args / audio too short";
+        return NO;
+    }
+    std::lock_guard<std::mutex> lock(gSwMutex);
+    if (!ensureSwSession(modelPath, error)) return NO;
+
+    std::vector<float> L, R;
+    resampleSinc(inL, frames48k, 44100.0 / 48000.0, L);
+    resampleSinc(inR, frames48k, 44100.0 / 48000.0, R);
+    const long total = (long)L.size();
+    const float* chans[2] = {L.data(), R.data()};
+
+    std::vector<float> resL(total, 0.0f), resR(total, 0.0f), cnt(total, 0.0f);
+    Stft stft;
+
+    std::vector<long> startsList;
+    for (long st = 0; st < total; st += kSwStep) startsList.push_back(st);
+    const int nChunks = (int)startsList.size();
+
+    const long padded = kSwChunk + kFft;
+    // Input tensors [1,2,1025,T]; index (ch,bin,f) = (ch*1025+bin)*T + f.
+    std::vector<float> specRe(2 * (size_t)kBins * kSwT), specIm(2 * (size_t)kBins * kSwT);
+    std::vector<float> sig(padded), ola(padded), olaW(padded), frameTime(kFft);
+
+    Ort::MemoryInfo mem = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    const char* inNames[] = {"spec_real", "spec_imag"};
+    const char* outNames[] = {"out_spec_real", "out_spec_imag"};
+
+    for (int ci = 0; ci < nChunks; ++ci) {
+        const long start = startsList[ci];
+        const long len = std::min(kSwChunk, total - start);
+
+        for (int s = 0; s < 2; ++s) {
+            for (long i = 0; i < padded; ++i) {
+                long idx = start + i - kFft / 2;
+                if (idx < start) idx = start + (start - idx);
+                if (idx >= start + len) idx = (start + len - 1) - (idx - (start + len - 1));
+                idx = std::max(start, std::min(start + len - 1, idx));
+                sig[i] = chans[s][idx];
+            }
+            if (len < kSwChunk) for (long i = kFft / 2 + len; i < padded; ++i) sig[i] = 0.0f;
+            float fre[kBins], fim[kBins];
+            for (long f = 0; f < kSwT; ++f) {
+                stft.forward(sig.data(), f, fre, fim);
+                for (int b = 0; b < kBins; ++b) {
+                    const size_t o = ((size_t)s * kBins + b) * kSwT + f;
+                    specRe[o] = fre[b];
+                    specIm[o] = fim[b];
+                }
+            }
+        }
+
+        const int64_t shape[4] = {1, 2, kBins, kSwT};
+        Ort::Value vRe = Ort::Value::CreateTensor<float>(mem, specRe.data(), specRe.size(), shape, 4);
+        Ort::Value vIm = Ort::Value::CreateTensor<float>(mem, specIm.data(), specIm.size(), shape, 4);
+        Ort::Value ins[2] = {std::move(vRe), std::move(vIm)};
+        std::vector<Ort::Value> outs;
+        try {
+            outs = gSwSession->Run(Ort::RunOptions{nullptr}, inNames, ins, 2, outNames, 2);
+        } catch (const std::exception& e) {
+            if (error) *error = [NSString stringWithFormat:@"roformer-sw inference failed: %s", e.what()];
+            return NO;
+        }
+        const float* oRe = outs[0].GetTensorData<float>();  // [1,6,2,1025,T]
+        const float* oIm = outs[1].GetTensorData<float>();
+
+        for (int s = 0; s < 2; ++s) {
+            std::fill(ola.begin(), ola.end(), 0.0f);
+            std::fill(olaW.begin(), olaW.end(), 0.0f);
+            float fre[kBins], fim[kBins];
+            for (long f = 0; f < kSwT; ++f) {
+                for (int b = 0; b < kBins; ++b) {
+                    const size_t o = ((((size_t)stemIndex * 2 + s) * kBins) + b) * kSwT + f;
+                    fre[b] = oRe[o];
+                    fim[b] = oIm[o];
+                }
+                stft.inverse(fre, fim, frameTime.data());
+                const long base = f * kHop;
+                for (int i = 0; i < kFft && base + i < padded; ++i) {
+                    ola[base + i] += frameTime[i] * stft.win[i];
+                    olaW[base + i] += stft.win[i] * stft.win[i];
+                }
+            }
+            float* dst = (s == 0) ? resL.data() : resR.data();
+            for (long i = 0; i < len; ++i) {
+                const long p = i + kFft / 2;
+                const float w = olaW[p];
+                dst[start + i] += (w > 1e-8f) ? ola[p] / w : 0.0f;
+            }
+        }
+        for (long i = 0; i < len; ++i) cnt[start + i] += 1.0f;
+        if (progress) progress((ci + 1) / (float)nChunks);
+    }
+
+    for (long i = 0; i < total; ++i) {
+        const float c = std::max(1.0f, cnt[i]);
+        resL[i] /= c;
+        resR[i] /= c;
+    }
+    resampleSinc(resL.data(), total, 48000.0 / 44100.0, outL);
+    resampleSinc(resR.data(), total, 48000.0 / 44100.0, outR);
+    outL.resize(frames48k, 0.0f);
+    outR.resize(frames48k, 0.0f);
+    return YES;
+}

@@ -2279,10 +2279,21 @@ function App() {
           handleDeckBFaderChange(deckFader + (e.key === 'ArrowRight' ? step : -step));
         }
       }
+      // PGM: ⌘1..⌘8 toggle mute (silence / play) per track.
+      if (mainTab === 'pgm' && (e.metaKey || e.ctrlKey) &&
+          e.key >= '1' && e.key <= '8') {
+        e.preventDefault();
+        const idx = Number(e.key) - 1;
+        const st = studioRef.current;
+        const stem = st.stems[idx];
+        if (stem && (stem.wave.length > 0 || stem.notes > 0 || stem.playSrc === 'midi')) {
+          studioMix(idx, { mute: !st.mixer[idx].mute });
+        }
+      }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isPlaying, deckFader, mainTab, studioTransport, studioSeek]);
+  }, [isPlaying, deckFader, mainTab, studioTransport, studioSeek, studioMix]);
 
   // ─── BPM lock: metronome pulse + prompt re-send ───────────────────────────
 
@@ -2802,6 +2813,7 @@ function App() {
             onSeek={studioSeek}
             onImportStem={(i) => post({ type: 'studioImportStem', index: i })}
             onTranscribe={(i) => post({ type: 'studioTranscribe', index: i })}
+            onExtractStem={(i) => post({ type: 'studioExtractStem', index: i })}
             onDetectChords={() => post({ type: 'studioDetectChords' })}
             onLaneSource={(idx, src) => {
               post({ type: 'laneSource', index: idx, source: src === 'midi' ? 1 : 0 });
