@@ -19,7 +19,7 @@
     "baseUrl": "..",
     "paths": {
       "@/*": ["src/*"],
-      "@magenta-rt/common": ["../../common/react_ui/index.ts"]
+      "@magenta-rt/common": ["../common/react_ui/index.ts"]
     }
   }
 }

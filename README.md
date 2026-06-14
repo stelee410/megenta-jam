@@ -26,7 +26,7 @@ Future updates will support supervised fine-tuning.
 - `core/` — C++ inference library (`magentart::core`).
 - `examples/mrt2/auv3` — All-in-one AUv3 plugin for DAWs.
 - `examples/mrt2/standalone` — All-in-one standalone macOS app.
-- `examples/jam/` — App for exploring note control.
+- `mrt2-jam/` — MRT2-Jam standalone product (live jam / instrument / PGM console).
 - `examples/collider/` — App for exploring prompt space.
 - `notebooks/` - Notebook for trying Python API.
 

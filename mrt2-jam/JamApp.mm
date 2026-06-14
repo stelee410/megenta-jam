@@ -23,9 +23,9 @@
 #import "JamAppController.h"
 #import "LyriaClient.h"
 #import "LyriaConductor.h"
-#import "../common/objc/MagentaSettings.h"
+#import "common/objc/MagentaSettings.h"
 #include <magentart/realtime_runner.h>
-#include "../common/cpp/magenta_paths.h"
+#include "common/cpp/magenta_paths.h"
 #include "vendor/tsf/tsf.h"
 
 using magentart::core::RealtimeRunner;

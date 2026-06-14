@@ -109,7 +109,7 @@ Then verify:
 
 ## Next Product Work
 
-Recommended next step: customize `examples/jam/ui/src/App.tsx` and related Jam
+Recommended next step: customize `mrt2-jam/ui/src/App.tsx` and related Jam
 UI components while keeping the native host, MIDI, audio, and model loading code
 mostly intact.
 

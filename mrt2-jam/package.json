@@ -1,0 +1,8 @@
+{
+  "name": "mrt2-jam",
+  "private": true,
+  "workspaces": [
+    "common/react_ui",
+    "ui"
+  ]
+}

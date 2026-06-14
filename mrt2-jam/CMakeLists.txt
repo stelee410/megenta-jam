@@ -14,9 +14,9 @@
 
 # Jam standalone macOS app.
 # Resources (musiccoca, spectrostream) are loaded from ~/Documents/Magenta/magenta-rt-v2/resources/
-# at runtime — see examples/common/cpp/magenta_paths.h.
+# at runtime — see common/cpp/magenta_paths.h.
 
-set(APP_ICON "${CMAKE_CURRENT_SOURCE_DIR}/../common/assets/AppIcon.icns")
+set(APP_ICON "${CMAKE_CURRENT_SOURCE_DIR}/common/assets/AppIcon.icns")
 set_source_files_properties(${APP_ICON} PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
 
 # Vendored demucs.cpp (https://github.com/sevagh/demucs.cpp, MIT) — neural
@@ -50,17 +50,17 @@ add_executable(mrt2_jam MACOSX_BUNDLE
     JamRoformer.mm
     LyriaClient.mm
     LyriaConductor.mm
-    ${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp/magenta_paths.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../common/objc/MagentaModelManager.mm
-    ${CMAKE_CURRENT_SOURCE_DIR}/../common/objc/MagentaModelDownloader.mm
-    ${CMAKE_CURRENT_SOURCE_DIR}/../common/objc/MagentaSettings.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/common/cpp/magenta_paths.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/common/objc/MagentaModelManager.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/common/objc/MagentaModelDownloader.mm
+    ${CMAKE_CURRENT_SOURCE_DIR}/common/objc/MagentaSettings.mm
     ${APP_ICON}
 )
 
 target_include_directories(mrt2_jam PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/../common/cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../common/objc
+    ${CMAKE_CURRENT_SOURCE_DIR}/common/cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/common/objc
     ${ONNXRUNTIME_DIR}/include
 )
 target_compile_options(mrt2_jam PRIVATE -fobjc-arc)
@@ -92,12 +92,18 @@ set_target_properties(mrt2_jam PROPERTIES
 )
 
 # ─── Jam React UI Build Target ─────────────────────────────────────────
+# Self-contained npm workspace (common/react_ui + ui live under this product).
+add_custom_target(npm_install_jam
+    COMMAND npm install
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    COMMENT "Installing MRT2-Jam UI workspace..."
+)
 add_custom_target(build_jam_ui ALL
     COMMAND npm run build
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ui
     COMMENT "Building Jam UI..."
 )
-add_dependencies(build_jam_ui npm_install_root)
+add_dependencies(build_jam_ui npm_install_jam)
 add_dependencies(mrt2_jam build_jam_ui)
 
 # ─── Deploy standalone app ───────────────────────────────────────────────────

@@ -32,7 +32,7 @@ Download them [here](https://magenta.withgoogle.com/mrt2).
 - `cpp/` — C++ inference library (`magentart::core`).
 - `examples/mrt2/auv3/` — macOS AUv3 plugin for DAW users.
 - `examples/mrt2/standalone/` — macOS standalone app.
-- `examples/jam/` — specialized standalone app.
+- `mrt2-jam/` — MRT2-Jam standalone product.
 - `examples/collider/` — standalone app for dynamically mixing prompts.
 - `notebooks/` - demo notebooks for inference in Python.
 
