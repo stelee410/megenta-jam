@@ -112,8 +112,22 @@ struct JamSharedState {
     // produces internal busses and distributes them per these masks.
     static constexpr int kBusMax = 8192;
     std::atomic<int> outChannels{2};            // current device channel count
+    // Opt-in multichannel output (default off = safe stereo). Forcing a
+    // multichannel output format plays slow on devices that misreport their
+    // rate (raw SP-404); only enable with a true 48 kHz device / aggregate.
+    std::atomic<bool> multichannelOut{false};
     std::atomic<uint32_t> mainOutMask{0x3};     // default: channels 1+2
     std::atomic<uint32_t> clickOutMask{0x3};
+
+    // Auto speed compensation: measure the device's effective 48k-content rate
+    // from the render-callback clock and resample so playback holds the true
+    // original BPM on devices that clock slow. comp = 48000 / measured-rate.
+    std::atomic<float> outSpeedComp{1.0f};      // applied compensation factor
+    std::atomic<bool>  rateMeasReset{true};     // main thread: restart measurement
+    double   hostTicksToSec{0.0};               // mach timebase (set once at setup)
+    uint64_t rateMeasStartHost{0};              // audio-thread-owned measurement state
+    double   rateMeasFrames{0.0};
+    bool     rateMeasLocked{false};
     float busL[kBusMax] = {}, busR[kBusMax] = {};   // main stereo bus
     float clickBus[kBusMax] = {};                   // mono click bus
     // Per-stem MIDI lanes: each melodic stem (1..5 — bass, other, vocals,

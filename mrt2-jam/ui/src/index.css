@@ -4055,3 +4055,10 @@ html[data-theme="famicom"] .pgm .pgm-mini, html[data-theme="famicom"] .pgm .pgm-
   text-align: center;
   box-sizing: border-box;
 }
+
+.pgm-route-mc {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; color: #e8e8ea; padding: 2px 0 6px;
+  border-bottom: 1px solid rgba(255,255,255,0.1); margin-bottom: 6px;
+}
+.pgm-route-mc input { accent-color: #f8d35c; }

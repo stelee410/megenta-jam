@@ -70,6 +70,7 @@ export interface StudioState {
   countIn: 0 | 4 | 8;         // 预备拍 beats before playback
   click: boolean;             // metronome during playback
   outChannels: number;        // device output channel count
+  multichannel: boolean;      // opt-in multichannel output routing
   routeMain: number;          // bitmask of channels carrying the main mix
   routeClick: number;         // bitmask of channels carrying the click
   sepEngine: string;          // 'htdemucs' | 'hpss' | ''
@@ -97,7 +98,7 @@ export const STUDIO_INIT: StudioState = {
   playhead: { pos: 0, len: 0 },
   sepPipeline: 'auto', rfPresent: false, cue: -1, clickAnchor: -1, timeSig: 4,
   countIn: 0, click: false,
-  outChannels: 2, routeMain: 0x3, routeClick: 0x3,
+  outChannels: 2, multichannel: false, routeMain: 0x3, routeClick: 0x3,
   sepEngine: '', sepModel: { present: false, sources: 0, downloading: false, pct: 0, mb: 0 },
   error: null, notice: null,
 };
@@ -187,6 +188,7 @@ export function StudioPanel({
   onBpm,
   onTimeSig,
   onRoute,
+  onMultichannel,
   onMix,
   onSeek,
   onImportStem,
@@ -230,6 +232,7 @@ export function StudioPanel({
   onBpm: (bpm: number) => void;
   onTimeSig: (beats: 3 | 4) => void;
   onRoute: (patch: { main?: number; click?: number }) => void;
+  onMultichannel: (on: boolean) => void;
   onMix: (idx: number, patch: { mute?: boolean; solo?: boolean; gain?: number }) => void;
   onSeek: (sec: number) => void;
   onImportStem: (idx: number) => void;
@@ -545,6 +548,21 @@ export function StudioPanel({
             </button>
             {routeOpen && (
               <div className="pgm-route-pop">
+                <label className="pgm-route-mc" title="多通道输出：开启后才能把 click 送到独立通道。仅适用于真正的 48kHz 多通道设备/聚合设备；普通声卡开启可能降速。">
+                  <input
+                    type="checkbox"
+                    checked={s.multichannel}
+                    onChange={(e) => onMultichannel(e.target.checked)}
+                  />
+                  多通道输出（48kHz 设备 / 聚合设备）
+                </label>
+                {!s.multichannel && (
+                  <div className="pgm-route-hint">
+                    默认立体声(到处都正确)。要把 click 送到独立通道:在「音频 MIDI 设置」
+                    建一个 48kHz 聚合设备包住你的声卡并选为输出 → 勾上此项。
+                  </div>
+                )}
+                {s.multichannel && (<>
                 <div className="pgm-route-head">
                   <span>输出通道</span>
                   <span>主输出</span>
@@ -578,8 +596,9 @@ export function StudioPanel({
                 <div className="pgm-route-hint">
                   主输出按勾选顺序交替 L/R（只选一个 = 单声道）；
                   click 为单声道，发往所有勾选通道。
-                  {s.outChannels <= 2 ? ' 当前设备只有 2 个输出通道，接多通道声卡后这里会自动列出。' : ''}
+                  {s.outChannels <= 2 ? ' 当前设备只有 2 个输出通道。' : ''}
                 </div>
+                </>)}
               </div>
             )}
           </span>

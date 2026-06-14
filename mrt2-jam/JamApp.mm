@@ -20,6 +20,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMIDI/CoreMIDI.h>
 #import <CoreAudio/CoreAudio.h>
+#include <mach/mach_time.h>
 #import "JamAppController.h"
 #import "LyriaClient.h"
 #import "LyriaConductor.h"
@@ -533,20 +534,69 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
         // distributes them onto the device channels per the routing masks.
         float* outL = shared->busL;
         float* outR = shared->busR;
-        memset(shared->clickBus, 0, frameCount * sizeof(float));
+
+        // ── Auto speed compensation ──────────────────────────────────────
+        // Some output paths (e.g. SP-404 over USB, or a multichannel graph)
+        // consume our 48 kHz content slower than 48000 frames/sec, stretching
+        // playback and dragging the tempo off the original BPM. We measure the
+        // *effective content rate* C = (frames requested) / (wall-clock) from
+        // the callback clock, then derive comp = 48000 / C. This corrects speed
+        // back to the true original BPM automatically — no ear-tuning — which
+        // matters for playing in time with other live instruments.
+        if (timestamp && (timestamp->mFlags & kAudioTimeStampHostTimeValid) &&
+            shared->hostTicksToSec > 0.0) {
+            if (shared->rateMeasReset.exchange(false, std::memory_order_acquire)) {
+                shared->rateMeasStartHost = timestamp->mHostTime;
+                shared->rateMeasFrames = 0.0;
+                shared->rateMeasLocked = false;
+                shared->outSpeedComp.store(1.0f, std::memory_order_release);
+            }
+            if (!shared->rateMeasLocked && shared->rateMeasStartHost != 0) {
+                double elapsed = (double)(timestamp->mHostTime - shared->rateMeasStartHost)
+                                 * shared->hostTicksToSec;
+                if (elapsed >= 2.0 && shared->rateMeasFrames > 0.0) {
+                    double C = shared->rateMeasFrames / elapsed;     // content frames/sec
+                    double comp = 48000.0 / C;
+                    if (comp < 1.005 && comp > 0.995) comp = 1.0;    // deadzone: genuine 48k
+                    if (comp < 1.0) comp = 1.0;                      // only fix slowdowns
+                    if (comp > 1.5) comp = 1.5;
+                    shared->outSpeedComp.store((float)comp, std::memory_order_release);
+                    shared->rateMeasLocked = true;
+                    NSLog(@"[SpeedComp] measured device content rate %.1f Hz -> comp %.4f",
+                          C, comp);
+                }
+                shared->rateMeasFrames += (double)frameCount;
+            }
+        }
+
+        // Output speed compensation. We generate `genFrames` of 48 kHz content
+        // and resample it down to the `frameCount` frames the device asked for,
+        // so playback speed (and therefore tempo) is corrected.
+        // comp == 1.0 → genFrames == frameCount → passthrough (no extra work).
+        float _comp = shared->outSpeedComp.load(std::memory_order_relaxed);
+        if (_comp < 1.0f) _comp = 1.0f;
+        if (_comp > 1.5f) _comp = 1.5f;
+        AVAudioFrameCount genFrames = frameCount;
+        if (_comp > 1.0001f) {
+            genFrames = (AVAudioFrameCount)lround((double)frameCount * (double)_comp);
+            if (genFrames > (AVAudioFrameCount)JamSharedState::kBusMax)
+                genFrames = (AVAudioFrameCount)JamSharedState::kBusMax;
+            if (genFrames < 1) genFrames = 1;
+        }
+        memset(shared->clickBus, 0, genFrames * sizeof(float));
 
         if (useLyria->load(std::memory_order_relaxed)) {
             // Cloud engine: the conductor mixes its two channels (crossfading
             // near the 10-min limit) into the output; silence until primed.
             // The local engine stays bypassed, but FX/meters below still apply.
-            [lyriaConductor readStereoLeft:outL right:outR frames:frameCount];
+            [lyriaConductor readStereoLeft:outL right:outR frames:genFrames];
         } else if (!engine->is_loaded()) {
             // No model yet — keep the buffers zeroed but fall through so the
             // performance synth (Instrument tab) can still play.
-            memset(outL, 0, frameCount * sizeof(float));
-            if (outputData->mNumberBuffers > 1) memset(outR, 0, frameCount * sizeof(float));
+            memset(outL, 0, genFrames * sizeof(float));
+            if (outputData->mNumberBuffers > 1) memset(outR, 0, genFrames * sizeof(float));
         } else {
-            engine->read_audio_stereo(outL, outR, frameCount, false);
+            engine->read_audio_stereo(outL, outR, genFrames, false);
         }
 
         // PGM studio take recorder: capture the raw engine output (pre-FX)
@@ -557,7 +607,7 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
             const long cap = shared->recCap.load(std::memory_order_relaxed);
             long w = shared->recWritten.load(std::memory_order_relaxed);
             if (rl && rr) {
-                for (AVAudioFrameCount i = 0; i < frameCount && w < cap; ++i, ++w) {
+                for (AVAudioFrameCount i = 0; i < genFrames && w < cap; ++i, ++w) {
                     rl[w] = outL[i];
                     rr[w] = outR[i];
                 }
@@ -585,7 +635,7 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
             float gate = gateLevel->load(std::memory_order_relaxed);
             const float decayPerSample = (decaySec > 0.0f) ? (1.0f / (48000.0f * decaySec)) : 1.0f;
 
-            for (AVAudioFrameCount i = 0; i < frameCount; ++i) {
+            for (AVAudioFrameCount i = 0; i < genFrames; ++i) {
                 if (anyNoteHeld) {
                     gate = 1.0f;
                 } else {
@@ -605,7 +655,7 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
             if (anyNoteHeld) {
                 cfgNotes = sliderVal;
             } else if (cfgNotes < targetVal) {
-                cfgNotes += rampPerFrame * (float)frameCount;
+                cfgNotes += rampPerFrame * (float)genFrames;
                 if (cfgNotes > targetVal) cfgNotes = targetVal;
             }
             cfgNotesLevel->store(cfgNotes, std::memory_order_relaxed);
@@ -613,7 +663,7 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
 
             // DEBUG: throttled log (~1Hz)
             static int _dbgCounter = 0;
-            if (++_dbgCounter >= (int)(48000.0f / frameCount)) {
+            if (++_dbgCounter >= (int)(48000.0f / genFrames)) {
                 _dbgCounter = 0;
                 NSLog(@"[Solo ramp] noteHeld=%d slider=%.2f cfgNotes=%.2f gate=%.3f",
                       anyNoteHeld, sliderVal, cfgNotes, gate);
@@ -627,7 +677,7 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
 
         // Live-performance synth (Instrument tab): mixed in before the FX chain
         // so it shares the filter/delay/reverb/punch pads with the music.
-        shared->synth.render(outL, outR, frameCount,
+        shared->synth.render(outL, outR, genFrames,
                              shared->fxTempo.load(std::memory_order_relaxed));
 
         // PGM live MIDI-input SF2 source: drain queued note events into the
@@ -656,27 +706,27 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                            shared->liveHeld[ev.note] = false; }
                 }
                 shared->liveEvR.store(r, std::memory_order_release);
-                if (src == 1 && frameCount <= (AVAudioFrameCount)JamSharedState::kLaneBlockMax) {
+                if (src == 1 && genFrames <= (AVAudioFrameCount)JamSharedState::kLaneBlockMax) {
                     const int prog = shared->liveSfProgram.load(std::memory_order_relaxed);
                     if (prog != shared->liveSfProgApplied) {
                         tsf_channel_set_presetnumber(lsf, 0, prog, 0);
                         shared->liveSfProgApplied = prog;
                     }
-                    tsf_render_float(lsf, shared->laneSfTmp, (int)frameCount, 0);
+                    tsf_render_float(lsf, shared->laneSfTmp, (int)genFrames, 0);
                     // Per-source reverb + echo on the unweaved [L..][R..] halves.
                     shared->liveFx.process(shared->laneSfTmp,
-                                           shared->laneSfTmp + frameCount, (int)frameCount,
+                                           shared->laneSfTmp + genFrames, (int)genFrames,
                                            shared->stemBpm.load(std::memory_order_relaxed));
                     const float g = shared->liveGain.load(std::memory_order_relaxed) * 1.8f;
-                    for (AVAudioFrameCount i = 0; i < frameCount; ++i) {
+                    for (AVAudioFrameCount i = 0; i < genFrames; ++i) {
                         outL[i] += shared->laneSfTmp[i] * g;
-                        outR[i] += shared->laneSfTmp[frameCount + i] * g;
+                        outR[i] += shared->laneSfTmp[genFrames + i] * g;
                     }
                 }
             }
         }
 
-        shared->processPerformanceFX(outL, outR, frameCount);
+        shared->processPerformanceFX(outL, outR, genFrames);
 
         // PGM studio preview player: dry one-shot playback (post-FX) of an
         // original stem or a recorded cover take.
@@ -686,7 +736,7 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
             const long len = shared->prevLen.load(std::memory_order_relaxed);
             long pos = shared->prevPos.load(std::memory_order_relaxed);
             if (pl && pr) {
-                for (AVAudioFrameCount i = 0; i < frameCount && pos < len; ++i, ++pos) {
+                for (AVAudioFrameCount i = 0; i < genFrames && pos < len; ++i, ++pos) {
                     outL[i] += pl[pos] * 0.9f;
                     outR[i] += pr[pos] * 0.9f;
                 }
@@ -710,7 +760,7 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                 const int barPh = shared->stemBarPhase.load(std::memory_order_relaxed);
                 const int bpb = shared->beatsPerBar.load(std::memory_order_relaxed);
                 long v = shared->countInVPos.load(std::memory_order_relaxed);
-                for (AVAudioFrameCount i = 0; i < frameCount && left > 0; ++i, --left, ++v) {
+                for (AVAudioFrameCount i = 0; i < genFrames && left > 0; ++i, --left, ++v) {
                     const long rel = v - beatOff;
                     const long m = ((rel % B) + B) % B;
                     if (m == 0) {
@@ -784,7 +834,7 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                     shared->laneCursor[k] = lo;
                 }
                 if (playing) {
-                    const long blockEnd = pos + (long)frameCount;
+                    const long blockEnd = pos + (long)genFrames;
                     long cur = shared->laneCursor[k];
                     while (cur < cnt && evs[cur].sample < blockEnd) {
                         const uint8_t note = evs[cur].note;
@@ -807,7 +857,7 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                 if (midiMode) shared->laneTail[k] = 4L * 48000;
                 const bool wantRender =
                     shared->laneTail[k] > 0 &&
-                    frameCount <= (AVAudioFrameCount)JamSharedState::kLaneBlockMax;
+                    genFrames <= (AVAudioFrameCount)JamSharedState::kLaneBlockMax;
                 if (wantRender) {
                     if (sfMode) {
                         const int prog =
@@ -816,27 +866,27 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                             tsf_channel_set_presetnumber(sf, 0, prog, 0);
                             shared->laneSfProgApplied[k] = prog;
                         }
-                        tsf_render_float(sf, shared->laneSfTmp, (int)frameCount, 0);
+                        tsf_render_float(sf, shared->laneSfTmp, (int)genFrames, 0);
                         memcpy(shared->laneBufL[k], shared->laneSfTmp,
-                               sizeof(float) * frameCount);
-                        memcpy(shared->laneBufR[k], shared->laneSfTmp + frameCount,
-                               sizeof(float) * frameCount);
+                               sizeof(float) * genFrames);
+                        memcpy(shared->laneBufR[k], shared->laneSfTmp + genFrames,
+                               sizeof(float) * genFrames);
                     } else {
-                        memset(shared->laneBufL[k], 0, sizeof(float) * frameCount);
-                        memset(shared->laneBufR[k], 0, sizeof(float) * frameCount);
+                        memset(shared->laneBufL[k], 0, sizeof(float) * genFrames);
+                        memset(shared->laneBufR[k], 0, sizeof(float) * genFrames);
                         syn.render(shared->laneBufL[k], shared->laneBufR[k],
-                                   (int)frameCount, bpm);
+                                   (int)genFrames, bpm);
                     }
                     shared->laneFx[k].process(shared->laneBufL[k], shared->laneBufR[k],
-                                              (int)frameCount, bpm);
-                    if (!midiMode) shared->laneTail[k] -= (long)frameCount;
+                                              (int)genFrames, bpm);
+                    if (!midiMode) shared->laneTail[k] -= (long)genFrames;
                 } else {
                     shared->laneTail[k] = 0;
                 }
             }
             // Predict next block's start for jump detection.
             long next = pos;
-            if (act) next = MIN(len, pos + (long)frameCount);
+            if (act) next = MIN(len, pos + (long)genFrames);
             shared->laneLastPos = next;
         }
 
@@ -872,7 +922,7 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                 const int barPh = shared->stemBarPhase.load(std::memory_order_relaxed);
                 const int bpb = shared->beatsPerBar.load(std::memory_order_relaxed);
                 long pos = shared->stemPos.load(std::memory_order_relaxed);
-                for (AVAudioFrameCount i = 0; i < frameCount && pos < len; ++i, ++pos) {
+                for (AVAudioFrameCount i = 0; i < genFrames && pos < len; ++i, ++pos) {
                     float l = 0.0f, r = 0.0f;
                     for (int t = 0; t < JamSharedState::kStems; ++t) {
                         if (midiSrc[t]) continue;          // handled below
@@ -919,7 +969,7 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                 const float tgt = midiSrc[t] ? target[t] : 0.0f;
                 float& g = shared->laneSmoothG[k];
                 if (tgt <= 0.0005f && g <= 0.0005f) { g = tgt; continue; }
-                for (AVAudioFrameCount i = 0; i < frameCount; ++i) {
+                for (AVAudioFrameCount i = 0; i < genFrames; ++i) {
                     g += (tgt - g) * 0.002f;
                     outL[i] += shared->laneBufL[k][i] * g * 1.8f;
                     outR[i] += shared->laneBufR[k][i] * g * 1.8f;
@@ -927,7 +977,26 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
             }
         }
 
-        shared->pushAudioSamples(outL, outR, frameCount);
+        shared->pushAudioSamples(outL, outR, genFrames);
+
+        // Resample the generated genFrames of 48k content down to the frameCount
+        // output frames the device asked for (speed compensation). Linear interp,
+        // done in place: when genFrames > frameCount the source read index is
+        // always >= the write index, so overwriting is safe.
+        if (genFrames != frameCount && frameCount > 1) {
+            const double rstep = (double)(genFrames - 1) / (double)(frameCount - 1);
+            float* clk = shared->clickBus;
+            for (AVAudioFrameCount i = 0; i < frameCount; ++i) {
+                double sp = (double)i * rstep;
+                AVAudioFrameCount i0 = (AVAudioFrameCount)sp;
+                AVAudioFrameCount i1 = i0 + 1;
+                if (i1 >= genFrames) i1 = genFrames - 1;
+                float fr = (float)(sp - (double)i0);
+                outL[i] = outL[i0] + (outL[i1] - outL[i0]) * fr;
+                outR[i] = outR[i0] + (outR[i1] - outR[i0]) * fr;
+                clk[i]  = clk[i0]  + (clk[i1]  - clk[i0])  * fr;
+            }
+        }
 
         // ── Distribute busses → device channels per the routing masks ──
         {
@@ -968,6 +1037,18 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
         return noErr;
     };
 
+    // Mach timebase → seconds, for the speed-compensation rate measurement.
+    {
+        mach_timebase_info_data_t tb;
+        mach_timebase_info(&tb);
+        _sharedState.hostTicksToSec = (double)tb.numer / (double)tb.denom * 1e-9;
+    }
+
+    // Apply the persisted multichannel-output preference before connecting.
+    _sharedState.multichannelOut.store(
+        [[NSUserDefaults standardUserDefaults] boolForKey:@"Jam_MultichannelOut"],
+        std::memory_order_relaxed);
+
     [self connectSourceNodeForCurrentDevice];
 
     // When the output device changes (plug in headphones, switch speakers,
@@ -978,6 +1059,12 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                                              selector:@selector(handleAudioEngineConfigChange:)
                                                  name:AVAudioEngineConfigurationChangeNotification
                                                object:_audioEngine];
+    // The UI toggles multichannel output / routing → rebuild the graph.
+    [[NSNotificationCenter defaultCenter] addObserverForName:@"JamRebuildAudioGraph"
+                                                      object:nil queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(NSNotification* n) {
+        [self rebuildAudioGraph];
+    }];
 
     NSError* error = nil;
     if (![_audioEngine startAndReturnError:&error]) {
@@ -990,24 +1077,32 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
 - (void)connectSourceNodeForCurrentDevice {
     AVAudioFormat* devFmt = [_audioEngine.outputNode outputFormatForBus:0];
     const UInt32 devCh = devFmt.channelCount;
+    const double hwRate = devFmt.sampleRate;
 
     if (_sourceNode) [_audioEngine detachNode:_sourceNode];
 
-    if (devCh > 2 && devCh <= 16) {
-        // Multichannel interface: drive every output channel directly off the
-        // source node (bypassing the stereo main mixer) so the router can send
-        // click to channels 3+. The output node resamples 48k → hardware rate.
+    // Default: source(48 kHz stereo) → mainMixerNode with the engine
+    // auto-managing mixer→output. That auto-negotiation is the ONLY path that
+    // gets the real device clock right — forcing any output format plays slow
+    // on devices that misreport their rate (raw SP-404). So per-channel click
+    // routing (which needs a forced multichannel output) is OPT-IN and only
+    // safe with a true 48 kHz device / aggregate device.
+    const bool wantMC = _sharedState.multichannelOut.load(std::memory_order_relaxed) &&
+                        devCh > 2 && devCh <= 16;
+    if (wantMC) {
+        // Multichannel source → mainMixer, but DO NOT force the mixer→output
+        // format. Forcing any output sample-rate is what plays slow on these
+        // devices; letting the engine auto-negotiate mixer→output keeps the
+        // real device clock, and the multichannel source carries the extra
+        // channels through for click routing.
         AVAudioFormat* srcFmt = [[AVAudioFormat alloc]
             initStandardFormatWithSampleRate:48000.0 channels:devCh];
         _sourceNode = [[AVAudioSourceNode alloc] initWithFormat:srcFmt
                                                     renderBlock:_renderBlock];
         [_audioEngine attachNode:_sourceNode];
-        [_audioEngine connect:_sourceNode to:_audioEngine.outputNode format:srcFmt];
+        [_audioEngine connect:_sourceNode to:_audioEngine.mainMixerNode format:srcFmt];
         _sharedState.outChannels.store((int)devCh, std::memory_order_relaxed);
     } else {
-        // Built-in / 2-channel device: the original known-good stereo graph —
-        // source → main mixer, engine handles mixer → output + sample-rate
-        // conversion. (Forcing those connections caused a playback slowdown.)
         AVAudioFormat* srcFmt = [[AVAudioFormat alloc]
             initStandardFormatWithSampleRate:48000.0 channels:2];
         _sourceNode = [[AVAudioSourceNode alloc] initWithFormat:srcFmt
@@ -1016,26 +1111,31 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
         [_audioEngine connect:_sourceNode to:_audioEngine.mainMixerNode format:srcFmt];
         _sharedState.outChannels.store(2, std::memory_order_relaxed);
     }
-    NSLog(@"Jam: source node connected — device %u ch @ %.0f Hz",
-          (unsigned)devCh, devFmt.sampleRate);
+    // Restart the speed-compensation measurement for the new graph/device.
+    _sharedState.rateMeasReset.store(true, std::memory_order_release);
+    NSLog(@"Jam: source node connected — %s; device %u ch @ %.0f Hz",
+          wantMC ? "multichannel" : "stereo", (unsigned)devCh, hwRate);
+}
+
+// Tear down and rebuild the graph for the current device / routing mode.
+- (void)rebuildAudioGraph {
+    if (!_audioEngine) return;
+    [_audioEngine stop];
+    @try {
+        [self connectSourceNodeForCurrentDevice];
+    } @catch (NSException* e) {
+        NSLog(@"Jam: graph rebuild threw: %@", e);
+    }
+    NSError* err = nil;
+    if (![_audioEngine startAndReturnError:&err]) {
+        NSLog(@"Jam: AVAudioEngine restart failed: %@", err);
+    }
 }
 
 - (void)handleAudioEngineConfigChange:(NSNotification*)note {
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (!self->_audioEngine) return;
-        if (self->_audioEngine.isRunning) return;  // already recovered
         NSLog(@"Jam: output device changed — rebuilding graph for the new device");
-        @try {
-            [self connectSourceNodeForCurrentDevice];
-        } @catch (NSException* e) {
-            NSLog(@"Jam: graph rebuild threw: %@", e);
-        }
-        NSError* err = nil;
-        if (![self->_audioEngine startAndReturnError:&err]) {
-            NSLog(@"Jam: AVAudioEngine restart failed: %@", err);
-        } else {
-            NSLog(@"Jam: AVAudioEngine restarted on new device");
-        }
+        [self rebuildAudioGraph];
     });
 }
 

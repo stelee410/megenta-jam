@@ -825,6 +825,17 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
             }
         }
     }
+    else if ([type isEqualToString:@"audioMultichannel"]) {
+        NSNumber* on = body[@"on"];
+        if ([on isKindOfClass:[NSNumber class]] && self.sharedState) {
+            self.sharedState->multichannelOut.store(on.boolValue, std::memory_order_relaxed);
+            [[NSUserDefaults standardUserDefaults] setBool:on.boolValue
+                                                    forKey:@"Jam_MultichannelOut"];
+            // Rebuild the audio graph for the new output mode.
+            [[NSNotificationCenter defaultCenter] postNotificationName:@"JamRebuildAudioGraph"
+                                                                object:nil];
+        }
+    }
     else if ([type isEqualToString:@"studioCountIn"]) {
         NSNumber* beats = body[@"beats"];
         if ([beats isKindOfClass:[NSNumber class]] && self.sharedState) {
@@ -1357,6 +1368,8 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
             [self connectToEngine];
             [self studioPushSepPipeline];
             [self studioPushLive];
+            [self sendStateUpdate:@{@"audioMultichannel":
+                @([[NSUserDefaults standardUserDefaults] boolForKey:@"Jam_MultichannelOut"])}];
         });
     }
     else if ([type isEqualToString:@"sepPipeline"]) {

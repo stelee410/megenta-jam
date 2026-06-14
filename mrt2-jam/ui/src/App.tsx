@@ -2030,6 +2030,10 @@ function App() {
         setComposeBusy(false);
         setComposeError(state.aiComposeError);
       }
+      if (typeof state.audioMultichannel === 'boolean') {
+        const mc = state.audioMultichannel;
+        setStudio(st => ({ ...st, multichannel: mc }));
+      }
       if (typeof state.audioOuts === 'number') {
         const ch = Math.max(2, Math.min(16, state.audioOuts));
         setStudio(st => ({
@@ -2808,6 +2812,10 @@ function App() {
                 post({ type: 'audioRoute', main: next.routeMain, click: next.routeClick });
                 return next;
               });
+            }}
+            onMultichannel={(on) => {
+              setStudio(st => ({ ...st, multichannel: on }));
+              post({ type: 'audioMultichannel', on });
             }}
             onMix={studioMix}
             onSeek={studioSeek}
