@@ -4062,3 +4062,97 @@ html[data-theme="famicom"] .pgm .pgm-mini, html[data-theme="famicom"] .pgm .pgm-
   border-bottom: 1px solid rgba(255,255,255,0.1); margin-bottom: 6px;
 }
 .pgm-route-mc input { accent-color: #f8d35c; }
+
+/* ── Calibration gate overlay ─────────────────────────────────────────── */
+.jam-calib-overlay {
+  position: fixed; inset: 0; z-index: 9999;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(8, 9, 12, 0.82);
+  backdrop-filter: blur(8px);
+}
+.jam-calib-card {
+  width: 420px; max-width: 90vw;
+  background: #15171c; border: 1px solid rgba(248, 211, 92, 0.45);
+  border-radius: 14px; padding: 26px 28px;
+  box-shadow: 0 24px 60px rgba(0,0,0,0.55);
+  color: #ececf0; text-align: center;
+}
+.jam-calib-title {
+  font-size: 15px; font-weight: 600; letter-spacing: 0.12em;
+  color: #f8d35c; margin-bottom: 8px;
+}
+.jam-calib-sub { font-size: 12px; color: #b6b8c0; line-height: 1.5; margin-bottom: 18px; }
+.jam-calib-measuring {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  font-size: 13px; color: #d8d9de; padding: 14px 0 20px;
+}
+.jam-calib-spinner {
+  width: 16px; height: 16px; border-radius: 50%;
+  border: 2px solid rgba(248,211,92,0.3); border-top-color: #f8d35c;
+  animation: jam-calib-spin 0.8s linear infinite;
+}
+@keyframes jam-calib-spin { to { transform: rotate(360deg); } }
+.jam-calib-result { padding: 4px 0 16px; }
+.jam-calib-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 13px; color: #c4c6cd; padding: 5px 4px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.jam-calib-row strong { color: #fff; font-variant-numeric: tabular-nums; font-size: 15px; }
+.jam-calib-hint { font-size: 11px; color: #9a9ca4; line-height: 1.6; margin-top: 12px; text-align: left; }
+.jam-calib-actions { display: flex; gap: 10px; margin-top: 20px; }
+.jam-calib-actions button {
+  flex: 1; padding: 11px 0; border-radius: 9px; font-size: 13px; font-weight: 600;
+  cursor: pointer; border: none; transition: opacity 0.15s, background 0.15s;
+}
+.jam-calib-recal { background: rgba(255,255,255,0.08); color: #d8d9de; }
+.jam-calib-recal:hover { background: rgba(255,255,255,0.14); }
+.jam-calib-ok { background: #f8d35c; color: #15171c; }
+.jam-calib-ok:hover:not(:disabled) { background: #ffe07a; }
+.jam-calib-ok:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* ── Editable key chip + notes panel (PGM studio) ─────────────────────── */
+.pgm-chip.is-editable { cursor: text; }
+.pgm-chip.is-editable:hover {
+  border-color: rgba(111, 179, 255, 0.8);
+  background: rgba(111, 179, 255, 0.12);
+}
+input.pgm-keyedit {
+  width: 92px;
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
+  font-size: 10px;
+  outline: none;
+  background: rgba(111, 179, 255, 0.12);
+}
+button.pgm-notes-btn {
+  cursor: pointer;
+  display: inline-flex; align-items: center; gap: 3px;
+}
+button.pgm-notes-btn:hover { border-color: rgba(255,255,255,0.4); }
+button.pgm-notes-btn.has-notes { color: #f8d35c; border-color: rgba(248, 211, 92, 0.5); }
+
+.pgm-notes-panel {
+  margin: 6px 0 10px;
+  border: 1px solid rgba(248, 211, 92, 0.35);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.32);
+  overflow: hidden;
+}
+.pgm-notes-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 7px 12px;
+  font-size: 11px; letter-spacing: 0.06em; color: #f8d35c;
+  background: rgba(248, 211, 92, 0.08);
+  border-bottom: 1px solid rgba(248, 211, 92, 0.18);
+}
+.pgm-notes-head button {
+  background: none; border: none; color: #c4c6cd; cursor: pointer; font-size: 13px;
+}
+.pgm-notes-head button:hover { color: #fff; }
+.pgm-notes-area {
+  width: 100%; box-sizing: border-box; min-height: 90px; resize: vertical;
+  border: none; outline: none; padding: 10px 12px;
+  background: transparent; color: #ececf0;
+  font-family: "Google Sans Text", system-ui, sans-serif; font-size: 13px; line-height: 1.55;
+}
+.pgm-notes-area::placeholder { color: #71737b; }

@@ -129,6 +129,8 @@ static BOOL isDevServerRunning(void) {
     tsf* _sfMaster;                       // master SoundFont (lanes share samples)
     BOOL _sfBusy;                         // download/load in flight
     NSString* _songName;
+    NSString* _keyOverride;               // manual key label (overrides auto-detect)
+    NSString* _songMemo;                  // free-text notes panel content
     NSURL* _songURL;
     double _songDur;
     BOOL _studioBusy;
@@ -369,6 +371,41 @@ static BOOL isDevServerRunning(void) {
     NSString* jsonString = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
     NSString* script = [NSString stringWithFormat:@"if (window.updateState) { window.updateState(%@); }", jsonString];
     [_webView evaluateJavaScript:script completionHandler:nil];
+}
+
+// ─── Calibration gate ─────────────────────────────────────────────────────
+// On a device/channel change we mute program audio and play a standard
+// 120 BPM reference click through the new output. The auto speed-compensation
+// measures the device's true rate over ~2s and locks; the operator verifies
+// the corrected click against their rig, then confirms to resume.
+- (void)enterCalibration {
+    if (!self.sharedState) return;
+    self.sharedState->calibrating.store(true, std::memory_order_release);
+    [self sendStateUpdate:@{@"calibration": @{@"active": @YES, @"measuring": @YES}}];
+
+    __weak JamAppController* weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.6 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        JamAppController* s = weakSelf;
+        if (!s || !s.sharedState) return;
+        if (!s.sharedState->calibrating.load(std::memory_order_acquire)) return;
+        float comp = s.sharedState->outSpeedComp.load(std::memory_order_acquire);
+        if (comp < 0.0001f) comp = 1.0f;
+        int ch = s.sharedState->outChannels.load(std::memory_order_relaxed);
+        [s sendStateUpdate:@{@"calibration": @{
+            @"active": @YES,
+            @"measuring": @NO,
+            @"comp": @(comp),
+            @"effectiveRate": @((int)llround(48000.0 / comp)),
+            @"channels": @(ch)
+        }}];
+    });
+}
+
+- (void)finishCalibration {
+    if (self.sharedState)
+        self.sharedState->calibrating.store(false, std::memory_order_release);
+    [self sendStateUpdate:@{@"calibration": @{@"active": @NO}}];
 }
 
 - (void)sendPlayState:(BOOL)playing {
@@ -836,6 +873,12 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
                                                                 object:nil];
         }
     }
+    else if ([type isEqualToString:@"calibrationDone"]) {
+        [self finishCalibration];
+    }
+    else if ([type isEqualToString:@"startCalibration"]) {
+        [self enterCalibration];
+    }
     else if ([type isEqualToString:@"studioCountIn"]) {
         NSNumber* beats = body[@"beats"];
         if ([beats isKindOfClass:[NSNumber class]] && self.sharedState) {
@@ -868,6 +911,27 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
                 self.sharedState->stemBpm.store((float)v, std::memory_order_relaxed);
                 [self sendStateUpdate:@{@"studioBpm": @(v)}];
             }
+        }
+    }
+    else if ([type isEqualToString:@"studioKey"]) {
+        // Manual key label — a record the operator can correct. Persisted
+        // per-song so reloading the song restores the edit.
+        NSString* k = body[@"key"];
+        if ([k isKindOfClass:[NSString class]]) {
+            _keyOverride = [k length] ? k : nil;
+            NSString* dk = [@"Jam_SongKey_" stringByAppendingString:(_songName ?: @"")];
+            if ([k length]) [[NSUserDefaults standardUserDefaults] setObject:k forKey:dk];
+            else            [[NSUserDefaults standardUserDefaults] removeObjectForKey:dk];
+        }
+    }
+    else if ([type isEqualToString:@"studioMemo"]) {
+        // Free-text notes panel. Persisted per-song.
+        NSString* m = body[@"text"];
+        if ([m isKindOfClass:[NSString class]]) {
+            _songMemo = m;
+            NSString* dk = [@"Jam_SongMemo_" stringByAppendingString:(_songName ?: @"")];
+            if ([m length]) [[NSUserDefaults standardUserDefaults] setObject:m forKey:dk];
+            else            [[NSUserDefaults standardUserDefaults] removeObjectForKey:dk];
         }
     }
     else if ([type isEqualToString:@"liveSource"]) {
@@ -1875,12 +1939,20 @@ static NSString* const kJamKeyNames[12] = {@"C", @"C#", @"D", @"D#", @"E", @"F",
     NSString* key = [NSString stringWithFormat:@"%@ %@",
                      kJamKeyNames[_songAnalysis.keyIdx],
                      _songAnalysis.minor ? @"minor" : @"major"];
+    // Restore any per-song manual key / notes edits.
+    NSUserDefaults* defs = [NSUserDefaults standardUserDefaults];
+    NSString* savedKey = [defs stringForKey:[@"Jam_SongKey_" stringByAppendingString:(_songName ?: @"")]];
+    _keyOverride = savedKey.length ? savedKey : nil;
+    if (_keyOverride) key = _keyOverride;
+    _songMemo = [defs stringForKey:[@"Jam_SongMemo_" stringByAppendingString:(_songName ?: @"")]] ?: @"";
+    NSString* memo = _songMemo;
     dispatch_async(dispatch_get_main_queue(), ^{
         [self sendStateUpdate:@{@"studioSong": @{
             @"name": self->_songName ?: @"song",
             @"duration": @(self->_songDur),
             @"bpm": @((int)lroundf(self->_songAnalysis.bpm)),
             @"key": key,
+            @"memo": memo,
             @"sections": sections,
             @"wave": JamWaveThumb(self->_songL.data(), self->_songR.data(),
                                   (long)self->_songL.size(), 480),
@@ -3164,6 +3236,9 @@ static BOOL JamWriteWav(NSURL* url, const int16_t* interleaved, long frames) {
             // Metadata from program.json.
             NSNumber* bpm = [song isKindOfClass:[NSDictionary class]] ? song[@"bpm"] : nil;
             NSString* key = [song isKindOfClass:[NSDictionary class]] ? song[@"key"] : nil;
+            self->_keyOverride = ([key isKindOfClass:[NSString class]] && [key length]) ? key : nil;
+            NSString* pkgMemo = [song isKindOfClass:[NSDictionary class]] ? song[@"memo"] : nil;
+            self->_songMemo = [pkgMemo isKindOfClass:[NSString class]] ? pkgMemo : @"";
             self->_songAnalysis.bpm = [bpm isKindOfClass:[NSNumber class]]
                 ? bpm.floatValue : 120.0f;
             self.sharedState->stemBpm.store(self->_songAnalysis.bpm,
@@ -3274,6 +3349,7 @@ static BOOL JamWriteWav(NSURL* url, const int16_t* interleaved, long frames) {
                     @"duration": @(self->_songDur),
                     @"bpm": @((int)lroundf(self->_songAnalysis.bpm)),
                     @"key": [key isKindOfClass:[NSString class]] ? key : @"",
+                    @"memo": self->_songMemo ?: @"",
                     @"sections": [sections isKindOfClass:[NSArray class]] ? sections : @[],
                     @"wave": self->_songL.empty()
                         ? @[]
@@ -3952,9 +4028,11 @@ static NSString* const kSwModelURL =
         @"song": @{@"name": _songName ?: @"song",
                    @"duration": @(_songDur),
                    @"bpm": @(bpm),
-                   @"key": [NSString stringWithFormat:@"%@ %@",
+                   @"key": _keyOverride.length ? _keyOverride :
+                           [NSString stringWithFormat:@"%@ %@",
                             kJamKeyNames[_songAnalysis.keyIdx],
                             _songAnalysis.minor ? @"minor" : @"major"],
+                   @"memo": _songMemo ?: @"",
                    @"cue": @(_cueSec),
                    @"clickAnchor": @(_clickAnchorSec),
                    @"timeSig": @(self.sharedState->beatsPerBar.load(std::memory_order_relaxed)),

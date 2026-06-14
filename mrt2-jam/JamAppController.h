@@ -128,6 +128,12 @@ struct JamSharedState {
     uint64_t rateMeasStartHost{0};              // audio-thread-owned measurement state
     double   rateMeasFrames{0.0};
     bool     rateMeasLocked{false};
+
+    // Calibration gate: on device/channel change the program audio is muted and
+    // a standard 120 BPM reference click plays through the new output so the
+    // operator can verify timing against their rig before performing.
+    std::atomic<bool> calibrating{false};
+    uint64_t calibSamplePos{0};                 // audio-thread-owned, reset on entry
     float busL[kBusMax] = {}, busR[kBusMax] = {};   // main stereo bus
     float clickBus[kBusMax] = {};                   // mono click bus
     // Per-stem MIDI lanes: each melodic stem (1..5 — bass, other, vocals,
@@ -533,6 +539,9 @@ struct JamSharedState {
 
 - (void)notifyModelLoaded:(NSString*)modelName;
 - (void)sendStateUpdate:(NSDictionary*)state;
+// Calibration gate (device/channel change → verify 120 BPM click → resume)
+- (void)enterCalibration;
+- (void)finishCalibration;
 - (void)restoreSavedParams;
 - (void)handleLoadModel;
 - (void)showReactSettings;

@@ -494,6 +494,12 @@ function App() {
   // ─── Main tabs: JAM (mix) · INSTRUMENT (synth) · PGM (show studio) ────────
   const [mainTab, setMainTab] = useState<'jam' | 'instrument' | 'pgm'>('jam');
   const [instrumentFollowJam, setInstrumentFollowJam] = useState(false);
+  // Calibration gate: shown when the output device/channels change. Plays a
+  // 120 BPM reference click; performance is held until the operator confirms.
+  const [calibration, setCalibration] = useState<{
+    active: boolean; measuring: boolean;
+    comp?: number; effectiveRate?: number; channels?: number;
+  }>({ active: false, measuring: false });
   // Tell native which tab is active so live MIDI only conditions the
   // generative engine on the jam tab (never starts an AI jam from pgm).
   useEffect(() => { post({ type: 'activeTab', tab: mainTab }); }, [mainTab]);
@@ -2034,6 +2040,16 @@ function App() {
         const mc = state.audioMultichannel;
         setStudio(st => ({ ...st, multichannel: mc }));
       }
+      if (state.calibration && typeof state.calibration === 'object') {
+        const c = state.calibration;
+        setCalibration(prev => ({
+          active: !!c.active,
+          measuring: c.measuring ?? (c.active ? prev.measuring : false),
+          comp: c.comp ?? prev.comp,
+          effectiveRate: c.effectiveRate ?? prev.effectiveRate,
+          channels: c.channels ?? prev.channels,
+        }));
+      }
       if (typeof state.audioOuts === 'number') {
         const ch = Math.max(2, Math.min(16, state.audioOuts));
         setStudio(st => ({
@@ -2100,6 +2116,7 @@ function App() {
           duration: Number(sg.duration ?? 0),
           bpm: Number(sg.bpm ?? 0),
           key: String(sg.key ?? ''),
+          memo: String(sg.memo ?? ''),
           sections: Array.isArray(sg.sections) ? sg.sections : [],
           songWave: Array.isArray(sg.wave) ? sg.wave : [],
           stems: st.stems.map(x => ({ ...x, wave: [], source: '', notes: 0, ribbon: [] })),
@@ -2672,6 +2689,53 @@ function App() {
         fontFamily: "'Google Sans Text', system-ui, sans-serif",
       }}
     >
+      {calibration.active && (
+        <div className="jam-calib-overlay">
+          <div className="jam-calib-card">
+            <div className="jam-calib-title">输出校准 · CALIBRATION</div>
+            <div className="jam-calib-sub">
+              {calibration.channels ? `${calibration.channels} 通道设备` : '输出设备'}已切换 ·
+              正在播放 120 BPM 校准 click
+            </div>
+            {calibration.measuring ? (
+              <div className="jam-calib-measuring">
+                <span className="jam-calib-spinner" />
+                正在测量设备真实速率…（约 2 秒）
+              </div>
+            ) : (
+              <div className="jam-calib-result">
+                <div className="jam-calib-row">
+                  <span>实测速率</span>
+                  <strong>{calibration.effectiveRate ?? '—'} Hz</strong>
+                </div>
+                <div className="jam-calib-row">
+                  <span>速度补偿</span>
+                  <strong>×{(calibration.comp ?? 1).toFixed(4)}</strong>
+                </div>
+                <div className="jam-calib-hint">
+                  请用你的设备 / 其他乐器核对:click 是否为稳定的 120 BPM。
+                  确认无误后再开始演出。
+                </div>
+              </div>
+            )}
+            <div className="jam-calib-actions">
+              <button
+                className="jam-calib-recal"
+                onClick={() => post({ type: 'startCalibration' })}
+              >
+                重新校准
+              </button>
+              <button
+                className="jam-calib-ok"
+                disabled={calibration.measuring}
+                onClick={() => post({ type: 'calibrationDone' })}
+              >
+                {calibration.measuring ? '测量中…' : '校准完成 · 开始演出'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="jam-app-shell">
         <div className="jam-topbar">
           <div className="jam-topbar-left">
@@ -2801,6 +2865,8 @@ function App() {
             }}
             onCue={(action, sec) => post({ type: 'studioCue', action, sec: sec ?? -1 })}
             onBpm={(bpm) => { setStudio(st => ({ ...st, bpm })); post({ type: 'studioBpm', bpm }); }}
+            onKey={(key) => { setStudio(st => ({ ...st, key })); post({ type: 'studioKey', key }); }}
+            onMemo={(text) => { setStudio(st => ({ ...st, memo: text })); post({ type: 'studioMemo', text }); }}
             onTimeSig={(beats) => { setStudio(st => ({ ...st, timeSig: beats })); post({ type: 'studioTimeSig', beats }); }}
             onRoute={(patch) => {
               setStudio(st => {

@@ -550,6 +550,7 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                 shared->rateMeasFrames = 0.0;
                 shared->rateMeasLocked = false;
                 shared->outSpeedComp.store(1.0f, std::memory_order_release);
+                shared->calibSamplePos = 0;
             }
             if (!shared->rateMeasLocked && shared->rateMeasStartHost != 0) {
                 double elapsed = (double)(timestamp->mHostTime - shared->rateMeasStartHost)
@@ -584,6 +585,33 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
             if (genFrames < 1) genFrames = 1;
         }
         memset(shared->clickBus, 0, genFrames * sizeof(float));
+
+        const bool _calib = shared->calibrating.load(std::memory_order_relaxed);
+        if (_calib) {
+            // ── Calibration: emit ONLY a standard 120 BPM reference click ──
+            // It runs through the same speed-compensation/resample path as real
+            // audio, so the operator verifies the CORRECTED click is exactly
+            // 120 BPM on the new device before performing. Accent on beat 1.
+            const uint64_t base = shared->calibSamplePos;
+            const uint64_t beatLen  = 24000;   // 120 BPM @ 48k → 0.5s per beat
+            const uint64_t clickLen = 1200;    // ~25ms tick
+            for (AVAudioFrameCount i = 0; i < genFrames; ++i) {
+                const uint64_t pos = base + i;
+                const uint64_t inBeat = pos % beatLen;
+                float s = 0.0f;
+                if (inBeat < clickLen) {
+                    const uint64_t beat = pos / beatLen;
+                    const bool accent = (beat % 4) == 0;
+                    const float t = (float)inBeat / 48000.0f;
+                    const float freq = accent ? 2000.0f : 1000.0f;
+                    const float env = expf(-t * 90.0f);
+                    s = sinf(6.2831853f * freq * t) * env * (accent ? 0.95f : 0.6f);
+                }
+                outL[i] = s;
+                outR[i] = s;
+            }
+            shared->calibSamplePos = base + genFrames;
+        } else {
 
         if (useLyria->load(std::memory_order_relaxed)) {
             // Cloud engine: the conductor mixes its two channels (crossfading
@@ -977,6 +1005,8 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
             }
         }
 
+        }  // end program-audio generation (else of calibration)
+
         shared->pushAudioSamples(outL, outR, genFrames);
 
         // Resample the generated genFrames of 48k content down to the frameCount
@@ -1130,6 +1160,9 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
     if (![_audioEngine startAndReturnError:&err]) {
         NSLog(@"Jam: AVAudioEngine restart failed: %@", err);
     }
+    // Device / channel changed → gate playback behind a 120 BPM calibration
+    // pass so timing is verified on the new output before performing.
+    [_controller enterCalibration];
 }
 
 - (void)handleAudioEngineConfigChange:(NSNotification*)note {

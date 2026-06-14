@@ -51,6 +51,7 @@ export interface StudioState {
   duration: number;
   bpm: number;
   key: string;
+  memo: string;               // free-text notes panel (per song)
   sections: StudioSection[];
   songWave: number[];
   stems: StudioStem[];
@@ -80,7 +81,7 @@ export interface StudioState {
 }
 
 export const STUDIO_INIT: StudioState = {
-  loaded: false, name: '', duration: 0, bpm: 0, key: '',
+  loaded: false, name: '', duration: 0, bpm: 0, key: '', memo: '',
   sections: [], songWave: [],
   stems: [
     { name: 'drums', wave: [], source: '', notes: 0, ribbon: [], playSrc: 'audio', patch: null, engine: 'syn', sfProgram: 0, fxReverb: 0, fxEcho: 0 },
@@ -186,6 +187,8 @@ export function StudioPanel({
   onClick,
   onCue,
   onBpm,
+  onKey,
+  onMemo,
   onTimeSig,
   onRoute,
   onMultichannel,
@@ -230,6 +233,8 @@ export function StudioPanel({
   onClick: (on: boolean) => void;
   onCue: (action: 'auto' | 'set' | 'clear' | 'anchor' | 'anchorReset', sec?: number) => void;
   onBpm: (bpm: number) => void;
+  onKey: (key: string) => void;
+  onMemo: (text: string) => void;
   onTimeSig: (beats: 3 | 4) => void;
   onRoute: (patch: { main?: number; click?: number }) => void;
   onMultichannel: (on: boolean) => void;
@@ -267,6 +272,10 @@ export function StudioPanel({
   // ✨ AI patch prompt dialog: which lane is being asked, + the user's text.
   const [aiAsk, setAiAsk] = useState<number | null>(null);
   const [aiText, setAiText] = useState('');
+  // Manual key edit (null = not editing). The key chip is just a record.
+  const [keyDraft, setKeyDraft] = useState<string | null>(null);
+  // Notes panel open + draft (committed to native on blur, persisted per song).
+  const [notesOpen, setNotesOpen] = useState(false);
   // Tap tempo: average the recent inter-tap intervals → BPM.
   const tapTimes = useRef<number[]>([]);
   const [tapHint, setTapHint] = useState(0);   // taps counted in the current burst
@@ -351,8 +360,37 @@ export function StudioPanel({
                   {tapHint >= 2 ? `TAP·${tapHint}` : 'TAP'}
                 </button>
               </span>
-              <span className="pgm-chip is-blue">{s.key}</span>
+              {keyDraft === null ? (
+                <span
+                  className="pgm-chip is-blue is-editable"
+                  title="点击编辑调性（仅作记录）"
+                  onClick={() => setKeyDraft(s.key)}
+                >
+                  {s.key || '＋ 调性'}
+                </span>
+              ) : (
+                <input
+                  className="pgm-chip is-blue pgm-keyedit"
+                  autoFocus
+                  value={keyDraft}
+                  placeholder="e.g. C major"
+                  onChange={(e) => setKeyDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    e.stopPropagation();
+                    if (e.key === 'Enter') { onKey(keyDraft.trim()); setKeyDraft(null); }
+                    else if (e.key === 'Escape') { setKeyDraft(null); }
+                  }}
+                  onBlur={() => { onKey(keyDraft.trim()); setKeyDraft(null); }}
+                />
+              )}
               <span className="pgm-chip">{mmss(s.duration)}</span>
+              <button
+                className={`pgm-chip pgm-notes-btn${s.memo ? ' has-notes' : ''}`}
+                title="速记 / 演出备注"
+                onClick={() => setNotesOpen(o => !o)}
+              >
+                📝 备注{s.memo ? ' ●' : ''}
+              </button>
             </>
           )}
         </div>
@@ -447,6 +485,24 @@ export function StudioPanel({
           </button>
         </div>
       </div>
+
+      {/* ── Notes panel: free-text per-song memo (records, cues, reminders) ── */}
+      {notesOpen && (
+        <div className="pgm-notes-panel">
+          <div className="pgm-notes-head">
+            <span>备注 · NOTES{s.name ? ` — ${s.name}` : ''}</span>
+            <button onClick={() => setNotesOpen(false)} title="收起">✕</button>
+          </div>
+          <textarea
+            key={s.name}
+            className="pgm-notes-area"
+            placeholder="速记演出备注：起始段落、踏板、转调、设备路由、提醒事项…（自动随歌曲保存）"
+            defaultValue={s.memo}
+            onKeyDown={(e) => e.stopPropagation()}
+            onBlur={(e) => onMemo(e.target.value)}
+          />
+        </div>
+      )}
 
       {/* ── Progress / errors ── */}
       {s.busy && (
