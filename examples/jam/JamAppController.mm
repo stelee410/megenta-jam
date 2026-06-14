@@ -2367,6 +2367,8 @@ static BOOL JamDecode48k(NSURL* url, std::vector<float>& L, std::vector<float>& 
 
 static NSString* const kBpModelURL =
     @"https://github.com/spotify/basic-pitch/raw/main/basic_pitch/saved_models/icassp_2022/nmp.onnx";
+static NSString* const kPianoModelURL =
+    @"https://huggingface.co/stelee/piano-transcription-onnx/resolve/main/piano_crnn.onnx";
 
 - (NSString*)bpModelPath {
     return [[self sepModelDir] stringByAppendingPathComponent:@"nmp.onnx"];
@@ -2397,11 +2399,44 @@ static NSString* const kBpModelURL =
         [task resume];
         return;
     }
-    // Piano stem: prefer the piano-specialized high-resolution CRNN
-    // (ByteDance/Kong 2020 — onset F1 96.7% on MAESTRO vs Basic Pitch's
-    // general-purpose model) when its ONNX export is present.
+    // Piano stem: use the piano-specialized high-resolution CRNN (ByteDance/
+    // Kong 2020 — onset F1 96.7% on MAESTRO vs Basic Pitch's general model).
+    // Fetch its ONNX (~154 MB) on first use, then transcribe.
     NSString* pianoModel =
         [[self sepModelDir] stringByAppendingPathComponent:@"piano_crnn.onnx"];
+    if (idx == 5 &&
+        ![[NSFileManager defaultManager] fileExistsAtPath:pianoModel]) {
+        _studioBusy = YES;
+        [self studioProgress:@"downloading piano model (154MB)" pct:0.01f];
+        NSURLSessionDownloadTask* task = [[NSURLSession sharedSession]
+            downloadTaskWithURL:[NSURL URLWithString:kPianoModelURL]
+              completionHandler:^(NSURL* loc, NSURLResponse* resp, NSError* err) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    self->_studioBusy = NO;
+                    if (err || !loc) {
+                        // Fall back to Basic Pitch rather than failing outright.
+                        NSLog(@"Jam: piano model download failed (%@) — Basic Pitch",
+                              err.localizedDescription);
+                    } else {
+                        [[NSFileManager defaultManager] removeItemAtPath:pianoModel error:nil];
+                        [[NSFileManager defaultManager]
+                            moveItemAtURL:loc toURL:[NSURL fileURLWithPath:pianoModel] error:nil];
+                    }
+                    [self studioProgress:@"ready" pct:1.0f];
+                    [self handleStudioTranscribe:idx];   // retry (uses model if present)
+                });
+            }];
+        [task resume];
+        __weak NSURLSessionDownloadTask* wTask = task;
+        [NSTimer scheduledTimerWithTimeInterval:0.4 repeats:YES block:^(NSTimer* t) {
+            NSURLSessionDownloadTask* st = wTask;
+            if (!st || st.state != NSURLSessionTaskStateRunning) { [t invalidate]; return; }
+            const int64_t got = st.countOfBytesReceived, want = st.countOfBytesExpectedToReceive;
+            if (want > 0) [self studioProgress:@"downloading piano model (154MB)"
+                                           pct:0.01f + 0.95f * (float)got / (float)want];
+        }];
+        return;
+    }
     const BOOL usePiano = (idx == 5) &&
         [[NSFileManager defaultManager] fileExistsAtPath:pianoModel];
 
