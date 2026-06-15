@@ -202,6 +202,7 @@ export function StudioPanel({
   onTranscribe,
   onExtractStem,
   onStemAlign,
+  onStemAlignSet,
   onStemDry,
   onDetectChords,
   onLaneSource,
@@ -251,6 +252,7 @@ export function StudioPanel({
   onTranscribe: (idx: number) => void;
   onExtractStem: (idx: number) => void;
   onStemAlign: (idx: number, action: 'left' | 'right' | 'auto' | 'reset') => void;
+  onStemAlignSet: (idx: number, ms: number) => void;
   onStemDry: (idx: number, value: number) => void;
   onDetectChords: () => void;
   onLaneSource: (idx: number, src: 'audio' | 'midi') => void;
@@ -995,9 +997,23 @@ export function StudioPanel({
                         disabled={s.busy} title="自动对齐（按音频互相关分析）">⊙ 自动</button>
                       <button className="pgm-mini" onClick={() => onStemAlign(i, 'reset')}
                         disabled={s.busy} title="复位到 0">↺</button>
-                      <small className="pgm-align-ms">
-                        {(stem.alignMs ?? 0) > 0 ? '+' : ''}{stem.alignMs ?? 0}ms
-                      </small>
+                      <input
+                        className="pgm-align-ms"
+                        type="number"
+                        step={10}
+                        key={`${i}-${stem.alignMs ?? 0}`}
+                        defaultValue={stem.alignMs ?? 0}
+                        title="直接输入毫秒偏移快速对齐（正=延后，负=提前）；回车或方向键应用"
+                        onKeyDown={(e) => {
+                          e.stopPropagation();
+                          if (e.key === 'Enter') {
+                            onStemAlignSet(i, Number((e.target as HTMLInputElement).value));
+                            (e.target as HTMLInputElement).blur();
+                          }
+                        }}
+                        onBlur={(e) => onStemAlignSet(i, Number(e.target.value))}
+                      />
+                      <small className="pgm-align-unit">ms</small>
                     </span>
                   )}
                   {stem.wave.length > 0 && stem.playSrc !== 'midi' && (
@@ -1031,7 +1047,15 @@ export function StudioPanel({
                   ? '双击打开钢琴卷 MIDI 编辑器' : undefined}
               >
                 {stem.wave.length > 0 ? (
-                  <Wave data={stem.wave} color="rgba(111, 179, 255, 0.8)" />
+                  <div
+                    className="pgm-wave-shift"
+                    style={{
+                      transform: `translateX(${s.duration > 0
+                        ? ((stem.alignMs ?? 0) / 1000 / s.duration) * 100 : 0}%)`,
+                    }}
+                  >
+                    <Wave data={stem.wave} color="rgba(111, 179, 255, 0.8)" />
+                  </div>
                 ) : stem.ribbon.length > 0 ? (
                   <NoteRibbon ribbon={stem.ribbon} duration={s.duration} main />
                 ) : (

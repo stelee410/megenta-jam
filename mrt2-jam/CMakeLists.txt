@@ -79,6 +79,7 @@ target_link_libraries(mrt2_jam PRIVATE
     "-framework CoreMIDI"
     "-framework WebKit"
     "-framework UniformTypeIdentifiers"
+    "-framework IOKit"
 )
 
 set_target_properties(mrt2_jam PROPERTIES

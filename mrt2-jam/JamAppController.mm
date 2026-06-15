@@ -20,6 +20,7 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <AVFoundation/AVFoundation.h>
+#import <IOKit/pwr_mgt/IOPMLib.h>
 #include <vector>
 #import "MagentaModelManager.h"
 #import "MagentaModelDownloader.h"
@@ -131,6 +132,7 @@ static BOOL isDevServerRunning(void) {
     NSString* _songName;
     NSString* _keyOverride;               // manual key label (overrides auto-detect)
     NSString* _songMemo;                  // free-text notes panel content
+    IOPMAssertionID _liveAssertionID;     // 现场模式：阻止休眠/锁屏 (0 = none)
     NSURL* _songURL;
     double _songDur;
     BOOL _studioBusy;
@@ -406,6 +408,27 @@ static BOOL isDevServerRunning(void) {
     if (self.sharedState)
         self.sharedState->calibrating.store(false, std::memory_order_release);
     [self sendStateUpdate:@{@"calibration": @{@"active": @NO}}];
+}
+
+// ─── Live (stage) mode: hold a power assertion so the machine never idle-
+// sleeps and the screen never locks mid-performance. Released when off / quit.
+- (void)setLiveMode:(BOOL)on {
+    if (on) {
+        if (_liveAssertionID == 0) {
+            // Display-sleep prevention keeps the screen on (→ no idle lock) and
+            // implicitly keeps the system awake while the display is up.
+            IOPMAssertionCreateWithName(
+                kIOPMAssertionTypePreventUserIdleDisplaySleep,
+                kIOPMAssertionLevelOn,
+                CFSTR("MRT2 - Jam live performance"),
+                &_liveAssertionID);
+        }
+    } else if (_liveAssertionID != 0) {
+        IOPMAssertionRelease(_liveAssertionID);
+        _liveAssertionID = 0;
+    }
+    [[NSUserDefaults standardUserDefaults] setBool:on forKey:@"Jam_LiveMode"];
+    [self sendStateUpdate:@{@"liveMode": @(on)}];
 }
 
 - (void)sendPlayState:(BOOL)playing {
@@ -720,6 +743,19 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
         if ([idx isKindOfClass:[NSNumber class]] && [act isKindOfClass:[NSString class]])
             [self handleStudioStemAlign:idx.intValue action:act];
     }
+    else if ([type isEqualToString:@"studioStemAlignSet"]) {
+        NSNumber* idx = body[@"index"];
+        NSNumber* ms = body[@"ms"];   // absolute offset in ms (+later / -earlier)
+        if ([idx isKindOfClass:[NSNumber class]] && [ms isKindOfClass:[NSNumber class]] &&
+            self.sharedState) {
+            const int i = idx.intValue;
+            if (i >= 0 && i < JamSharedState::kStems) {
+                self.sharedState->stemOffset[i].store(
+                    (long)llround(ms.doubleValue * 48.0), std::memory_order_relaxed);
+                [self studioPushStemAlign:i];
+            }
+        }
+    }
     else if ([type isEqualToString:@"studioStemDry"]) {
         NSNumber* idx = body[@"index"];
         NSNumber* val = body[@"value"];    // 0..0.5 dry-blend amount
@@ -889,6 +925,10 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
             [[NSNotificationCenter defaultCenter] postNotificationName:@"JamRebuildAudioGraph"
                                                                 object:nil];
         }
+    }
+    else if ([type isEqualToString:@"liveMode"]) {
+        NSNumber* on = body[@"on"];
+        if ([on isKindOfClass:[NSNumber class]]) [self setLiveMode:on.boolValue];
     }
     else if ([type isEqualToString:@"calibrationDone"]) {
         [self finishCalibration];
@@ -1461,6 +1501,8 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
                 @([[NSUserDefaults standardUserDefaults] boolForKey:@"Jam_MultichannelOut"])}];
             [self sendStateUpdate:@{@"studioClickGain":
                 @(self.sharedState->clickGain.load(std::memory_order_relaxed))}];
+            // Re-apply persisted 现场模式 (creates the assertion + pushes state).
+            [self setLiveMode:[[NSUserDefaults standardUserDefaults] boolForKey:@"Jam_LiveMode"]];
         });
     }
     else if ([type isEqualToString:@"sepPipeline"]) {

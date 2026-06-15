@@ -3370,7 +3370,7 @@ html[data-theme="famicom"] .pgm .pgm-mini, html[data-theme="famicom"] .pgm .pgm-
 }
 
 /* PGM playhead */
-.pgm-wave-wrap { position: relative; }
+.pgm-wave-wrap { position: relative; overflow: hidden; }
 .pgm-playhead {
   position: absolute;
   top: 0;
@@ -4169,11 +4169,17 @@ button.pgm-notes-btn.has-notes { color: #f8d35c; border-color: rgba(248, 211, 92
   border-left: 1px solid rgba(255, 255, 255, 0.12);
 }
 .pgm-align .pgm-mini { padding: 2px 6px; min-width: 0; }
-.pgm-align-ms {
+input.pgm-align-ms {
+  width: 54px; padding: 2px 4px;
+  border: 1px solid rgba(111, 179, 255, 0.3); border-radius: 5px;
+  background: rgba(111, 179, 255, 0.1); outline: none;
   font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace;
-  font-size: 10px; color: #6fb3ff; min-width: 44px; text-align: right;
+  font-size: 10px; color: #6fb3ff; text-align: right;
   font-variant-numeric: tabular-nums;
 }
+input.pgm-align-ms:focus { border-color: rgba(111, 179, 255, 0.8); }
+.pgm-align-unit { font-size: 10px; color: #6fb3ff; margin-left: 1px; }
+.pgm-wave-shift { width: 100%; transition: transform 0.08s linear; }
 
 /* ── Per-stem dry-blend slider ────────────────────────────────────────── */
 .pgm-dry {
@@ -4199,3 +4205,10 @@ button.pgm-notes-btn.has-notes { color: #f8d35c; border-color: rgba(248, 211, 92
   font-size: 10px; color: #f8d35c; min-width: 30px; text-align: right;
   font-variant-numeric: tabular-nums;
 }
+
+/* ── Live (stage) mode toggle ─────────────────────────────────────────── */
+.jam-chat-button.is-live {
+  background: #ff5f78; color: #fff; border-color: #ff5f78;
+  font-weight: 600;
+}
+.jam-chat-button.is-live:hover { background: #ff7088; }

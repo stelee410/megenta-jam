@@ -500,6 +500,8 @@ function App() {
     active: boolean; measuring: boolean;
     comp?: number; effectiveRate?: number; channels?: number;
   }>({ active: false, measuring: false });
+  // 现场模式：开启后阻止系统休眠 / 屏幕锁屏（native IOPMAssertion）。
+  const [liveMode, setLiveMode] = useState(false);
   // Tell native which tab is active so live MIDI only conditions the
   // generative engine on the jam tab (never starts an AI jam from pgm).
   useEffect(() => { post({ type: 'activeTab', tab: mainTab }); }, [mainTab]);
@@ -2155,6 +2157,9 @@ function App() {
           stems: st.stems.map((x, k) => k === i ? { ...x, alignMs: ms } : x),
         }));
       }
+      if (typeof state.liveMode === 'boolean') {
+        setLiveMode(state.liveMode);
+      }
       if (typeof state.studioClickGain === 'number') {
         const g = state.studioClickGain;
         setStudio(st => ({ ...st, clickGain: g }));
@@ -2830,6 +2835,13 @@ function App() {
             )}
           </div>
           <div className="jam-topbar-right">
+            <button
+              className={`jam-chat-button ${liveMode ? 'is-live' : ''}`}
+              title="现场模式：阻止电脑休眠与屏幕锁屏（演出时开启）"
+              onClick={() => { const on = !liveMode; setLiveMode(on); post({ type: 'liveMode', on }); }}
+            >
+              {liveMode ? '● 现场' : '现场'}
+            </button>
             <TimingIndicator
               frameMs={metrics.frameMs}
               droppedFrames={metrics.droppedFrames}
@@ -2915,6 +2927,7 @@ function App() {
             onTranscribe={(i) => post({ type: 'studioTranscribe', index: i })}
             onExtractStem={(i) => post({ type: 'studioExtractStem', index: i })}
             onStemAlign={(i, action) => post({ type: 'studioStemAlign', index: i, action })}
+            onStemAlignSet={(i, ms) => post({ type: 'studioStemAlignSet', index: i, ms })}
             onStemDry={(i, value) => {
               setStudio(st => ({ ...st, stems: st.stems.map((x, k) => k === i ? { ...x, dry: value } : x) }));
               post({ type: 'studioStemDry', index: i, value });
