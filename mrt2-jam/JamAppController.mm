@@ -3409,9 +3409,32 @@ static BOOL JamWriteWav(NSURL* url, const int16_t* interleaved, long frames) {
                         }
                     }
                 }
+                // PGM live-play source console (SOURCE / VOL / R / E).
+                NSDictionary* live = pgm[@"live"];
+                if ([live isKindOfClass:[NSDictionary class]]) {
+                    if ([live[@"program"] isKindOfClass:[NSNumber class]])
+                        self.sharedState->liveSfProgram.store(
+                            MAX(0, MIN(127, [live[@"program"] intValue])), std::memory_order_relaxed);
+                    if ([live[@"gain"] isKindOfClass:[NSNumber class]]) {
+                        const float g = MAX(0.0f, MIN(1.2f, [live[@"gain"] floatValue]));
+                        self.sharedState->liveGain.store(g, std::memory_order_relaxed);
+                        self.sharedState->synth.volume.store(g, std::memory_order_relaxed);
+                    }
+                    if ([live[@"reverb"] isKindOfClass:[NSNumber class]]) {
+                        const float v = MAX(0.0f, MIN(1.0f, [live[@"reverb"] floatValue]));
+                        self.sharedState->liveFx.reverb.store(v, std::memory_order_relaxed);
+                        self.sharedState->synth.space.store(v, std::memory_order_relaxed);
+                    }
+                    if ([live[@"echo"] isKindOfClass:[NSNumber class]])
+                        self.sharedState->liveFx.echo.store(
+                            MAX(0.0f, MIN(1.0f, [live[@"echo"] floatValue])), std::memory_order_relaxed);
+                    if ([live[@"source"] isKindOfClass:[NSNumber class]])
+                        [self handleLiveSource:[live[@"source"] intValue]];
+                }
                 [self studioPushPatches];
                 [self studioPushSources];
                 [self studioPushLanes];
+                [self studioPushLive];
                 self->_studioBusy = NO;
                 [self studioProgress:@"ready" pct:1.0f];
             });
@@ -4085,6 +4108,14 @@ static NSString* const kSwModelURL =
             }
             arr;
         }),
+        @"live": @{
+            // PGM live-play source (the SOURCE / VOL / R / E console).
+            @"source":  @(self.sharedState->liveSource.load(std::memory_order_relaxed)),
+            @"program": @(self.sharedState->liveSfProgram.load(std::memory_order_relaxed)),
+            @"gain":    @(self.sharedState->liveGain.load(std::memory_order_relaxed)),
+            @"reverb":  @(self.sharedState->liveFx.reverb.load(std::memory_order_relaxed)),
+            @"echo":    @(self.sharedState->liveFx.echo.load(std::memory_order_relaxed)),
+        },
     };
     NSData* data = [NSJSONSerialization dataWithJSONObject:pgm
                                                    options:NSJSONWritingPrettyPrinted
