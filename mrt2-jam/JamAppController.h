@@ -111,6 +111,7 @@ struct JamSharedState {
     std::atomic<long> countInLeft{0};      // frozen pre-roll samples remaining (no room to roll back)
     std::atomic<long> countInVPos{0};      // virtual sample swept during the frozen pre-roll
     std::atomic<bool> clickOn{false};      // metronome during playback
+    std::atomic<float> clickGain{1.0f};    // click/metronome volume (0..2)
     std::atomic<float> stemBpm{120.0f};    // song tempo driving click/count-in
     std::atomic<int> beatsPerBar{4};       // metronome time signature: 4 (4/4) or 3 (3/4)
     std::atomic<long> stemBeatOff{0};      // first-beat offset (samples)

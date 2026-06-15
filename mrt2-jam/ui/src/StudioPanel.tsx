@@ -72,6 +72,7 @@ export interface StudioState {
   timeSig: 3 | 4;             // metronome time signature
   countIn: 0 | 4 | 8;         // 预备拍 beats before playback
   click: boolean;             // metronome during playback
+  clickGain: number;          // metronome volume 0..2 (1 = default)
   outChannels: number;        // device output channel count
   multichannel: boolean;      // opt-in multichannel output routing
   routeMain: number;          // bitmask of channels carrying the main mix
@@ -100,7 +101,7 @@ export const STUDIO_INIT: StudioState = {
   mixer: Array.from({ length: 8 }, () => ({ mute: false, solo: false, gain: 1 })),
   playhead: { pos: 0, len: 0 },
   sepPipeline: 'auto', rfPresent: false, cue: -1, clickAnchor: -1, timeSig: 4,
-  countIn: 0, click: false,
+  countIn: 0, click: false, clickGain: 1,
   outChannels: 2, multichannel: false, routeMain: 0x3, routeClick: 0x3,
   sepEngine: '', sepModel: { present: false, sources: 0, downloading: false, pct: 0, mb: 0 },
   error: null, notice: null,
@@ -191,6 +192,7 @@ export function StudioPanel({
   onBpm,
   onKey,
   onMemo,
+  onClickGain,
   onTimeSig,
   onRoute,
   onMultichannel,
@@ -235,6 +237,7 @@ export function StudioPanel({
   onTransport: (action: 'play' | 'pause' | 'restart') => void;
   onCountIn: (beats: 0 | 4 | 8) => void;
   onClick: (on: boolean) => void;
+  onClickGain: (value: number) => void;
   onCue: (action: 'auto' | 'set' | 'clear' | 'anchor' | 'anchorReset', sec?: number) => void;
   onBpm: (bpm: number) => void;
   onKey: (key: string) => void;
@@ -599,6 +602,12 @@ export function StudioPanel({
           >
             ♩ click
           </button>
+          <label className="pgm-clickvol" title={`click 音量 ${Math.round((s.clickGain ?? 1) * 100)}%`}>
+            <input type="range" min={0} max={2} step={0.05}
+              value={s.clickGain ?? 1}
+              onChange={(e) => onClickGain(Number(e.target.value))} />
+            <small>{Math.round((s.clickGain ?? 1) * 100)}%</small>
+          </label>
           <span className="pgm-srcswitch" title="节拍器拍号">
             <button className={s.timeSig === 4 ? 'is-on' : ''} onClick={() => onTimeSig(4)}>4/4</button>
             <button className={s.timeSig === 3 ? 'is-on' : ''} onClick={() => onTimeSig(3)}>3/4</button>

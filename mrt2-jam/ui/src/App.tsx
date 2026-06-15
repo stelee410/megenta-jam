@@ -2155,6 +2155,10 @@ function App() {
           stems: st.stems.map((x, k) => k === i ? { ...x, alignMs: ms } : x),
         }));
       }
+      if (typeof state.studioClickGain === 'number') {
+        const g = state.studioClickGain;
+        setStudio(st => ({ ...st, clickGain: g }));
+      }
       if (state.studioStemDry && typeof state.studioStemDry === 'object') {
         const a = state.studioStemDry;
         const i = Number(a.index);
@@ -2880,6 +2884,10 @@ function App() {
             onClick={(on) => {
               setStudio(st => ({ ...st, click: on }));
               post({ type: 'studioClick', on });
+            }}
+            onClickGain={(value) => {
+              setStudio(st => ({ ...st, clickGain: value }));
+              post({ type: 'studioClickGain', value });
             }}
             onCue={(action, sec) => post({ type: 'studioCue', action, sec: sec ?? -1 })}
             onBpm={(bpm) => { setStudio(st => ({ ...st, bpm })); post({ type: 'studioBpm', bpm }); }}

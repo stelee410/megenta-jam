@@ -910,6 +910,14 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
             self.sharedState->clickOn.store(on.boolValue, std::memory_order_relaxed);
         }
     }
+    else if ([type isEqualToString:@"studioClickGain"]) {
+        NSNumber* v = body[@"value"];
+        if ([v isKindOfClass:[NSNumber class]] && self.sharedState) {
+            const float g = MAX(0.0f, MIN(2.0f, v.floatValue));
+            self.sharedState->clickGain.store(g, std::memory_order_relaxed);
+            [[NSUserDefaults standardUserDefaults] setFloat:g forKey:@"Jam_ClickGain"];
+        }
+    }
     else if ([type isEqualToString:@"studioTimeSig"]) {
         NSNumber* beats = body[@"beats"];
         if ([beats isKindOfClass:[NSNumber class]] && self.sharedState) {
@@ -1451,6 +1459,8 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
             [self studioPushLive];
             [self sendStateUpdate:@{@"audioMultichannel":
                 @([[NSUserDefaults standardUserDefaults] boolForKey:@"Jam_MultichannelOut"])}];
+            [self sendStateUpdate:@{@"studioClickGain":
+                @(self.sharedState->clickGain.load(std::memory_order_relaxed))}];
         });
     }
     else if ([type isEqualToString:@"sepPipeline"]) {

@@ -802,7 +802,8 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                         shared->clickPhase += shared->clickFreq / 48000.0f;
                         if (shared->clickPhase >= 1.0f) shared->clickPhase -= 1.0f;
                         shared->clickBus[i] += sinf(shared->clickPhase * 2.0f * (float)M_PI)
-                                               * shared->clickEnv * 0.5f;
+                                               * shared->clickEnv * 0.5f
+                                               * shared->clickGain.load(std::memory_order_relaxed);
                         shared->clickEnv *= 0.9988f;
                     }
                 }
@@ -997,7 +998,8 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                             shared->clickPhase += shared->clickFreq / 48000.0f;
                             if (shared->clickPhase >= 1.0f) shared->clickPhase -= 1.0f;
                             const float c = sinf(shared->clickPhase * 2.0f * (float)M_PI)
-                                            * shared->clickEnv * 0.4f;
+                                            * shared->clickEnv * 0.4f
+                                            * shared->clickGain.load(std::memory_order_relaxed);
                             shared->clickEnv *= 0.9988f;
                             shared->clickBus[i] += c;
                         }
@@ -1096,6 +1098,13 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
     _sharedState.multichannelOut.store(
         [[NSUserDefaults standardUserDefaults] boolForKey:@"Jam_MultichannelOut"],
         std::memory_order_relaxed);
+
+    // Persisted click volume (default 1.0 when never set).
+    {
+        NSUserDefaults* d = [NSUserDefaults standardUserDefaults];
+        const float g = [d objectForKey:@"Jam_ClickGain"] ? [d floatForKey:@"Jam_ClickGain"] : 1.0f;
+        _sharedState.clickGain.store(MAX(0.0f, MIN(2.0f, g)), std::memory_order_relaxed);
+    }
 
     [self connectSourceNodeForCurrentDevice];
 
