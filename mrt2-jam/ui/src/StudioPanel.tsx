@@ -43,6 +43,8 @@ export interface StudioStem {
   sfProgram: number;                   // GM program (SF2 engine)
   fxReverb: number;                    // lane insert FX 0..1
   fxEcho: number;
+  alignMs?: number;                    // playback alignment offset (ms; imported tracks)
+  dry?: number;                        // dry-blend amount 0..0.5 (fold mix back in)
 }
 
 export interface StudioState {
@@ -197,6 +199,8 @@ export function StudioPanel({
   onImportStem,
   onTranscribe,
   onExtractStem,
+  onStemAlign,
+  onStemDry,
   onDetectChords,
   onLaneSource,
   patchOptions,
@@ -243,6 +247,8 @@ export function StudioPanel({
   onImportStem: (idx: number) => void;
   onTranscribe: (idx: number) => void;
   onExtractStem: (idx: number) => void;
+  onStemAlign: (idx: number, action: 'left' | 'right' | 'auto' | 'reset') => void;
+  onStemDry: (idx: number, value: number) => void;
   onDetectChords: () => void;
   onLaneSource: (idx: number, src: 'audio' | 'midi') => void;
   patchOptions: { name: string; category: string }[];
@@ -970,6 +976,30 @@ export function StudioPanel({
                   >
                     ⬆ {stem.wave.length ? 'replace' : 'import'}
                   </button>
+                  {stem.source === 'imported' && (
+                    <span className="pgm-align" title="对齐导入轨：左右微调 10ms / 按音频自动对齐 / 复位">
+                      <button className="pgm-mini" onClick={() => onStemAlign(i, 'left')}
+                        disabled={s.busy} title="左移 10ms（提前）">◀</button>
+                      <button className="pgm-mini" onClick={() => onStemAlign(i, 'right')}
+                        disabled={s.busy} title="右移 10ms（延后）">▶</button>
+                      <button className="pgm-mini is-neural" onClick={() => onStemAlign(i, 'auto')}
+                        disabled={s.busy} title="自动对齐（按音频互相关分析）">⊙ 自动</button>
+                      <button className="pgm-mini" onClick={() => onStemAlign(i, 'reset')}
+                        disabled={s.busy} title="复位到 0">↺</button>
+                      <small className="pgm-align-ms">
+                        {(stem.alignMs ?? 0) > 0 ? '+' : ''}{stem.alignMs ?? 0}ms
+                      </small>
+                    </span>
+                  )}
+                  {stem.wave.length > 0 && stem.playSrc !== 'midi' && (
+                    <label className="pgm-dry" title="干混：把一点原混折回该轨，填平分离硬门限的空隙、盖住 musical-noise 伪影（代价是少量串扰）。0 = 纯分离">
+                      干
+                      <input type="range" min={0} max={0.3} step={0.01}
+                        value={stem.dry ?? 0}
+                        onChange={(e) => onStemDry(i, Number(e.target.value))} />
+                      <small>{Math.round((stem.dry ?? 0) * 100)}%</small>
+                    </label>
+                  )}
                   {i >= 6 && (
                     <button
                       className="pgm-mini is-del"

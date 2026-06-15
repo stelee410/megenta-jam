@@ -949,6 +949,9 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                 const long beatOff = shared->stemBeatOff.load(std::memory_order_relaxed);
                 const int barPh = shared->stemBarPhase.load(std::memory_order_relaxed);
                 const int bpb = shared->beatsPerBar.load(std::memory_order_relaxed);
+                const float* mixL = shared->songMixL.load(std::memory_order_relaxed);
+                const float* mixR = shared->songMixR.load(std::memory_order_relaxed);
+                const long mixLen = shared->songMixLen.load(std::memory_order_relaxed);
                 long pos = shared->stemPos.load(std::memory_order_relaxed);
                 for (AVAudioFrameCount i = 0; i < genFrames && pos < len; ++i, ++pos) {
                     float l = 0.0f, r = 0.0f;
@@ -957,8 +960,23 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                         float& g = shared->stemSmoothG[t];
                         g += (target[t] - g) * 0.002f;     // ~10 ms de-click
                         if (bufs[t] && g > 0.0005f) {
-                            l += bufs[t][pos * 2] * g * (0.9f / 32768.0f);
-                            r += bufs[t][pos * 2 + 1] * g * (0.9f / 32768.0f);
+                            // Per-stem alignment offset: read from pos - offset,
+                            // silent outside the stem buffer.
+                            const long sp = pos - shared->stemOffset[t].load(std::memory_order_relaxed);
+                            float sl = 0.0f, sr = 0.0f;
+                            if (sp >= 0 && sp < len) {
+                                sl = bufs[t][sp * 2]     * (1.0f / 32768.0f);
+                                sr = bufs[t][sp * 2 + 1] * (1.0f / 32768.0f);
+                            }
+                            // Dry blend: fold a little of the original mix back in
+                            // (fills hard-mask gaps / masks separation artifacts).
+                            const float d = shared->stemDry[t].load(std::memory_order_relaxed);
+                            if (d > 0.0001f && mixL && pos < mixLen) {
+                                sl = (1.0f - d) * sl + d * mixL[pos];
+                                sr = (1.0f - d) * sr + d * mixR[pos];
+                            }
+                            l += sl * g * 0.9f;
+                            r += sr * g * 0.9f;
                         }
                     }
                     const bool click = clickToggle || (ciUntil >= 0 && pos < ciUntil);

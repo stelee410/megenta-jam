@@ -714,6 +714,23 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
         NSNumber* idx = body[@"index"];
         if ([idx isKindOfClass:[NSNumber class]]) [self handleStudioExtractStem:idx.intValue];
     }
+    else if ([type isEqualToString:@"studioStemAlign"]) {
+        NSNumber* idx = body[@"index"];
+        NSString* act = body[@"action"];   // 'left' | 'right' | 'auto' | 'reset'
+        if ([idx isKindOfClass:[NSNumber class]] && [act isKindOfClass:[NSString class]])
+            [self handleStudioStemAlign:idx.intValue action:act];
+    }
+    else if ([type isEqualToString:@"studioStemDry"]) {
+        NSNumber* idx = body[@"index"];
+        NSNumber* val = body[@"value"];    // 0..0.5 dry-blend amount
+        if ([idx isKindOfClass:[NSNumber class]] && [val isKindOfClass:[NSNumber class]] &&
+            self.sharedState) {
+            const int i = idx.intValue;
+            if (i >= 0 && i < JamSharedState::kStems)
+                self.sharedState->stemDry[i].store(
+                    MAX(0.0f, MIN(0.5f, val.floatValue)), std::memory_order_relaxed);
+        }
+    }
     else if ([type isEqualToString:@"studioDetectChords"]) {
         [self handleStudioDetectChords];
     }
@@ -2401,10 +2418,12 @@ static NSString* const kJamKeyNames[12] = {@"C", @"C#", @"D", @"D#", @"E", @"F",
             }
             self->_stemSource[idx] = @"imported";
             self->_stemNotes[idx].clear();
+            self.sharedState->stemOffset[idx].store(0, std::memory_order_relaxed);
             if (idx == 0) [self studioRefineBeatGridFromDrums];
             dispatch_async(dispatch_get_main_queue(), ^{
                 [self studioPushStemWaves];
                 [self studioPublishStems];
+                [self studioPushStemAlign:idx];
                 self->_studioBusy = NO;
                 [self studioProgress:@"ready" pct:1.0f];
             });
@@ -3196,10 +3215,13 @@ static BOOL JamWriteWav(NSURL* url, const int16_t* interleaved, long frames) {
             // Stems by canonical name.
             static NSString* const names[8] = {@"drums", @"bass", @"other", @"vocals",
                                                @"guitar", @"piano", @"aux1", @"aux2"};
+            NSArray* stemMeta = pgm[@"stems"];
             long maxFrames = (long)self->_songL.size();
             for (int i = 0; i < 8; ++i) {
                 self->_stems[i].clear();
                 self->_stemSource[i] = nil;
+                self.sharedState->stemOffset[i].store(0, std::memory_order_relaxed);
+                self.sharedState->stemDry[i].store(0.0f, std::memory_order_relaxed);
                 self->_takeL[i].clear();
                 self->_takeR[i].clear();
                 NSURL* wav = [[root URLByAppendingPathComponent:@"stems"]
@@ -3220,6 +3242,18 @@ static BOOL JamWriteWav(NSURL* url, const int16_t* interleaved, long frames) {
                     self->_stems[i][k * 2 + 1] = (int16_t)r;
                 }
                 self->_stemSource[i] = @"imported";
+                if ([stemMeta isKindOfClass:[NSArray class]] && (NSUInteger)i < stemMeta.count &&
+                    [stemMeta[i] isKindOfClass:[NSDictionary class]] &&
+                    [stemMeta[i][@"offset"] isKindOfClass:[NSNumber class]]) {
+                    self.sharedState->stemOffset[i].store(
+                        [stemMeta[i][@"offset"] longValue], std::memory_order_relaxed);
+                }
+                if ([stemMeta isKindOfClass:[NSArray class]] && (NSUInteger)i < stemMeta.count &&
+                    [stemMeta[i] isKindOfClass:[NSDictionary class]] &&
+                    [stemMeta[i][@"dry"] isKindOfClass:[NSNumber class]]) {
+                    self.sharedState->stemDry[i].store(
+                        MAX(0.0f, MIN(0.5f, [stemMeta[i][@"dry"] floatValue])), std::memory_order_relaxed);
+                }
             }
             if (maxFrames <= 0) {
                 [self studioFail:@"PGM folder has no audio"];
@@ -3435,6 +3469,7 @@ static BOOL JamWriteWav(NSURL* url, const int16_t* interleaved, long frames) {
                 [self studioPushSources];
                 [self studioPushLanes];
                 [self studioPushLive];
+                for (int i = 0; i < 8; ++i) { [self studioPushStemAlign:i]; [self studioPushStemDry:i]; }
                 self->_studioBusy = NO;
                 [self studioProgress:@"ready" pct:1.0f];
             });
@@ -3658,6 +3693,112 @@ static NSString* const kSwModelURL =
             [self studioProgress:@"ready" pct:1.0f];
             [self sendStateUpdate:@{@"studioNotice":
                 [NSString stringWithFormat:@"✓ %@ HQ 重分离完成", kAppNames[idx]]}];
+        });
+    });
+}
+
+// Push a stem's current alignment offset (ms) to the UI.
+- (void)studioPushStemAlign:(int)idx {
+    if (idx < 0 || idx >= JamSharedState::kStems || !self.sharedState) return;
+    const long off = self.sharedState->stemOffset[idx].load(std::memory_order_relaxed);
+    [self sendStateUpdate:@{@"studioStemAlign": @{
+        @"index": @(idx),
+        @"ms": @((int)llroundf(off / 48.0f)),
+    }}];
+}
+
+// Push a stem's current dry-blend amount (0..0.5) to the UI.
+- (void)studioPushStemDry:(int)idx {
+    if (idx < 0 || idx >= JamSharedState::kStems || !self.sharedState) return;
+    [self sendStateUpdate:@{@"studioStemDry": @{
+        @"index": @(idx),
+        @"value": @(self.sharedState->stemDry[idx].load(std::memory_order_relaxed)),
+    }}];
+}
+
+// Manual nudge / auto-align / reset of an imported/replaced stem against the
+// base song. Offset is applied at playback read time (stemOffset, samples).
+- (void)handleStudioStemAlign:(int)idx action:(NSString*)action {
+    JamSharedState* sh = self.sharedState;
+    if (idx < 0 || idx >= JamSharedState::kStems || !sh) return;
+    const long kNudge = 480;  // 10 ms per click @ 48 kHz
+
+    if ([action isEqualToString:@"reset"]) {
+        sh->stemOffset[idx].store(0, std::memory_order_relaxed);
+        [self studioPushStemAlign:idx];
+        return;
+    }
+    if ([action isEqualToString:@"left"]) {       // play earlier
+        sh->stemOffset[idx].fetch_sub(kNudge, std::memory_order_relaxed);
+        [self studioPushStemAlign:idx];
+        return;
+    }
+    if ([action isEqualToString:@"right"]) {      // play later
+        sh->stemOffset[idx].fetch_add(kNudge, std::memory_order_relaxed);
+        [self studioPushStemAlign:idx];
+        return;
+    }
+    if (![action isEqualToString:@"auto"]) return;
+
+    // ── Auto-align: cross-correlate the stem's onset envelope against the
+    //    original mix and pick the lag that lines them up. ──
+    if (_stems[idx].empty() || _songL.empty() || _studioBusy) {
+        [self studioPushStemAlign:idx];
+        return;
+    }
+    _studioBusy = YES;
+    [self studioProgress:@"自动对齐分析中…" pct:0.15f];
+    // Snapshot the audio for the background thread.
+    std::vector<int16_t> stem = _stems[idx];
+    std::vector<float> songL = _songL, songR = _songR;
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        const int H = 256;                       // envelope hop (~187 Hz)
+        const long stemFrames = (long)stem.size() / 2;
+        const long songFrames = (long)songL.size();
+        const long N = MIN(stemFrames, songFrames);
+        const long cap = MIN(N, (long)(120.0 * 48000.0));  // analyse ≤120 s
+        const long E = cap / H;                  // envelope length
+        if (E < 16) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self->_studioBusy = NO;
+                [self studioProgress:@"ready" pct:1.0f];
+                [self studioPushStemAlign:idx];
+            });
+            return;
+        }
+        std::vector<float> eStem(E, 0.0f), eRef(E, 0.0f);
+        for (long m = 0; m < E; ++m) {
+            float ss = 0.0f, rr = 0.0f;
+            const long base = m * H;
+            for (int j = 0; j < H; ++j) {
+                const long s = base + j;
+                ss += fabsf((float)(stem[s * 2] + stem[s * 2 + 1])) * (0.5f / 32768.0f);
+                rr += fabsf(songL[s] + songR[s]) * 0.5f;
+            }
+            eStem[m] = ss; eRef[m] = rr;
+        }
+        // Mean-subtract for a covariance-style match.
+        double mS = 0, mR = 0;
+        for (long m = 0; m < E; ++m) { mS += eStem[m]; mR += eRef[m]; }
+        mS /= E; mR /= E;
+        for (long m = 0; m < E; ++m) { eStem[m] -= (float)mS; eRef[m] -= (float)mR; }
+        const long L = MIN(E / 2, (long)(3.0 * 48000.0 / H));  // ±3 s search
+        double best = -1e30; long bestD = 0;
+        for (long d = -L; d <= L; ++d) {
+            double acc = 0.0;
+            const long m0 = MAX(0L, -d), m1 = MIN(E, E - d);
+            for (long m = m0; m < m1; ++m) acc += (double)eStem[m] * eRef[m + d];
+            if (acc > best) { best = acc; bestD = d; }
+        }
+        const long offset = bestD * H;           // stemOffset (samples)
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_studioBusy = NO;
+            sh->stemOffset[idx].store(offset, std::memory_order_relaxed);
+            [self studioProgress:@"ready" pct:1.0f];
+            [self sendStateUpdate:@{@"studioNotice":
+                [NSString stringWithFormat:@"✓ 自动对齐：%+d ms",
+                 (int)llroundf(offset / 48.0f)]}];
+            [self studioPushStemAlign:idx];
         });
     });
 }
@@ -3931,6 +4072,17 @@ static NSString* const kSwModelURL =
         if (len > 0) any = true;
     }
     sh->stemLen.store(any ? len : 0, std::memory_order_release);
+    // Publish the original mix for the per-stem dry blend.
+    if (!_songL.empty()) {
+        sh->songMixL.store(_songL.data(), std::memory_order_relaxed);
+        sh->songMixR.store(_songR.empty() ? _songL.data() : _songR.data(),
+                           std::memory_order_relaxed);
+        sh->songMixLen.store((long)_songL.size(), std::memory_order_release);
+    } else {
+        sh->songMixLen.store(0, std::memory_order_release);
+        sh->songMixL.store(nullptr, std::memory_order_relaxed);
+        sh->songMixR.store(nullptr, std::memory_order_relaxed);
+    }
 }
 
 - (void)studioUnpublishStems {
@@ -3940,6 +4092,9 @@ static NSString* const kSwModelURL =
     sh->stemMask.store(0, std::memory_order_relaxed);
     sh->stemLen.store(0, std::memory_order_relaxed);
     for (int i = 0; i < 8; ++i) sh->stemBuf[i].store(nullptr, std::memory_order_relaxed);
+    sh->songMixLen.store(0, std::memory_order_release);
+    sh->songMixL.store(nullptr, std::memory_order_relaxed);
+    sh->songMixR.store(nullptr, std::memory_order_relaxed);
 }
 
 - (void)handleStudioStemToggle:(int)idx on:(BOOL)on {
@@ -4037,6 +4192,8 @@ static NSString* const kSwModelURL =
             @"prompt": [NSString stringWithFormat:@"%@, %d bpm", tmpl[i], bpm],
             @"file": [NSString stringWithFormat:@"stems/%@.wav", stemNames[i]],
             @"source": _stemSource[i] ?: @"",
+            @"offset": @(self.sharedState->stemOffset[i].load(std::memory_order_relaxed)),
+            @"dry": @(self.sharedState->stemDry[i].load(std::memory_order_relaxed)),
         } mutableCopy];
         if (!_stemNotes[i].empty()) {
             st[@"midi"] = [NSString stringWithFormat:@"midi/%@.mid", stemNames[i]];

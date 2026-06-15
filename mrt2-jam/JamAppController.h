@@ -92,6 +92,18 @@ struct JamSharedState {
     std::atomic<float> stemGain[kStems] = {{1}, {1}, {1}, {1}, {1}, {1}, {1}, {1}};
     std::atomic<int> stemMuteMask{0};
     std::atomic<int> stemSoloMask{0};
+    // Per-stem playback alignment offset (samples). At transport `pos` the stem
+    // reads from `pos - offset`: +offset delays it (shifts right/later), -offset
+    // advances it (shifts left/earlier). For nudging imported/replaced tracks
+    // whose length doesn't match the base song.
+    std::atomic<long> stemOffset[kStems] = {};
+    // Per-stem "dry blend": mix a fraction of the original mix back into a
+    // separated stem to fill hard-mask gaps and mask musical-noise artifacts
+    // (more natural, at the cost of a little bleed). 0 = pure separation.
+    std::atomic<float> stemDry[kStems] = {};
+    std::atomic<const float*> songMixL{nullptr};   // original mix (controller-owned)
+    std::atomic<const float*> songMixR{nullptr};
+    std::atomic<long> songMixLen{0};
     float stemSmoothG[kStems] = {};             // render-thread gain smoothing
     // Count-in (预备拍) + click metronome for the stem transport.
     std::atomic<int> countInBeats{0};      // setting: 0 / 4 / 8 beats

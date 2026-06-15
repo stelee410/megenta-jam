@@ -2146,6 +2146,24 @@ function App() {
           rfPresent: !!sp.rfPresent,
         }));
       }
+      if (state.studioStemAlign && typeof state.studioStemAlign === 'object') {
+        const a = state.studioStemAlign;
+        const i = Number(a.index);
+        const ms = Number(a.ms ?? 0);
+        setStudio(st => ({
+          ...st,
+          stems: st.stems.map((x, k) => k === i ? { ...x, alignMs: ms } : x),
+        }));
+      }
+      if (state.studioStemDry && typeof state.studioStemDry === 'object') {
+        const a = state.studioStemDry;
+        const i = Number(a.index);
+        const v = Number(a.value ?? 0);
+        setStudio(st => ({
+          ...st,
+          stems: st.stems.map((x, k) => k === i ? { ...x, dry: v } : x),
+        }));
+      }
       if (state.studioLive && typeof state.studioLive === 'object') {
         const lv = state.studioLive;
         setLiveSource(Number(lv.source ?? 0));
@@ -2888,6 +2906,11 @@ function App() {
             onImportStem={(i) => post({ type: 'studioImportStem', index: i })}
             onTranscribe={(i) => post({ type: 'studioTranscribe', index: i })}
             onExtractStem={(i) => post({ type: 'studioExtractStem', index: i })}
+            onStemAlign={(i, action) => post({ type: 'studioStemAlign', index: i, action })}
+            onStemDry={(i, value) => {
+              setStudio(st => ({ ...st, stems: st.stems.map((x, k) => k === i ? { ...x, dry: value } : x) }));
+              post({ type: 'studioStemDry', index: i, value });
+            }}
             onDetectChords={() => post({ type: 'studioDetectChords' })}
             onLaneSource={(idx, src) => {
               post({ type: 'laneSource', index: idx, source: src === 'midi' ? 1 : 0 });
