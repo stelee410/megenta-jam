@@ -216,6 +216,15 @@ typedef NS_ENUM(int, ConductorPhase) {
     const double elapsed = now - _channelConnectAt[_primary];
     const int other = 1 - _primary;
 
+    // Reprime depth: deep jitter buffer when a single stream is live; short
+    // during a handover (both channels share bandwidth → keep recovery gaps
+    // brief so the crossfade doesn't stall for seconds).
+    const uint64_t reprime = (_phase == PhaseSteady)
+        ? (uint64_t)LyriaAudioRing::kReprimeSteady
+        : (uint64_t)LyriaAudioRing::kReprimeXfade;
+    for (int i = 0; i < 2; i++)
+        if (_ring[i]) _ring[i]->reprimeFrames.store(reprime, std::memory_order_relaxed);
+
     // Surface audio-ring underruns (network jitter starving the buffer) — these
     // are the silent cutouts that leave no socket error behind.
     for (int i = 0; i < 2; i++) {

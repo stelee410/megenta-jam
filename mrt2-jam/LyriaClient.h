@@ -30,11 +30,19 @@
 // websocket delegate queue, drained by the audio render thread.
 struct LyriaAudioRing {
     static constexpr size_t kCapFrames = 48000 * 30;        // 30 s
-    // A deeper start cushion absorbs network jitter (VPN/proxy hops stall the
-    // stream for a second or two). After the first prime, an underrun only needs
-    // a short top-up to resume — so a brief stall costs ~0.4 s, not a full 4 s.
-    static constexpr size_t kPrebufferFrames = 48000 * 4;       // 4 s before first start
-    static constexpr size_t kReprimeFrames   = 48000 * 2 / 5;   // 0.4 s to recover after an underrun
+    // A deep start cushion absorbs network jitter (VPN/proxy hops stall the
+    // stream for a second or two). The steady-state margin equals whatever we
+    // re-buffer after an underrun, so that MUST be a real jitter buffer too —
+    // a tiny reprime makes one blip collapse the cushion and every later jitter
+    // cuts again.
+    static constexpr size_t kPrebufferFrames = 48000 * 4;   // 4 s before first start
+    static constexpr size_t kReprimeSteady   = 48000 * 2;   // single stream: 2 s jitter buffer
+    static constexpr size_t kReprimeXfade    = 48000 * 2/5; // during handover (two streams share
+                                                            //   bandwidth) keep the gap short: 0.4 s
+    // Reprime target after an underrun — set by the conductor per phase so the
+    // crossfade window (both channels live) recovers fast instead of with a
+    // long audible gap, while a lone stream keeps a deep cushion.
+    std::atomic<uint64_t> reprimeFrames{kReprimeSteady};
 
     std::vector<float> buf;               // interleaved L/R
     std::atomic<uint64_t> writeFrames{0}; // monotonic frames written
@@ -76,8 +84,11 @@ struct LyriaAudioRing {
             const uint64_t avail = writeFrames.load(std::memory_order_relaxed) -
                                    readFrames.load(std::memory_order_relaxed);
             // First start waits for the full cushion; recovering from an underrun
-            // only needs a small top-up so playback resumes quickly.
-            const size_t need = everPrimed ? kReprimeFrames : kPrebufferFrames;
+            // rebuilds the conductor-set reprime target (deep when one stream is
+            // live, short during a two-stream handover).
+            const size_t need = everPrimed
+                ? (size_t)reprimeFrames.load(std::memory_order_relaxed)
+                : kPrebufferFrames;
             if (avail >= need) {
                 primed.store(true, std::memory_order_release);
                 everPrimed = true;

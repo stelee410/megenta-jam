@@ -176,6 +176,8 @@ static NSString* const kLyriaModel = @"models/lyria-realtime-exp";
                 self2->_task = nil;
                 self2->_connected = NO;
                 self2->_connecting = NO;
+                // Invalidate stale receive/ping loops before the reconnect.
+                self2->_epoch.fetch_add(1, std::memory_order_relaxed);
                 return;
             }
             [self2 handleMessage:msg];
@@ -233,6 +235,27 @@ static NSString* const kLyriaModel = @"models/lyria-realtime-exp";
     didOpenWithProtocol:(NSString*)protocol {
     if (task != _task) return;
     [self sendJson:@{@"setup" : @{@"model" : kLyriaModel}} onTask:task];
+    // Keepalive: proxies/gateways drop a socket that sends no client→server
+    // traffic (we mostly just receive audio). Periodic WS pings keep the
+    // connection (and NAT/proxy state) alive — without them the gateway here
+    // resets the socket every ~40-145 s, forcing an audible emergency handover.
+    [self pingLoopForEpoch:_epoch.load(std::memory_order_relaxed)];
+}
+
+// Send a WebSocket ping every 15 s while this epoch's socket is live.
+- (void)pingLoopForEpoch:(uint64_t)epoch {
+    if (_epoch.load(std::memory_order_relaxed) != epoch) return;
+    NSURLSessionWebSocketTask* task = _task;
+    if (!task) return;
+    [task sendPingWithPongReceiveHandler:^(NSError* err) {
+        if (err) NSLog(@"Lyria: ping failed: %@", err.localizedDescription);
+    }];
+    __weak LyriaClient* weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        LyriaClient* s = weakSelf;
+        if (s) [s pingLoopForEpoch:epoch];
+    });
 }
 
 - (void)URLSession:(NSURLSession*)session
