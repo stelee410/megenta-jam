@@ -87,7 +87,7 @@ set_target_properties(mrt2_jam PROPERTIES
     MACOSX_BUNDLE TRUE
     MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/JamInfo.plist.in"
     MACOSX_BUNDLE_EXECUTABLE_NAME MRT2_Jam
-    MACOSX_BUNDLE_BUNDLE_NAME "MRT2 - Jam"
+    MACOSX_BUNDLE_BUNDLE_NAME "VerveFlow"
     MACOSX_BUNDLE_ICON_FILE "AppIcon.icns"
     XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "com.google.mrt2.jam"
 )
@@ -137,17 +137,17 @@ add_custom_target(deploy_mrt2_jam
         "$<TARGET_BUNDLE_DIR:mrt2_jam>"
     # Deploy to ~/Applications
     COMMAND ${CMAKE_COMMAND} -E remove_directory
-        "$ENV{HOME}/Applications/MRT2 - Jam.app"
+        "$ENV{HOME}/Applications/VerveFlow.app"
     COMMAND ditto
         "$<TARGET_BUNDLE_DIR:mrt2_jam>"
-        "$ENV{HOME}/Applications/MRT2 - Jam.app"
-    COMMENT "Building and deploying MRT2 - Jam standalone app"
+        "$ENV{HOME}/Applications/VerveFlow.app"
+    COMMENT "Building and deploying VerveFlow standalone app"
     VERBATIM
 )
 
-# Notarize the deployed MRT2 - Jam.app (requires Developer ID).
+# Notarize the deployed VerveFlow.app (requires Developer ID).
 magentart_add_notarize_target(notarize_mrt2_jam
-    APP "$ENV{HOME}/Applications/MRT2 - Jam.app"
+    APP "$ENV{HOME}/Applications/VerveFlow.app"
     DEPENDS deploy_mrt2_jam
-    ZIP_NAME "MRT2_Jam.zip"
+    ZIP_NAME "VerveFlow.zip"
 )

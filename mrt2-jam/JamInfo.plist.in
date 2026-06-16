@@ -11,7 +11,9 @@
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>MRT2 - Jam</string>
+    <string>VerveFlow</string>
+    <key>CFBundleDisplayName</key>
+    <string>VerveFlow</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon.icns</string>
     <key>CFBundlePackageType</key>
