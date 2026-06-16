@@ -20,7 +20,59 @@
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMIDI/CoreMIDI.h>
 #import <CoreAudio/CoreAudio.h>
+#import <AudioToolbox/AudioToolbox.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <mach/mach_time.h>
+#include <vector>
+
+// Minimal 48 kHz 16-bit stereo WAV writer (little-endian, as on x86/ARM).
+static BOOL JamAppWriteWav(NSURL* url, const int16_t* interleaved, long frames) {
+    const uint32_t sr = 48000, ch = 2, bits = 16;
+    const uint32_t dataBytes = (uint32_t)(frames * ch * (bits / 8));
+    NSMutableData* d = [NSMutableData data];
+    auto u32 = [&](uint32_t v) { [d appendBytes:&v length:4]; };
+    auto u16 = [&](uint16_t v) { [d appendBytes:&v length:2]; };
+    [d appendBytes:"RIFF" length:4]; u32(36 + dataBytes); [d appendBytes:"WAVE" length:4];
+    [d appendBytes:"fmt " length:4]; u32(16); u16(1); u16((uint16_t)ch);
+    u32(sr); u32(sr * ch * (bits / 8)); u16((uint16_t)(ch * (bits / 8))); u16((uint16_t)bits);
+    [d appendBytes:"data" length:4]; u32(dataBytes);
+    [d appendBytes:interleaved length:dataBytes];
+    return [d writeToURL:url atomically:YES];
+}
+
+// Encode 48 kHz stereo int16 PCM to AAC in an .m4a (native; ~1/10 the size of
+// WAV). macOS can't encode MP3, so AAC/m4a is the compressed option.
+static BOOL JamAppWriteM4A(NSURL* url, const int16_t* interleaved, long frames) {
+    AudioStreamBasicDescription dst = {};
+    dst.mSampleRate = 48000;
+    dst.mFormatID = kAudioFormatMPEG4AAC;
+    dst.mChannelsPerFrame = 2;
+    ExtAudioFileRef ext = nullptr;
+    if (ExtAudioFileCreateWithURL((__bridge CFURLRef)url, kAudioFileM4AType, &dst, nullptr,
+                                  kAudioFileFlags_EraseFile, &ext) != noErr || !ext)
+        return NO;
+    AudioStreamBasicDescription client = {};
+    client.mSampleRate = 48000;
+    client.mFormatID = kAudioFormatLinearPCM;
+    client.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+    client.mChannelsPerFrame = 2;
+    client.mBitsPerChannel = 16;
+    client.mBytesPerFrame = 4;
+    client.mFramesPerPacket = 1;
+    client.mBytesPerPacket = 4;
+    OSStatus st = ExtAudioFileSetProperty(ext, kExtAudioFileProperty_ClientDataFormat,
+                                          sizeof(client), &client);
+    if (st == noErr) {
+        AudioBufferList abl;
+        abl.mNumberBuffers = 1;
+        abl.mBuffers[0].mNumberChannels = 2;
+        abl.mBuffers[0].mDataByteSize = (UInt32)(frames * 4);
+        abl.mBuffers[0].mData = (void*)interleaved;
+        st = ExtAudioFileWrite(ext, (UInt32)frames, &abl);
+    }
+    ExtAudioFileDispose(ext);
+    return st == noErr;
+}
 #import "JamAppController.h"
 #import "LyriaClient.h"
 #import "LyriaConductor.h"
@@ -923,6 +975,14 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
         // Stems in MIDI mode contribute their lane synth instead of audio,
         // through the same audibility/gain (one fader rules both sources).
         {
+            // Backing bounce: snapshot outL/R before the stem section so we can
+            // capture only what the stems + MIDI lanes add (the backing),
+            // isolated from any engine/synth output already in the bus.
+            const bool _bounce = shared->bounceArmed.load(std::memory_order_relaxed);
+            if (_bounce) {
+                memcpy(shared->bounceSnapL, outL, genFrames * sizeof(float));
+                memcpy(shared->bounceSnapR, outR, genFrames * sizeof(float));
+            }
             const long len = shared->stemLen.load(std::memory_order_relaxed);
             const int mute = shared->stemMuteMask.load(std::memory_order_relaxed);
             const int solo = shared->stemSoloMask.load(std::memory_order_relaxed);
@@ -1021,6 +1081,26 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                     g += (tgt - g) * 0.002f;
                     outL[i] += shared->laneBufL[k][i] * g * 1.8f;
                     outR[i] += shared->laneBufR[k][i] * g * 1.8f;
+                }
+            }
+
+            // Backing bounce capture: (post-stem − pre-stem) = the backing mix,
+            // plus the click bus if requested.
+            if (_bounce) {
+                float* bl = shared->bounceL.load(std::memory_order_relaxed);
+                float* br = shared->bounceR.load(std::memory_order_relaxed);
+                const long cap = shared->bounceCap.load(std::memory_order_relaxed);
+                const bool wc = shared->bounceClick.load(std::memory_order_relaxed);
+                long w = shared->bounceWritten.load(std::memory_order_relaxed);
+                if (bl && br) {
+                    for (AVAudioFrameCount i = 0; i < genFrames && w < cap; ++i, ++w) {
+                        float cl = outL[i] - shared->bounceSnapL[i];
+                        float cr = outR[i] - shared->bounceSnapR[i];
+                        if (wc) { cl += shared->clickBus[i]; cr += shared->clickBus[i]; }
+                        bl[w] = cl; br[w] = cr;
+                    }
+                    shared->bounceWritten.store(w, std::memory_order_relaxed);
+                    if (w >= cap) shared->bounceArmed.store(false, std::memory_order_relaxed);
                 }
             }
         }
@@ -1122,6 +1202,12 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                                                   usingBlock:^(NSNotification* n) {
         [self rebuildAudioGraph];
     }];
+    // Export the current backing mix (honoring mute/solo) to a WAV file.
+    [[NSNotificationCenter defaultCenter] addObserverForName:@"JamExportBacking"
+                                                      object:nil queue:[NSOperationQueue mainQueue]
+                                                  usingBlock:^(NSNotification* n) {
+        [self exportBacking];
+    }];
 
     NSError* error = nil;
     if (![_audioEngine startAndReturnError:&error]) {
@@ -1196,6 +1282,137 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
     dispatch_async(dispatch_get_main_queue(), ^{
         NSLog(@"Jam: output device changed — rebuilding graph for the new device");
         [self rebuildAudioGraph];
+    });
+}
+
+// Export the current backing mix (per mute/solo, with audio + MIDI lanes +
+// offset + dry) to a WAV. The render block is pumped offline (engine paused)
+// faster than real time, capturing the isolated stem-mix delta. The operator
+// chooses whether to bake the metronome click in.
+- (void)exportBacking {
+    JamSharedState* sh = &_sharedState;
+    const long len = sh->stemLen.load(std::memory_order_relaxed);
+    if (len <= 0) {
+        [_controller sendStateUpdate:@{@"studioNotice": @"先载入并分离一首歌再导出伴奏"}];
+        return;
+    }
+
+    // 1) Format.
+    NSAlert* fmtAlert = [[NSAlert alloc] init];
+    fmtAlert.messageText = @"导出伴奏 — 格式";
+    fmtAlert.informativeText = @"M4A/AAC 体积小(约 WAV 的 1/10),通用可播;WAV 无损但很大。";
+    [fmtAlert addButtonWithTitle:@"M4A (小)"];
+    [fmtAlert addButtonWithTitle:@"WAV (无损)"];
+    [fmtAlert addButtonWithTitle:@"取消"];
+    const NSModalResponse fr = [fmtAlert runModal];
+    if (fr == NSAlertThirdButtonReturn) return;
+    const BOOL asM4A = (fr == NSAlertFirstButtonReturn);
+
+    // 2) Click.
+    NSAlert* clkAlert = [[NSAlert alloc] init];
+    clkAlert.messageText = @"导出伴奏 — 节拍器";
+    clkAlert.informativeText = @"按当前 mute / solo 设置导出。是否包含节拍器 click?";
+    [clkAlert addButtonWithTitle:@"含 click"];
+    [clkAlert addButtonWithTitle:@"不含 click"];
+    [clkAlert addButtonWithTitle:@"取消"];
+    const NSModalResponse cr = [clkAlert runModal];
+    if (cr == NSAlertThirdButtonReturn) return;
+    const BOOL withClick = (cr == NSAlertFirstButtonReturn);
+
+    NSString* ext = asM4A ? @"m4a" : @"wav";
+    NSSavePanel* panel = [NSSavePanel savePanel];
+    panel.allowedContentTypes = @[[UTType typeWithFilenameExtension:ext]];
+    panel.nameFieldStringValue =
+        [NSString stringWithFormat:@"伴奏%@.%@", withClick ? @" (含click)" : @"", ext];
+    if ([panel runModal] != NSModalResponseOK || !panel.URL) return;
+    NSURL* url = panel.URL;
+
+    // Save live transport/audio state to restore after the bounce.
+    const bool  sClickOn   = sh->clickOn.load(std::memory_order_relaxed);
+    const int   sCountIn   = sh->countInBeats.load(std::memory_order_relaxed);
+    const float sComp      = sh->outSpeedComp.load(std::memory_order_relaxed);
+    const long  sPos       = sh->stemPos.load(std::memory_order_relaxed);
+    const bool  sActive    = sh->stemActive.load(std::memory_order_relaxed);
+    const bool  sCalib     = sh->calibrating.load(std::memory_order_relaxed);
+
+    float* capL = (float*)calloc((size_t)len, sizeof(float));
+    float* capR = (float*)calloc((size_t)len, sizeof(float));
+    if (!capL || !capR) { free(capL); free(capR); return; }
+
+    // Configure the bounce: clean 1:1 rate, no count-in, click per choice,
+    // transport from the start, capture armed.
+    sh->outSpeedComp.store(1.0f, std::memory_order_relaxed);
+    sh->calibrating.store(false, std::memory_order_relaxed);
+    sh->countInBeats.store(0, std::memory_order_relaxed);
+    sh->countInLeft.store(0, std::memory_order_relaxed);
+    sh->clickOn.store(withClick, std::memory_order_relaxed);
+    sh->stemPos.store(0, std::memory_order_relaxed);
+    sh->stemActive.store(true, std::memory_order_relaxed);
+    sh->bounceClick.store(withClick, std::memory_order_relaxed);
+    sh->bounceL.store(capL, std::memory_order_relaxed);
+    sh->bounceR.store(capR, std::memory_order_relaxed);
+    sh->bounceCap.store(len, std::memory_order_relaxed);
+    sh->bounceWritten.store(0, std::memory_order_relaxed);
+    sh->bounceArmed.store(true, std::memory_order_release);
+
+    [_audioEngine pause];   // no device callback → safe to drive the block offline
+    [_controller sendStateUpdate:@{@"studioNotice": @"导出伴奏中…"}];
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        const AVAudioFrameCount BS = 1024;
+        float* tL = (float*)calloc(BS, sizeof(float));
+        float* tR = (float*)calloc(BS, sizeof(float));
+        AudioBufferList* abl =
+            (AudioBufferList*)malloc(sizeof(AudioBufferList) + sizeof(AudioBuffer));
+        abl->mNumberBuffers = 2;
+        abl->mBuffers[0].mNumberChannels = 1;
+        abl->mBuffers[0].mDataByteSize = BS * sizeof(float);
+        abl->mBuffers[0].mData = tL;
+        abl->mBuffers[1].mNumberChannels = 1;
+        abl->mBuffers[1].mDataByteSize = BS * sizeof(float);
+        abl->mBuffers[1].mData = tR;
+        AudioTimeStamp ts; memset(&ts, 0, sizeof(ts));  // mFlags=0 → skip rate measure
+        BOOL silence = NO;
+        const long maxIters = len / BS + 256;
+        long guard = 0;
+        while (sh->bounceArmed.load(std::memory_order_relaxed) && guard++ < maxIters) {
+            memset(tL, 0, BS * sizeof(float));
+            memset(tR, 0, BS * sizeof(float));
+            self->_renderBlock(&silence, &ts, BS, abl);
+        }
+        free(tL); free(tR); free(abl);
+
+        // Float → int16 interleaved (clipped).
+        std::vector<int16_t> pcm((size_t)len * 2);
+        for (long i = 0; i < len; ++i) {
+            float l = capL[i], r = capR[i];
+            l = l < -1.0f ? -1.0f : (l > 1.0f ? 1.0f : l);
+            r = r < -1.0f ? -1.0f : (r > 1.0f ? 1.0f : r);
+            pcm[i * 2]     = (int16_t)lrintf(l * 32767.0f);
+            pcm[i * 2 + 1] = (int16_t)lrintf(r * 32767.0f);
+        }
+        free(capL); free(capR);
+        const BOOL ok = asM4A ? JamAppWriteM4A(url, pcm.data(), len)
+                              : JamAppWriteWav(url, pcm.data(), len);
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            // Disarm + restore live state.
+            sh->bounceArmed.store(false, std::memory_order_relaxed);
+            sh->bounceL.store(nullptr, std::memory_order_relaxed);
+            sh->bounceR.store(nullptr, std::memory_order_relaxed);
+            sh->clickOn.store(sClickOn, std::memory_order_relaxed);
+            sh->countInBeats.store(sCountIn, std::memory_order_relaxed);
+            sh->outSpeedComp.store(sComp, std::memory_order_relaxed);
+            sh->stemPos.store(sPos, std::memory_order_relaxed);
+            sh->stemActive.store(sActive, std::memory_order_relaxed);
+            sh->calibrating.store(sCalib, std::memory_order_relaxed);
+            NSError* err = nil;
+            if (![self->_audioEngine startAndReturnError:&err])
+                NSLog(@"Jam: engine restart after bounce failed: %@", err);
+            [self->_controller sendStateUpdate:@{@"studioNotice":
+                ok ? [NSString stringWithFormat:@"✓ 已导出伴奏:%@", url.lastPathComponent]
+                   : @"导出失败"}];
+        });
     });
 }
 

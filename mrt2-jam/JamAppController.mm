@@ -770,6 +770,12 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
     else if ([type isEqualToString:@"studioDetectChords"]) {
         [self handleStudioDetectChords];
     }
+    else if ([type isEqualToString:@"studioExportBacking"]) {
+        // The audio engine + render block live in the app delegate; it owns the
+        // offline bounce. Trigger it via notification.
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"JamExportBacking"
+                                                            object:nil];
+    }
     else if ([type isEqualToString:@"laneSource"]) {
         NSNumber* idx = body[@"index"];
         NSNumber* src = body[@"source"];
@@ -3267,13 +3273,41 @@ static BOOL JamWriteWav(NSURL* url, const int16_t* interleaved, long frames) {
             // Stems by canonical name.
             static NSString* const names[8] = {@"drums", @"bass", @"other", @"vocals",
                                                @"guitar", @"piano", @"aux1", @"aux2"};
+            // The packaged `stems` array skips empty stems (compacted), so it
+            // must be matched by NAME, not by index — otherwise offset/dry get
+            // restored to the wrong lane (notably aux when an earlier stem is
+            // empty).
             NSArray* stemMeta = pgm[@"stems"];
+            NSMutableDictionary* metaByName = [NSMutableDictionary dictionary];
+            if ([stemMeta isKindOfClass:[NSArray class]]) {
+                for (id e in stemMeta) {
+                    if ([e isKindOfClass:[NSDictionary class]] &&
+                        [e[@"name"] isKindOfClass:[NSString class]])
+                        metaByName[e[@"name"]] = e;
+                }
+            }
             long maxFrames = (long)self->_songL.size();
+            int loadMute = 0, loadSolo = 0;   // rebuilt from per-stem metadata
             for (int i = 0; i < 8; ++i) {
                 self->_stems[i].clear();
                 self->_stemSource[i] = nil;
                 self.sharedState->stemOffset[i].store(0, std::memory_order_relaxed);
                 self.sharedState->stemDry[i].store(0.0f, std::memory_order_relaxed);
+                self.sharedState->stemGain[i].store(1.0f, std::memory_order_relaxed);
+                // Mixer state is name-keyed in the package; restore even for stems
+                // whose audio is absent (e.g. a muted lane).
+                {
+                    NSDictionary* m0 = metaByName[names[i]];
+                    if ([m0[@"mute"] isKindOfClass:[NSNumber class]] && [m0[@"mute"] boolValue])
+                        loadMute |= (1 << i);
+                    if ([m0[@"solo"] isKindOfClass:[NSNumber class]] && [m0[@"solo"] boolValue])
+                        loadSolo |= (1 << i);
+                    if ([m0[@"gain"] isKindOfClass:[NSNumber class]]) {
+                        float g = [m0[@"gain"] floatValue];
+                        self.sharedState->stemGain[i].store(MAX(0.0f, MIN(1.5f, g)),
+                                                            std::memory_order_relaxed);
+                    }
+                }
                 self->_takeL[i].clear();
                 self->_takeR[i].clear();
                 NSURL* wav = [[root URLByAppendingPathComponent:@"stems"]
@@ -3294,19 +3328,18 @@ static BOOL JamWriteWav(NSURL* url, const int16_t* interleaved, long frames) {
                     self->_stems[i][k * 2 + 1] = (int16_t)r;
                 }
                 self->_stemSource[i] = @"imported";
-                if ([stemMeta isKindOfClass:[NSArray class]] && (NSUInteger)i < stemMeta.count &&
-                    [stemMeta[i] isKindOfClass:[NSDictionary class]] &&
-                    [stemMeta[i][@"offset"] isKindOfClass:[NSNumber class]]) {
+                NSDictionary* sm = metaByName[names[i]];
+                if ([sm[@"offset"] isKindOfClass:[NSNumber class]]) {
                     self.sharedState->stemOffset[i].store(
-                        [stemMeta[i][@"offset"] longValue], std::memory_order_relaxed);
+                        [sm[@"offset"] longValue], std::memory_order_relaxed);
                 }
-                if ([stemMeta isKindOfClass:[NSArray class]] && (NSUInteger)i < stemMeta.count &&
-                    [stemMeta[i] isKindOfClass:[NSDictionary class]] &&
-                    [stemMeta[i][@"dry"] isKindOfClass:[NSNumber class]]) {
+                if ([sm[@"dry"] isKindOfClass:[NSNumber class]]) {
                     self.sharedState->stemDry[i].store(
-                        MAX(0.0f, MIN(0.5f, [stemMeta[i][@"dry"] floatValue])), std::memory_order_relaxed);
+                        MAX(0.0f, MIN(0.5f, [sm[@"dry"] floatValue])), std::memory_order_relaxed);
                 }
             }
+            self.sharedState->stemMuteMask.store(loadMute, std::memory_order_relaxed);
+            self.sharedState->stemSoloMask.store(loadSolo, std::memory_order_relaxed);
             if (maxFrames <= 0) {
                 [self studioFail:@"PGM folder has no audio"];
                 return;
@@ -3522,6 +3555,7 @@ static BOOL JamWriteWav(NSURL* url, const int16_t* interleaved, long frames) {
                 [self studioPushLanes];
                 [self studioPushLive];
                 for (int i = 0; i < 8; ++i) { [self studioPushStemAlign:i]; [self studioPushStemDry:i]; }
+                [self studioPushMixer];
                 self->_studioBusy = NO;
                 [self studioProgress:@"ready" pct:1.0f];
             });
@@ -3757,6 +3791,23 @@ static NSString* const kSwModelURL =
         @"index": @(idx),
         @"ms": @((int)llroundf(off / 48.0f)),
     }}];
+}
+
+// Push the per-stem mixer state (mute / solo / gain) to the UI.
+- (void)studioPushMixer {
+    JamSharedState* sh = self.sharedState;
+    if (!sh) return;
+    const int mute = sh->stemMuteMask.load(std::memory_order_relaxed);
+    const int solo = sh->stemSoloMask.load(std::memory_order_relaxed);
+    NSMutableArray* arr = [NSMutableArray array];
+    for (int i = 0; i < 8; ++i) {
+        [arr addObject:@{
+            @"mute": @(((mute >> i) & 1) != 0),
+            @"solo": @(((solo >> i) & 1) != 0),
+            @"gain": @(sh->stemGain[i].load(std::memory_order_relaxed)),
+        }];
+    }
+    [self sendStateUpdate:@{@"studioMixer": arr}];
 }
 
 // Push a stem's current dry-blend amount (0..0.5) to the UI.
@@ -4246,6 +4297,9 @@ static NSString* const kSwModelURL =
             @"source": _stemSource[i] ?: @"",
             @"offset": @(self.sharedState->stemOffset[i].load(std::memory_order_relaxed)),
             @"dry": @(self.sharedState->stemDry[i].load(std::memory_order_relaxed)),
+            @"mute": @(((self.sharedState->stemMuteMask.load(std::memory_order_relaxed) >> i) & 1) != 0),
+            @"solo": @(((self.sharedState->stemSoloMask.load(std::memory_order_relaxed) >> i) & 1) != 0),
+            @"gain": @(self.sharedState->stemGain[i].load(std::memory_order_relaxed)),
         } mutableCopy];
         if (!_stemNotes[i].empty()) {
             st[@"midi"] = [NSString stringWithFormat:@"midi/%@.mid", stemNames[i]];

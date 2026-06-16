@@ -226,6 +226,7 @@ export function StudioPanel({
   onClipAiOptimize,
   onClipAiRange,
   onPackage,
+  onExportBacking,
   onSepDownload,
   onSepPick,
 }: {
@@ -276,6 +277,7 @@ export function StudioPanel({
   onClipAiOptimize: (idx: number, notes: ClipNote[]) => void;
   onClipAiRange: (idx: number, notes: ClipNote[], startSec: number, endSec: number) => void;
   onPackage: () => void;
+  onExportBacking: () => void;
   onSepDownload: () => void;
   onSepPick: () => void;
 }) {
@@ -285,6 +287,9 @@ export function StudioPanel({
   const [aiText, setAiText] = useState('');
   // Manual key edit (null = not editing). The key chip is just a record.
   const [keyDraft, setKeyDraft] = useState<string | null>(null);
+  // Per-lane alignment-ms edit buffer (controlled input shows stem.alignMs
+  // when idle, the draft while typing — robust to native pushes on load).
+  const [alignDraft, setAlignDraft] = useState<Record<number, string>>({});
   // Notes panel: a floating dialog the operator can park anywhere on screen.
   const [notesOpen, setNotesOpen] = useState(false);
   const [notesPos, setNotesPos] = useState<{ x: number; y: number }>(() => {
@@ -509,6 +514,14 @@ export function StudioPanel({
               ♪ Chords
             </button>
           )}
+          <button
+            className="freak-soft"
+            onClick={onExportBacking}
+            disabled={!s.loaded || s.busy}
+            title="按当前 mute / solo 把伴奏混成一条 WAV 导出（可选含/不含 click）"
+          >
+            ⤓ 导出伴奏
+          </button>
           <button
             className="freak-soft is-lit"
             onClick={onPackage}
@@ -1001,17 +1014,21 @@ export function StudioPanel({
                         className="pgm-align-ms"
                         type="number"
                         step={10}
-                        key={`${i}-${stem.alignMs ?? 0}`}
-                        defaultValue={stem.alignMs ?? 0}
+                        value={alignDraft[i] !== undefined ? alignDraft[i] : String(stem.alignMs ?? 0)}
                         title="直接输入毫秒偏移快速对齐（正=延后，负=提前）；回车或方向键应用"
+                        onChange={(e) => setAlignDraft(d => ({ ...d, [i]: e.target.value }))}
                         onKeyDown={(e) => {
                           e.stopPropagation();
                           if (e.key === 'Enter') {
                             onStemAlignSet(i, Number((e.target as HTMLInputElement).value));
+                            setAlignDraft(d => { const n = { ...d }; delete n[i]; return n; });
                             (e.target as HTMLInputElement).blur();
                           }
                         }}
-                        onBlur={(e) => onStemAlignSet(i, Number(e.target.value))}
+                        onBlur={(e) => {
+                          onStemAlignSet(i, Number(e.target.value));
+                          setAlignDraft(d => { const n = { ...d }; delete n[i]; return n; });
+                        }}
                       />
                       <small className="pgm-align-unit">ms</small>
                     </span>

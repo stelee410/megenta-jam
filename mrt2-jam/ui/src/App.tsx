@@ -2164,6 +2164,16 @@ function App() {
         const g = state.studioClickGain;
         setStudio(st => ({ ...st, clickGain: g }));
       }
+      if (Array.isArray(state.studioMixer)) {
+        const mx = state.studioMixer;
+        setStudio(st => ({
+          ...st,
+          mixer: st.mixer.map((m, i) => mx[i] ? {
+            mute: !!mx[i].mute, solo: !!mx[i].solo,
+            gain: typeof mx[i].gain === 'number' ? mx[i].gain : m.gain,
+          } : m),
+        }));
+      }
       if (state.studioStemDry && typeof state.studioStemDry === 'object') {
         const a = state.studioStemDry;
         const i = Number(a.index);
@@ -2928,6 +2938,7 @@ function App() {
             onExtractStem={(i) => post({ type: 'studioExtractStem', index: i })}
             onStemAlign={(i, action) => post({ type: 'studioStemAlign', index: i, action })}
             onStemAlignSet={(i, ms) => post({ type: 'studioStemAlignSet', index: i, ms })}
+            onExportBacking={() => post({ type: 'studioExportBacking' })}
             onStemDry={(i, value) => {
               setStudio(st => ({ ...st, stems: st.stems.map((x, k) => k === i ? { ...x, dry: value } : x) }));
               post({ type: 'studioStemDry', index: i, value });

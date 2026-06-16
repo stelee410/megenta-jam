@@ -147,6 +147,19 @@ struct JamSharedState {
     // operator can verify timing against their rig before performing.
     std::atomic<bool> calibrating{false};
     uint64_t calibSamplePos{0};                 // audio-thread-owned, reset on entry
+
+    // Offline backing bounce: the render block, when armed, captures the stem-mix
+    // delta (outL/R before vs after the stem section, isolating the backing from
+    // any engine/synth output) + optional click into bounceL/R. Driven faster
+    // than real time by an offline pump of the render block (engine paused).
+    std::atomic<bool>  bounceArmed{false};
+    std::atomic<bool>  bounceClick{false};      // fold the metronome into the bounce
+    std::atomic<float*> bounceL{nullptr};
+    std::atomic<float*> bounceR{nullptr};
+    std::atomic<long>  bounceCap{0};            // frames to capture
+    std::atomic<long>  bounceWritten{0};
+    float bounceSnapL[kBusMax] = {};            // audio-thread scratch (pre-stem snapshot)
+    float bounceSnapR[kBusMax] = {};
     float busL[kBusMax] = {}, busR[kBusMax] = {};   // main stereo bus
     float clickBus[kBusMax] = {};                   // mono click bus
     // Per-stem MIDI lanes: each melodic stem (1..5 — bass, other, vocals,
