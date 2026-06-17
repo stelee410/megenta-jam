@@ -15,6 +15,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { WECHAT_QR } from './wechatQr';
 import { PianoKeyboard } from './PianoKeyboard';
 import { JamSlider } from './JamSlider';
 import { JamSliderElastic } from './JamSliderElastic';
@@ -445,6 +446,10 @@ function App() {
 
   // Settings Drawer states
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  // Lyria API key: stored locally in native (NSUserDefaults). The key itself is
+  // never sent back to the UI — only whether one is configured.
+  const [lyriaKeySet, setLyriaKeySet] = useState(false);
+  const [lyriaKeyDraft, setLyriaKeyDraft] = useState('');
   const [paramsState, setParamsState] = useState({
     temperature: DEFAULT_TEMPERATURE,
     topk: DEFAULT_TOPK,
@@ -1841,6 +1846,9 @@ function App() {
         });
       }
 
+      if (typeof state.lyriaKeySet === 'boolean') {
+        setLyriaKeySet(state.lyriaKeySet);
+      }
       if (state.openSettings !== undefined) {
         setIsSettingsOpen(!!state.openSettings);
       }
@@ -4009,7 +4017,50 @@ function App() {
         showDrumless={true}
         columns={1}
         drumless={paramsState.drumless}
-      />
+      >
+        <div className="jam-settings-key">
+          <label>agentLLM API Key</label>
+          <div className="jam-settings-key-row">
+            <input
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              placeholder={lyriaKeySet ? '已配置 ✓ — 输入可替换' : '粘贴你的 agentLLM API key'}
+              value={lyriaKeyDraft}
+              onChange={(e) => setLyriaKeyDraft(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+            />
+            <button
+              className="freak-soft is-lit"
+              disabled={!lyriaKeyDraft.trim()}
+              onClick={() => {
+                post({ type: 'setLyriaKey', value: lyriaKeyDraft.trim() });
+                setLyriaKeyDraft('');
+                setLyriaKeySet(true);
+              }}
+            >保存</button>
+            {lyriaKeySet && (
+              <button
+                className="freak-soft"
+                title="清除已保存的 key"
+                onClick={() => { post({ type: 'setLyriaKey', value: '' }); setLyriaKeySet(false); }}
+              >清除</button>
+            )}
+          </div>
+          <div className="jam-settings-key-hint">
+            {lyriaKeySet
+              ? '已保存在本机,不会上传。切到 LYRIA 模式即用。'
+              : 'agentLLM API key,保存在本机(不会上传),用于 LYRIA 实时生成与 AI 功能。'}
+          </div>
+          {!lyriaKeySet && (
+            <div className="jam-settings-wechat">
+              <div className="jam-settings-wechat-title">没有 key?加微信获取 👇</div>
+              <img src={WECHAT_QR} alt="微信二维码 — Stephen Li" />
+              <div className="jam-settings-wechat-sub">扫码添加 Stephen Li,获取 agentLLM API Key</div>
+            </div>
+          )}
+        </div>
+      </SettingsPanel>
 
       {resourcesMissing && (
         <ResourceOnboardingModal

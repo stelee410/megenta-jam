@@ -4212,3 +4212,41 @@ input.pgm-align-ms:focus { border-color: rgba(111, 179, 255, 0.8); }
   font-weight: 600;
 }
 .jam-chat-button.is-live:hover { background: #ff7088; }
+
+/* ── Lyria API key field (settings) ───────────────────────────────────── */
+.jam-settings-key {
+  margin-top: 18px; padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+}
+.jam-settings-key > label {
+  display: block; font-size: 12px; letter-spacing: 0.06em; color: #c4c6cd;
+  margin-bottom: 8px; text-transform: uppercase;
+}
+.jam-settings-key-row { display: flex; gap: 8px; align-items: center; }
+.jam-settings-key-row input {
+  flex: 1; min-width: 0; padding: 8px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18); border-radius: 8px;
+  background: rgba(0, 0, 0, 0.35); color: #ececf0;
+  font-family: "SFMono-Regular", "Roboto Mono", ui-monospace, monospace; font-size: 12px;
+  outline: none;
+}
+.jam-settings-key-row input:focus { border-color: rgba(248, 211, 92, 0.6); }
+.jam-settings-key-row button { flex-shrink: 0; }
+.jam-settings-key-hint { font-size: 10px; color: #8a8c93; margin-top: 8px; }
+
+/* ── WeChat get-key card (settings) ───────────────────────────────────── */
+.jam-settings-wechat {
+  margin-top: 14px; padding: 14px;
+  border: 1px solid rgba(248, 211, 92, 0.3); border-radius: 10px;
+  background: rgba(248, 211, 92, 0.06); text-align: center;
+}
+.jam-settings-wechat-title {
+  font-size: 12px; color: #f8d35c; margin-bottom: 10px;
+}
+.jam-settings-wechat img {
+  width: 220px; max-width: 100%; height: auto;
+  border-radius: 8px; background: #fff; padding: 6px; box-sizing: border-box;
+}
+.jam-settings-wechat-sub {
+  font-size: 11px; color: #b6b8c0; margin-top: 10px; line-height: 1.5;
+}

@@ -164,7 +164,8 @@ body.dragging-vertical * {
   top: 0;
   right: 0;
   bottom: 0;
-  width: 260px;
+  width: 380px;
+  max-width: 90vw;
   flex-shrink: 0;
   z-index: 1300;
   background: #202124; /* not using --color-bg, Jam changes that */

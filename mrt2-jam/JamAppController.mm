@@ -1220,8 +1220,13 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
     else if ([type isEqualToString:@"setLyriaKey"]) {
         NSString* key = body[@"value"];
         if ([key isKindOfClass:[NSString class]]) {
-            [[NSUserDefaults standardUserDefaults] setObject:key
-                                                      forKey:@"Jam_LyriaApiKey"];
+            NSString* trimmed = [key stringByTrimmingCharactersInSet:
+                                 [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (trimmed.length)
+                [[NSUserDefaults standardUserDefaults] setObject:trimmed forKey:@"Jam_LyriaApiKey"];
+            else
+                [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"Jam_LyriaApiKey"];
+            [self sendStateUpdate:@{@"lyriaKeySet": @(trimmed.length > 0)}];
         }
     }
     else if ([type isEqualToString:@"aiPrompt"]) {
@@ -1509,6 +1514,9 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
                 @(self.sharedState->clickGain.load(std::memory_order_relaxed))}];
             // Re-apply persisted 现场模式 (creates the assertion + pushes state).
             [self setLiveMode:[[NSUserDefaults standardUserDefaults] boolForKey:@"Jam_LiveMode"]];
+            // Whether a Lyria API key is configured (never send the key itself).
+            NSString* lk = [[NSUserDefaults standardUserDefaults] stringForKey:@"Jam_LyriaApiKey"];
+            [self sendStateUpdate:@{@"lyriaKeySet": @(lk.length > 0)}];
         });
     }
     else if ([type isEqualToString:@"sepPipeline"]) {
@@ -4626,7 +4634,7 @@ static NSDictionary* JamParsePatchJson(NSString* jsonStr) {
 - (void)handleAiCompose:(NSString*)desc lane:(int)lane {
     NSString* apiKey = [[NSUserDefaults standardUserDefaults] stringForKey:@"Jam_LyriaApiKey"];
     if (apiKey.length == 0) {
-        [self sendStateUpdate:@{@"aiComposeError": @"No API key — set it in the Lyria settings first"}];
+        [self sendStateUpdate:@{@"aiComposeError": @"No API key — set your agentLLM API Key in Settings"}];
         return;
     }
     NSURL* url = [NSURL URLWithString:@"https://agentllm.linkyun.co/v1/chat/completions"];
@@ -4724,7 +4732,7 @@ static NSDictionary* JamParsePatchJson(NSString* jsonStr) {
 - (void)handleAiPatch:(NSString*)desc lane:(int)lane {
     NSString* apiKey = [[NSUserDefaults standardUserDefaults] stringForKey:@"Jam_LyriaApiKey"];
     if (apiKey.length == 0) {
-        [self sendStateUpdate:@{@"aiPatchError": @"No API key — set it in the Lyria settings first"}];
+        [self sendStateUpdate:@{@"aiPatchError": @"No API key — set your agentLLM API Key in Settings"}];
         return;
     }
 
@@ -4839,7 +4847,7 @@ static NSDictionary* JamParsePatchJson(NSString* jsonStr) {
 - (void)handleAiPrompt:(NSString*)idea history:(NSArray*)history {
     NSString* apiKey = [[NSUserDefaults standardUserDefaults] stringForKey:@"Jam_LyriaApiKey"];
     if (apiKey.length == 0) {
-        [self sendStateUpdate:@{@"aiPromptError": @"No API key — set it in the Lyria settings first"}];
+        [self sendStateUpdate:@{@"aiPromptError": @"No API key — set your agentLLM API Key in Settings"}];
         return;
     }
 

@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import type { ReactNode } from 'react';
 import { Settings } from './Settings';
 import IconButton from '@mui/material/IconButton';
 
@@ -39,12 +40,14 @@ interface SettingsPanelProps {
   columns?: number;
   drumless?: boolean;
   showDrumless?: boolean;
+  children?: ReactNode;   // extra app-specific settings (e.g. API keys)
 }
 
 export function SettingsPanel({
   open,
   onClose,
   columns = 2,
+  children,
   ...settingsProps
 }: SettingsPanelProps) {
   return (
@@ -84,6 +87,7 @@ export function SettingsPanel({
         </div>
         <div style={{ padding: '0 var(--app-padding) var(--app-padding)', flex: 1, display: 'flex', flexDirection: 'column' }}>
           <Settings {...settingsProps} columns={columns} />
+          {children}
           {/* Footer showing build git commit hash */}
           <div style={{
             marginTop: 'auto',
