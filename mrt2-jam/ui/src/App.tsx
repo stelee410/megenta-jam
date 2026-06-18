@@ -507,6 +507,10 @@ function App() {
   }>({ active: false, measuring: false });
   // 现场模式：开启后阻止系统休眠 / 屏幕锁屏（native IOPMAssertion）。
   const [liveMode, setLiveMode] = useState(false);
+  // 多轨 looper：states 每轨状态(0空1预备2录3播4预叠5叠6停)、phase 主循环相位、bars 小节数。
+  const [loop, setLoop] = useState<{ states: number[]; phase: number; bars: number }>({
+    states: [0, 0, 0, 0], phase: 0, bars: 4,
+  });
   // Tell native which tab is active so live MIDI only conditions the
   // generative engine on the jam tab (never starts an AI jam from pgm).
   useEffect(() => { post({ type: 'activeTab', tab: mainTab }); }, [mainTab]);
@@ -1848,6 +1852,14 @@ function App() {
 
       if (typeof state.lyriaKeySet === 'boolean') {
         setLyriaKeySet(state.lyriaKeySet);
+      }
+      if (state.loop && typeof state.loop === 'object') {
+        const lp = state.loop;
+        setLoop(prev => ({
+          states: Array.isArray(lp.states) ? lp.states.map(Number) : prev.states,
+          phase: typeof lp.phase === 'number' ? lp.phase : prev.phase,
+          bars: typeof lp.bars === 'number' ? lp.bars : prev.bars,
+        }));
       }
       if (state.openSettings !== undefined) {
         setIsSettingsOpen(!!state.openSettings);
@@ -3598,6 +3610,50 @@ function App() {
                 }}
               />
               <span>bpm</span>
+            </div>
+
+            {/* ── Multi-track looper ── */}
+            <div className="jam-loop-row">
+              <span className="jam-loop-label">LOOP</span>
+              {[0, 1, 2, 3].map((i) => {
+                const st = loop.states[i] ?? 0;
+                const cls = st === 2 ? 'is-rec' : st === 3 ? 'is-play'
+                  : (st === 4 || st === 5) ? 'is-dub' : st === 1 ? 'is-armed'
+                  : st === 6 ? 'is-stop' : '';
+                const label = st === 2 ? 'REC' : st === 3 ? '▶' : st === 5 ? 'DUB'
+                  : st === 4 ? 'dub?' : st === 1 ? '…' : st === 6 ? '⏸' : '●';
+                return (
+                  <div key={i} className={`jam-loop-pad ${cls}`}>
+                    <button
+                      className="jam-loop-main"
+                      onClick={() => post({ type: st === 0 ? 'loopArm' : 'loopStop', index: i })}
+                      onDoubleClick={() => post({ type: 'loopOverdub', index: i })}
+                      title="单击：空轨录制 / 已录轨 播放⇄停;双击:叠录 overdub"
+                    >
+                      <span className="jam-loop-num">{i + 1}</span>
+                      <span className="jam-loop-st">{label}</span>
+                    </button>
+                    {st !== 0 && (
+                      <button className="jam-loop-clear" title="清除该轨"
+                        onClick={() => post({ type: 'loopClear', index: i })}>✕</button>
+                    )}
+                  </div>
+                );
+              })}
+              <select
+                className="jam-loop-bars"
+                value={loop.bars}
+                onChange={(e) => post({ type: 'loopBars', value: Number(e.target.value) })}
+                title="loop 长度（小节）— 第一条录制时确定主循环长度"
+              >
+                <option value={1}>1</option>
+                <option value={2}>2</option>
+                <option value={4}>4</option>
+                <option value={8}>8</option>
+              </select>
+              <div className="jam-loop-phase">
+                <span style={{ width: `${Math.round((loop.phase || 0) * 100)}%` }} />
+              </div>
             </div>
 
             <div className="jam-performance-panel">

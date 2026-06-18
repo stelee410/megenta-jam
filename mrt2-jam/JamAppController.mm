@@ -133,6 +133,7 @@ static BOOL isDevServerRunning(void) {
     NSString* _keyOverride;               // manual key label (overrides auto-detect)
     NSString* _songMemo;                  // free-text notes panel content
     IOPMAssertionID _liveAssertionID;     // 现场模式：阻止休眠/锁屏 (0 = none)
+    NSTimer* _loopTimer;                  // ~12 Hz push of looper state to the UI
     NSURL* _songURL;
     double _songDur;
     BOOL _studioBusy;
@@ -408,6 +409,91 @@ static BOOL isDevServerRunning(void) {
     if (self.sharedState)
         self.sharedState->calibrating.store(false, std::memory_order_release);
     [self sendStateUpdate:@{@"calibration": @{@"active": @NO}}];
+}
+
+// ─── Multi-track looper ───────────────────────────────────────────────────
+- (void)ensureLoopTimer {
+    if (_loopTimer) return;
+    __weak JamAppController* w = self;
+    _loopTimer = [NSTimer scheduledTimerWithTimeInterval:(1.0 / 12.0) repeats:YES
+                                                   block:^(NSTimer* t) {
+        JamAppController* s = w;
+        if (!s) { [t invalidate]; return; }
+        if (s.sharedState && s.sharedState->loopLen.load(std::memory_order_relaxed) > 0)
+            [s pushLoopState];
+    }];
+}
+
+- (void)handleLoopArm:(int)i {
+    JamSharedState* sh = self.sharedState;
+    if (!sh || i < 0 || i >= JamSharedState::kLoopTracks) return;
+    [self ensureLoopTimer];
+    const int s = sh->loopState[i].load(std::memory_order_relaxed);
+    if (s == 2 || s == 5) return;   // already recording/overdubbing
+    if (sh->loopLen.load(std::memory_order_relaxed) == 0) {
+        // First loop defines the master grid from bars × current jam BPM.
+        float bpm = sh->fxTempo.load(std::memory_order_relaxed);
+        if (bpm < 40.0f || bpm > 300.0f) bpm = 120.0f;
+        const int bars = sh->loopBars.load(std::memory_order_relaxed);
+        const int bpb = sh->beatsPerBar.load(std::memory_order_relaxed);
+        long len = (long)llround((double)bars * bpb * (60.0 / bpm) * 48000.0);
+        len = MAX(4800L, MIN((long)JamSharedState::kLoopMaxFrames, len));
+        sh->loopLen.store(len, std::memory_order_release);
+        sh->loopResetPhase.store(true, std::memory_order_release);  // start the grid now
+    }
+    sh->loopState[i].store(1, std::memory_order_relaxed);   // armed
+    [self pushLoopState];
+}
+
+- (void)handleLoopStop:(int)i {   // toggle: active → stopped, stopped → playing
+    JamSharedState* sh = self.sharedState;
+    if (!sh || i < 0 || i >= JamSharedState::kLoopTracks) return;
+    const int s = sh->loopState[i].load(std::memory_order_relaxed);
+    if (s == 0) return;
+    sh->loopState[i].store(s == 6 ? 3 : 6, std::memory_order_relaxed);
+    [self pushLoopState];
+}
+
+- (void)handleLoopClear:(int)i {
+    JamSharedState* sh = self.sharedState;
+    if (!sh || i < 0 || i >= JamSharedState::kLoopTracks) return;
+    sh->loopState[i].store(0, std::memory_order_relaxed);   // empty
+    // If every track is empty, drop the master grid so the next first loop
+    // can set a fresh tempo/length.
+    bool any = false;
+    for (int t = 0; t < JamSharedState::kLoopTracks; ++t)
+        if (sh->loopState[t].load(std::memory_order_relaxed) != 0) { any = true; break; }
+    if (!any) {
+        sh->loopLen.store(0, std::memory_order_relaxed);
+        sh->loopPhase.store(0, std::memory_order_relaxed);
+    }
+    [self pushLoopState];
+}
+
+- (void)handleLoopOverdub:(int)i {   // toggle from playing
+    JamSharedState* sh = self.sharedState;
+    if (!sh || i < 0 || i >= JamSharedState::kLoopTracks) return;
+    const int s = sh->loopState[i].load(std::memory_order_relaxed);
+    if (s == 3)               sh->loopState[i].store(4, std::memory_order_relaxed);  // → armed-overdub
+    else if (s == 4 || s == 5) sh->loopState[i].store(3, std::memory_order_relaxed); // → playing (off)
+    [self pushLoopState];
+}
+
+// Push loop track states (+ master phase fraction) to the UI for the pads.
+- (void)pushLoopState {
+    JamSharedState* sh = self.sharedState;
+    if (!sh) return;
+    NSMutableArray* states = [NSMutableArray array];
+    for (int t = 0; t < JamSharedState::kLoopTracks; ++t)
+        [states addObject:@(sh->loopState[t].load(std::memory_order_relaxed))];
+    const long len = sh->loopLen.load(std::memory_order_relaxed);
+    const double frac = len > 0
+        ? (double)sh->loopPhase.load(std::memory_order_relaxed) / (double)len : 0.0;
+    [self sendStateUpdate:@{@"loop": @{
+        @"states": states,
+        @"phase": @(frac),
+        @"bars": @(sh->loopBars.load(std::memory_order_relaxed)),
+    }}];
 }
 
 // ─── Live (stage) mode: hold a power assertion so the machine never idle-
@@ -935,6 +1021,40 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
     else if ([type isEqualToString:@"liveMode"]) {
         NSNumber* on = body[@"on"];
         if ([on isKindOfClass:[NSNumber class]]) [self setLiveMode:on.boolValue];
+    }
+    else if ([type isEqualToString:@"loopArm"]) {
+        [self handleLoopArm:[body[@"index"] intValue]];
+    }
+    else if ([type isEqualToString:@"loopStop"]) {
+        [self handleLoopStop:[body[@"index"] intValue]];
+    }
+    else if ([type isEqualToString:@"loopClear"]) {
+        [self handleLoopClear:[body[@"index"] intValue]];
+    }
+    else if ([type isEqualToString:@"loopOverdub"]) {
+        [self handleLoopOverdub:[body[@"index"] intValue]];
+    }
+    else if ([type isEqualToString:@"loopMute"]) {
+        JamSharedState* sh = self.sharedState;
+        const int i = [body[@"index"] intValue];
+        if (sh && i >= 0 && i < JamSharedState::kLoopTracks)
+            sh->loopMute[i].store([body[@"on"] boolValue], std::memory_order_relaxed);
+    }
+    else if ([type isEqualToString:@"loopGain"]) {
+        JamSharedState* sh = self.sharedState;
+        const int i = [body[@"index"] intValue];
+        if (sh && i >= 0 && i < JamSharedState::kLoopTracks) {
+            float g = [body[@"value"] floatValue];
+            sh->loopGain[i].store(MAX(0.0f, MIN(1.5f, g)), std::memory_order_relaxed);
+        }
+    }
+    else if ([type isEqualToString:@"loopBars"]) {
+        JamSharedState* sh = self.sharedState;
+        if (sh) {
+            int b = [body[@"value"] intValue];
+            b = (b == 1 || b == 2 || b == 4 || b == 8) ? b : 4;
+            sh->loopBars.store(b, std::memory_order_relaxed);
+        }
     }
     else if ([type isEqualToString:@"calibrationDone"]) {
         [self finishCalibration];

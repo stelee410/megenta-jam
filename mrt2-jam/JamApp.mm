@@ -1107,6 +1107,54 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
 
         }  // end program-audio generation (else of calibration)
 
+        // ── Multi-track looper ──────────────────────────────────────────────
+        // Record the program (pre-loop) into recording/overdubbing tracks, and
+        // sum playing tracks back into the output. Synced to the master phase.
+        if (!_calib) {
+            const long llen = shared->loopLen.load(std::memory_order_relaxed);
+            if (llen > 0) {
+                const int nT = JamSharedState::kLoopTracks;
+                int   ls[JamSharedState::kLoopTracks];
+                float lg[JamSharedState::kLoopTracks];
+                bool  lm[JamSharedState::kLoopTracks];
+                for (int t = 0; t < nT; ++t) {
+                    ls[t] = shared->loopState[t].load(std::memory_order_relaxed);
+                    lg[t] = shared->loopGain[t].load(std::memory_order_relaxed);
+                    lm[t] = shared->loopMute[t].load(std::memory_order_relaxed);
+                }
+                long phase = shared->loopPhase.load(std::memory_order_relaxed);
+                if (shared->loopResetPhase.exchange(false, std::memory_order_relaxed)) phase = 0;
+                for (AVAudioFrameCount i = 0; i < genFrames; ++i) {
+                    const long p = (phase + i) % llen;
+                    if (p == 0) {  // cycle boundary: quantized arm → active
+                        for (int t = 0; t < nT; ++t) {
+                            if (ls[t] == 1) { ls[t] = 2; shared->loopRecRemaining[t] = llen; } // armed → recording
+                            else if (ls[t] == 4) ls[t] = 5;  // armed-overdub → overdubbing
+                        }
+                    }
+                    const float pL = outL[i], pR = outR[i];   // program (pre-loop)
+                    float addL = 0.0f, addR = 0.0f;
+                    for (int t = 0; t < nT; ++t) {
+                        const int s = ls[t];
+                        if (s == 0 || s == 1 || s == 6) continue;   // empty/armed/stopped
+                        float* b = shared->loopData[t];
+                        const long bi = p * 2;
+                        const float oldL = b[bi], oldR = b[bi + 1];
+                        if (s == 3 || s == 4 || s == 5) {           // play existing
+                            if (!lm[t]) { addL += oldL * lg[t]; addR += oldR * lg[t]; }
+                        }
+                        if (s == 2) { b[bi] = pL; b[bi + 1] = pR; }              // record (overwrite)
+                        else if (s == 5) { b[bi] = oldL + pL; b[bi + 1] = oldR + pR; } // overdub (layer)
+                        if (s == 2 && --shared->loopRecRemaining[t] <= 0) ls[t] = 3;   // recorded a full cycle → playing
+                    }
+                    outL[i] += addL; outR[i] += addR;
+                }
+                for (int t = 0; t < nT; ++t)
+                    shared->loopState[t].store(ls[t], std::memory_order_relaxed);
+                shared->loopPhase.store((phase + genFrames) % llen, std::memory_order_relaxed);
+            }
+        }
+
         shared->pushAudioSamples(outL, outR, genFrames);
 
         // Resample the generated genFrames of 48k content down to the frameCount

@@ -119,6 +119,24 @@ struct JamSharedState {
     std::atomic<long> stemCue{-1};         // cue point (samples; -1 = none)
     // render-local click synth state:
     float clickPhase = 0.0f, clickEnv = 0.0f, clickFreq = 1000.0f;
+
+    // ── Multi-track looper (jam tab) ──────────────────────────────────────
+    // Capture the program output (pre-loop) into loop tracks and layer them
+    // back in, all synced to a master grid set by the first loop's bars × BPM.
+    // States: 0 empty · 1 armed · 2 recording · 3 playing · 4 armed-overdub ·
+    // 5 overdubbing · 6 stopped. Transitions are driven on the audio thread;
+    // the UI/controller only sets intent (arm/overdub/stop/clear).
+    static constexpr int  kLoopTracks    = 4;
+    static constexpr long kLoopMaxFrames = 48000 * 16;   // 16 s max loop
+    float loopData[kLoopTracks][2 * kLoopMaxFrames] = {}; // stereo interleaved
+    std::atomic<int>   loopState[kLoopTracks] = {};
+    std::atomic<float> loopGain[kLoopTracks]  = {{1.0f}, {1.0f}, {1.0f}, {1.0f}};
+    std::atomic<bool>  loopMute[kLoopTracks]  = {};
+    std::atomic<long>  loopLen{0};          // master loop length (frames; 0 = none)
+    std::atomic<long>  loopPhase{0};        // master phase [0, loopLen)
+    std::atomic<int>   loopBars{4};         // requested loop length in bars
+    std::atomic<bool>  loopResetPhase{false}; // first loop: restart the grid at 0
+    long loopRecRemaining[kLoopTracks] = {}; // audio-thread-owned record countdown
     // Output routing: the main mix and the click can target different device
     // channels (e.g. main → outs 1/2 to FOH, click → out 3 to the drummer's
     // ear). Bit c of a mask = device output channel c. The render block
