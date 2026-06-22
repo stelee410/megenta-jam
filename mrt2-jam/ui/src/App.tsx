@@ -32,6 +32,8 @@ import {
   CYC_MODES, ARP_DIVS, MATRIX_SRC, MATRIX_DST,
 } from './InstrumentPanel';
 import type { SynthParams, SynthPreset } from './InstrumentPanel';
+import { ModularPanel, DEFAULT_MODULAR, DEFAULT_SEQ } from './ModularPanel';
+import type { ModularParams, ModularSeq } from './ModularPanel';
 import { FACTORY_PRESETS } from './SynthPresets';
 import { StudioPanel, STUDIO_INIT, GM_FAMILIES } from './StudioPanel';
 import type { StudioState } from './StudioPanel';
@@ -497,7 +499,7 @@ function App() {
   });
 
   // ─── Main tabs: JAM (mix) · INSTRUMENT (synth) · PGM (show studio) ────────
-  const [mainTab, setMainTab] = useState<'jam' | 'instrument' | 'pgm'>('jam');
+  const [mainTab, setMainTab] = useState<'jam' | 'instrument' | 'modular' | 'pgm'>('jam');
   const [instrumentFollowJam, setInstrumentFollowJam] = useState(false);
   // Calibration gate: shown when the output device/channels change. Plays a
   // 120 BPM reference click; performance is held until the operator confirms.
@@ -507,10 +509,12 @@ function App() {
   }>({ active: false, measuring: false });
   // 现场模式：开启后阻止系统休眠 / 屏幕锁屏（native IOPMAssertion）。
   const [liveMode, setLiveMode] = useState(false);
-  // 多轨 looper：states 每轨状态(0空1预备2录3播4预叠5叠6停)、phase 主循环相位、bars 小节数。
-  const [loop, setLoop] = useState<{ states: number[]; phase: number; bars: number }>({
-    states: [0, 0, 0, 0], phase: 0, bars: 4,
-  });
+  // 多轨 looper：states 每轨状态(0空1预备2录3播4预叠5叠6停)、phase 主循环相位、
+  // bars 小节数、beat 当前拍、countIn 预备拍剩余、auto 自动叠录、countInOn 预备拍开关。
+  const [loop, setLoop] = useState<{
+    states: number[]; phase: number; bars: number; beat: number; bpb: number;
+    countIn: number; auto: boolean; countInOn: boolean;
+  }>({ states: [0, 0, 0, 0], phase: 0, bars: 4, beat: 0, bpb: 4, countIn: 0, auto: true, countInOn: true });
   // Tell native which tab is active so live MIDI only conditions the
   // generative engine on the jam tab (never starts an AI jam from pgm).
   useEffect(() => { post({ type: 'activeTab', tab: mainTab }); }, [mainTab]);
@@ -525,6 +529,25 @@ function App() {
   // Gate native note routing: instrument tab → notes play the synth.
   useEffect(() => {
     post({ type: 'instrumentActive', value: mainTab === 'instrument' });
+  }, [mainTab]);
+  // Modular tab → notes play the West-Coast voice. On first activation, push
+  // the full state (params + patch + seq) so native matches the UI defaults.
+  const modularSynced = useRef(false);
+  useEffect(() => {
+    const on = mainTab === 'modular';
+    post({ type: 'modularActive', value: on });
+    if (on && !modularSynced.current) {
+      modularSynced.current = true;
+      Object.entries(modularParams).forEach(([key, value]) =>
+        post({ type: 'modularParam', key, value }));
+      modularPatch.forEach((value, i) => {
+        if (value) post({ type: 'modularPatch', src: Math.floor(i / 8), dst: i % 8, value });
+      });
+      (['gate', 'note', 'fn1', 'fn2', 'lpg', 'space'] as Array<keyof ModularSeq>).forEach(lane => {
+        (modularSeq[lane] as any[]).forEach((v, step) =>
+          post({ type: 'modularSeq', lane, step, value: lane === 'note' ? v : (v ? 1 : 0) }));
+      });
+    }
   }, [mainTab]);
 
   // ─── PGM studio: song → stems → model covers → packaged show program ──────
@@ -567,6 +590,47 @@ function App() {
     setSynthMatrix(cells);
     cells.forEach((value, index) => post({ type: 'synthMatrix', index, value }));
   };
+  // ── Modular (West-Coast) tab state ──
+  const [modularParams, setModularParams] = useState<ModularParams>(DEFAULT_MODULAR);
+  const setModularParam = useCallback((key: keyof ModularParams, value: number) => {
+    setModularParams(s => ({ ...s, [key]: value }));
+    post({ type: 'modularParam', key, value });
+  }, []);
+  const [modularPatch, setModularPatch] = useState<number[]>(() => Array(7 * 8).fill(0));
+  const setModularPatchCell = useCallback((src: number, dst: number, value: number) => {
+    setModularPatch(m => { const next = [...m]; next[src * 8 + dst] = value; return next; });
+    post({ type: 'modularPatch', src, dst, value });
+  }, []);
+  const [modularSeq, setModularSeq] = useState<ModularSeq>(DEFAULT_SEQ);
+  const setModularSeqCell = useCallback((lane: keyof ModularSeq, step: number, value: number) => {
+    setModularSeq(s => {
+      const next = { ...s };
+      const arr = [...(next[lane] as any[])];
+      arr[step] = lane === 'note' ? value : !!value;
+      (next as any)[lane] = arr;
+      return next;
+    });
+    post({ type: 'modularSeq', lane, step, value });
+  }, []);
+  const [modularStep, setModularStep] = useState(-1);
+  const modularDice = useCallback(() => {
+    // UI is the source of truth: generate a fresh pattern and push every cell
+    // so the displayed grid and the native voice stay in sync.
+    const next: ModularSeq = {
+      gate: Array.from({ length: 16 }, () => Math.random() < 0.7),
+      note: Array.from({ length: 16 }, () => Math.floor(Math.random() * 8)),
+      fn1: Array.from({ length: 16 }, () => Math.random() < 0.3),
+      fn2: Array(16).fill(false),
+      lpg: Array.from({ length: 16 }, () => Math.random() < 0.35),
+      space: Array.from({ length: 16 }, () => Math.random() < 0.18),
+    };
+    setModularSeq(next);
+    (['gate', 'note', 'fn1', 'fn2', 'lpg', 'space'] as Array<keyof ModularSeq>).forEach(lane => {
+      (next[lane] as any[]).forEach((v, step) =>
+        post({ type: 'modularSeq', lane, step, value: lane === 'note' ? v : (v ? 1 : 0) }));
+    });
+  }, []);
+
   /** Push a full param set to the engine and the UI. */
   const applySynthParams = (params: SynthParams) => {
     setSynthParams(params);
@@ -1859,7 +1923,15 @@ function App() {
           states: Array.isArray(lp.states) ? lp.states.map(Number) : prev.states,
           phase: typeof lp.phase === 'number' ? lp.phase : prev.phase,
           bars: typeof lp.bars === 'number' ? lp.bars : prev.bars,
+          beat: typeof lp.beat === 'number' ? lp.beat : prev.beat,
+          bpb: typeof lp.bpb === 'number' ? lp.bpb : prev.bpb,
+          countIn: typeof lp.countIn === 'number' ? lp.countIn : prev.countIn,
+          auto: typeof lp.auto === 'boolean' ? lp.auto : prev.auto,
+          countInOn: typeof lp.countInOn === 'boolean' ? lp.countInOn : prev.countInOn,
         }));
+      }
+      if (state.modular && typeof state.modular === 'object') {
+        if (typeof state.modular.step === 'number') setModularStep(state.modular.step);
       }
       if (state.openSettings !== undefined) {
         setIsSettingsOpen(!!state.openSettings);
@@ -2810,6 +2882,12 @@ function App() {
                 instrument
               </button>
               <button
+                className={mainTab === 'modular' ? 'is-active' : ''}
+                onClick={() => setMainTab('modular')}
+              >
+                modular
+              </button>
+              <button
                 className={mainTab === 'pgm' ? 'is-active' : ''}
                 onClick={() => setMainTab('pgm')}
               >
@@ -3147,6 +3225,19 @@ function App() {
               setInstrumentFollowJam(on);
               post({ type: 'instrumentFollowJam', value: on });
             }}
+          />
+        )}
+
+        {mainTab === 'modular' && (
+          <ModularPanel
+            params={modularParams}
+            onParam={setModularParam}
+            patch={modularPatch}
+            onPatch={setModularPatchCell}
+            seq={modularSeq}
+            onSeq={setModularSeqCell}
+            step={modularStep}
+            onDice={modularDice}
           />
         )}
 
@@ -3612,50 +3703,6 @@ function App() {
               <span>bpm</span>
             </div>
 
-            {/* ── Multi-track looper ── */}
-            <div className="jam-loop-row">
-              <span className="jam-loop-label">LOOP</span>
-              {[0, 1, 2, 3].map((i) => {
-                const st = loop.states[i] ?? 0;
-                const cls = st === 2 ? 'is-rec' : st === 3 ? 'is-play'
-                  : (st === 4 || st === 5) ? 'is-dub' : st === 1 ? 'is-armed'
-                  : st === 6 ? 'is-stop' : '';
-                const label = st === 2 ? 'REC' : st === 3 ? '▶' : st === 5 ? 'DUB'
-                  : st === 4 ? 'dub?' : st === 1 ? '…' : st === 6 ? '⏸' : '●';
-                return (
-                  <div key={i} className={`jam-loop-pad ${cls}`}>
-                    <button
-                      className="jam-loop-main"
-                      onClick={() => post({ type: st === 0 ? 'loopArm' : 'loopStop', index: i })}
-                      onDoubleClick={() => post({ type: 'loopOverdub', index: i })}
-                      title="单击：空轨录制 / 已录轨 播放⇄停;双击:叠录 overdub"
-                    >
-                      <span className="jam-loop-num">{i + 1}</span>
-                      <span className="jam-loop-st">{label}</span>
-                    </button>
-                    {st !== 0 && (
-                      <button className="jam-loop-clear" title="清除该轨"
-                        onClick={() => post({ type: 'loopClear', index: i })}>✕</button>
-                    )}
-                  </div>
-                );
-              })}
-              <select
-                className="jam-loop-bars"
-                value={loop.bars}
-                onChange={(e) => post({ type: 'loopBars', value: Number(e.target.value) })}
-                title="loop 长度（小节）— 第一条录制时确定主循环长度"
-              >
-                <option value={1}>1</option>
-                <option value={2}>2</option>
-                <option value={4}>4</option>
-                <option value={8}>8</option>
-              </select>
-              <div className="jam-loop-phase">
-                <span style={{ width: `${Math.round((loop.phase || 0) * 100)}%` }} />
-              </div>
-            </div>
-
             <div className="jam-performance-panel">
               <div className="jam-performance-head">
                 <div className="jam-pad-mode-switch" aria-label="Right panel view">
@@ -3814,6 +3861,82 @@ function App() {
           </aside>
         </div>
       </div>
+
+      {/* ══════════════════════════════════════════════════════════════════
+          MULTI-TRACK LOOPER — global bottom bar, shared by jam + instrument
+          ══════════════════════════════════════════════════════════════════ */}
+      {mainTab !== 'pgm' && (
+        <div className="jam-loopbar">
+          <span className="jam-loop-label">LOOP</span>
+          {[0, 1, 2, 3].map((i) => {
+            const st = loop.states[i] ?? 0;
+            const cls = st === 2 ? 'is-rec' : st === 3 ? 'is-play'
+              : (st === 4 || st === 5) ? 'is-dub' : st === 1 ? 'is-armed'
+              : st === 6 ? 'is-stop' : '';
+            const label = st === 2 ? 'REC' : st === 3 ? '▶' : st === 5 ? 'DUB'
+              : st === 4 ? 'dub?' : st === 1 ? '…' : st === 6 ? '⏸' : '●';
+            return (
+              <div key={i} className={`jam-loop-pad ${cls}`}>
+                <button
+                  className="jam-loop-main"
+                  onClick={() => post({ type: st === 0 ? 'loopArm' : 'loopStop', index: i })}
+                  onDoubleClick={() => post({ type: 'loopOverdub', index: i })}
+                  title="单击：空轨录制 / 已录轨 播放⇄停；双击：叠录 overdub（录的是当前听到的内容：jam 或 instrument）"
+                >
+                  <span className="jam-loop-num">{i + 1}</span>
+                  <span className="jam-loop-st">{label}</span>
+                </button>
+                {st !== 0 && (
+                  <button className="jam-loop-clear" title="清除该轨"
+                    onClick={() => post({ type: 'loopClear', index: i })}>✕</button>
+                )}
+              </div>
+            );
+          })}
+          <select
+            className="jam-loop-bars"
+            value={loop.bars}
+            onChange={(e) => post({ type: 'loopBars', value: Number(e.target.value) })}
+            title="loop 长度（小节）— 第一条录制时确定主循环长度"
+          >
+            <option value={1}>1 bar</option>
+            <option value={2}>2 bars</option>
+            <option value={4}>4 bars</option>
+            <option value={8}>8 bars</option>
+          </select>
+
+          {/* beat indicator / count-in preparation cue */}
+          {loop.countIn > 0 ? (
+            <span className="jam-loop-countin">预备 {loop.countIn}</span>
+          ) : (
+            <span className="jam-loop-beats" aria-label="beat">
+              {Array.from({ length: Math.max(1, loop.bpb) }).map((_, b) => (
+                <i key={b} className={loop.beat === b + 1 ? 'on' : ''} />
+              ))}
+            </span>
+          )}
+
+          {/* modes */}
+          <button
+            className={`jam-loop-mode ${loop.auto ? 'is-on' : ''}`}
+            title="自动叠录：录满第一圈后继续每圈叠录,点轨即定版播放"
+            onClick={() => post({ type: 'loopAutoOverdub', on: !loop.auto })}
+          >自动叠录</button>
+          <button
+            className={`jam-loop-mode ${loop.countInOn ? 'is-on' : ''}`}
+            title="预备拍：首个 loop 录制前给 1 小节 click 预备"
+            onClick={() => post({ type: 'loopCountIn', on: !loop.countInOn })}
+          >预备拍</button>
+
+          {/* master stop / clear all */}
+          <button className="jam-loop-master" title="全部停止" onClick={() => post({ type: 'loopStopAll' })}>■</button>
+          <button className="jam-loop-master is-del" title="全部清空" onClick={() => post({ type: 'loopClearAll' })}>✕</button>
+
+          <div className="jam-loopbar-phase">
+            <span style={{ width: `${Math.round((loop.phase || 0) * 100)}%` }} />
+          </div>
+        </div>
+      )}
 
       {/* ══════════════════════════════════════════════════════════════════
           PIANO KEYBOARD — full bleed, no padding

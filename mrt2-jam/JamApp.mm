@@ -760,6 +760,11 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
         shared->synth.render(outL, outR, genFrames,
                              shared->fxTempo.load(std::memory_order_relaxed));
 
+        // West-Coast modular voice (Modular tab) — also pre-FX so it shares
+        // the master filter/delay/reverb chain on stage.
+        shared->modular.render(outL, outR, genFrames,
+                               shared->fxTempo.load(std::memory_order_relaxed));
+
         // PGM live MIDI-input SF2 source: drain queued note events into the
         // live tsf instance and mix its render in. (Built-in synth source uses
         // the path above.)
@@ -1112,8 +1117,34 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
         // sum playing tracks back into the output. Synced to the master phase.
         if (!_calib) {
             const long llen = shared->loopLen.load(std::memory_order_relaxed);
-            if (llen > 0) {
+            const long ci   = shared->loopCountInLeft.load(std::memory_order_relaxed);
+            if (llen > 0 && ci > 0) {
+                // Count-in before the first loop: click only, no record/play.
+                const long total = shared->loopCountInTotal.load(std::memory_order_relaxed);
+                const int  bpb   = shared->beatsPerBar.load(std::memory_order_relaxed);
+                const long beatFrames = (total > 0 && bpb > 0) ? (total / bpb) : 24000;
+                for (AVAudioFrameCount i = 0; i < genFrames; ++i) {
+                    const long pos = (total - ci) + (long)i;     // frames into count-in
+                    if (pos >= 0 && beatFrames > 0 && (pos % beatFrames) == 0) {
+                        shared->clickEnv = 1.0f; shared->clickPhase = 0.0f;
+                        shared->clickFreq = (pos == 0) ? 1760.0f : 1175.0f;
+                    }
+                    if (shared->clickEnv > 0.0005f) {
+                        shared->clickPhase += shared->clickFreq / 48000.0f;
+                        if (shared->clickPhase >= 1.0f) shared->clickPhase -= 1.0f;
+                        shared->clickBus[i] += sinf(shared->clickPhase * 2.0f * (float)M_PI)
+                            * shared->clickEnv * 0.5f
+                            * shared->clickGain.load(std::memory_order_relaxed);
+                        shared->clickEnv *= 0.9988f;
+                    }
+                }
+                const long nci = ci - (long)genFrames;
+                if (nci <= 0) { shared->loopCountInLeft.store(0, std::memory_order_relaxed);
+                                shared->loopResetPhase.store(true, std::memory_order_release); }
+                else shared->loopCountInLeft.store(nci, std::memory_order_relaxed);
+            } else if (llen > 0) {
                 const int nT = JamSharedState::kLoopTracks;
+                const bool autoOd = shared->loopAuto.load(std::memory_order_relaxed);
                 int   ls[JamSharedState::kLoopTracks];
                 float lg[JamSharedState::kLoopTracks];
                 bool  lm[JamSharedState::kLoopTracks];
@@ -1145,7 +1176,8 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                         }
                         if (s == 2) { b[bi] = pL; b[bi + 1] = pR; }              // record (overwrite)
                         else if (s == 5) { b[bi] = oldL + pL; b[bi + 1] = oldR + pR; } // overdub (layer)
-                        if (s == 2 && --shared->loopRecRemaining[t] <= 0) ls[t] = 3;   // recorded a full cycle → playing
+                        // Recorded a full cycle → auto-overdub (keep layering) or play.
+                        if (s == 2 && --shared->loopRecRemaining[t] <= 0) ls[t] = autoOd ? 5 : 3;
                     }
                     outL[i] += addL; outR[i] += addR;
                 }

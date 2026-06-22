@@ -20,6 +20,7 @@
 #include <cmath>
 #include "audio_level_processor.h"
 #include "JamSynth.h"
+#include "JamModular.h"
 #include "JamLaneFx.h"
 
 using magentart::core::RealtimeRunner;
@@ -43,6 +44,10 @@ struct JamSharedState {
     // Live-performance synth (Instrument tab). When `synth.active`, incoming
     // notes route here instead of conditioning the generative engine.
     JamSynth synth;
+
+    // West-Coast semi-modular voice (Modular tab). When `modular.active`,
+    // incoming notes route here instead of the synth / engine.
+    JamModular modular;
 
     // PGM live MIDI-input instrument source: the built-in synth, or an SF2
     // GM program. SF2 note events flow through a lock-free queue applied on
@@ -68,7 +73,15 @@ struct JamSharedState {
     // Route a live note to the selected source. Note-offs go to BOTH so a
     // source switch mid-hold never strands a sounding note.
     void routeLiveNote(uint8_t note, uint8_t vel, bool on) {
-        if (!on) { synth.pushNote(note, 0, false); pushLiveNote(note, 0, false); return; }
+        // Note-offs always reach every sink so a tab/source switch mid-hold
+        // never strands a sounding note.
+        if (!on) {
+            synth.pushNote(note, 0, false);
+            modular.pushNote(note, 0, false);
+            pushLiveNote(note, 0, false);
+            return;
+        }
+        if (modular.active.load(std::memory_order_relaxed)) { modular.pushNote(note, vel, true); return; }
         if (liveSource.load(std::memory_order_relaxed) == 1) pushLiveNote(note, vel, true);
         else synth.pushNote(note, vel, true);
     }
@@ -136,6 +149,10 @@ struct JamSharedState {
     std::atomic<long>  loopPhase{0};        // master phase [0, loopLen)
     std::atomic<int>   loopBars{4};         // requested loop length in bars
     std::atomic<bool>  loopResetPhase{false}; // first loop: restart the grid at 0
+    std::atomic<bool>  loopAuto{true};      // auto-overdub: keep layering after the 1st pass
+    std::atomic<bool>  loopCountInOn{true}; // 1-bar click count-in before the first loop
+    std::atomic<long>  loopCountInLeft{0};  // frames remaining in the count-in
+    std::atomic<long>  loopCountInTotal{0}; // count-in length (frames)
     long loopRecRemaining[kLoopTracks] = {}; // audio-thread-owned record countdown
     // Output routing: the main mix and the click can target different device
     // channels (e.g. main → outs 1/2 to FOH, click → out 3 to the drummer's

@@ -134,6 +134,7 @@ static BOOL isDevServerRunning(void) {
     NSString* _songMemo;                  // free-text notes panel content
     IOPMAssertionID _liveAssertionID;     // 现场模式：阻止休眠/锁屏 (0 = none)
     NSTimer* _loopTimer;                  // ~12 Hz push of looper state to the UI
+    NSTimer* _modularTimer;               // ~15 Hz push of modular seq step to the UI
     NSURL* _songURL;
     double _songDur;
     BOOL _studioBusy;
@@ -424,6 +425,27 @@ static BOOL isDevServerRunning(void) {
     }];
 }
 
+// Push the modular sequencer's current step to the UI for the running-step
+// highlight. Runs only while the Modular tab is active and the seq runs.
+- (void)ensureModularTimer {
+    if (_modularTimer) return;
+    __weak JamAppController* w = self;
+    _modularTimer = [NSTimer scheduledTimerWithTimeInterval:(1.0 / 15.0) repeats:YES
+                                                      block:^(NSTimer* t) {
+        JamAppController* s = w;
+        if (!s) { [t invalidate]; return; }
+        JamSharedState* sh = s.sharedState;
+        if (!sh || !sh->modular.active.load(std::memory_order_relaxed)) {
+            [t invalidate];
+            if (s->_modularTimer == t) s->_modularTimer = nil;
+            return;
+        }
+        const int step = sh->modular.seqRun.load(std::memory_order_relaxed)
+            ? sh->modular.seqStepUi.load(std::memory_order_relaxed) : -1;
+        [s sendStateUpdate:@{@"modular": @{@"step": @(step)}}];
+    }];
+}
+
 - (void)handleLoopArm:(int)i {
     JamSharedState* sh = self.sharedState;
     if (!sh || i < 0 || i >= JamSharedState::kLoopTracks) return;
@@ -439,18 +461,46 @@ static BOOL isDevServerRunning(void) {
         long len = (long)llround((double)bars * bpb * (60.0 / bpm) * 48000.0);
         len = MAX(4800L, MIN((long)JamSharedState::kLoopMaxFrames, len));
         sh->loopLen.store(len, std::memory_order_release);
-        sh->loopResetPhase.store(true, std::memory_order_release);  // start the grid now
+        if (sh->loopCountInOn.load(std::memory_order_relaxed)) {
+            // One bar of click count-in before recording starts.
+            const long oneBar = MAX(1L, len / MAX(1, bars));
+            sh->loopCountInTotal.store(oneBar, std::memory_order_relaxed);
+            sh->loopCountInLeft.store(oneBar, std::memory_order_release);
+        } else {
+            sh->loopResetPhase.store(true, std::memory_order_release);  // start now
+        }
     }
     sh->loopState[i].store(1, std::memory_order_relaxed);   // armed
     [self pushLoopState];
 }
 
-- (void)handleLoopStop:(int)i {   // toggle: active → stopped, stopped → playing
+// Drop the master grid (and any count-in) once every track is empty.
+- (void)loopResetGridIfEmpty {
+    JamSharedState* sh = self.sharedState;
+    for (int t = 0; t < JamSharedState::kLoopTracks; ++t)
+        if (sh->loopState[t].load(std::memory_order_relaxed) != 0) return;
+    sh->loopLen.store(0, std::memory_order_relaxed);
+    sh->loopPhase.store(0, std::memory_order_relaxed);
+    sh->loopCountInLeft.store(0, std::memory_order_relaxed);
+}
+
+// Universal pad tap: empty→(arm elsewhere) · armed→cancel · recording/overdub
+// →finalize to playing · playing→stopped · stopped→playing.
+- (void)handleLoopStop:(int)i {
     JamSharedState* sh = self.sharedState;
     if (!sh || i < 0 || i >= JamSharedState::kLoopTracks) return;
     const int s = sh->loopState[i].load(std::memory_order_relaxed);
-    if (s == 0) return;
-    sh->loopState[i].store(s == 6 ? 3 : 6, std::memory_order_relaxed);
+    int n = s;
+    switch (s) {
+        case 1: n = 0; break;            // armed → cancel (empty)
+        case 2: case 5: n = 3; break;    // recording/overdub → finalize to playing
+        case 3: n = 6; break;            // playing → stopped
+        case 4: n = 3; break;            // armed-overdub → playing
+        case 6: n = 3; break;            // stopped → playing
+        default: return;                 // empty
+    }
+    sh->loopState[i].store(n, std::memory_order_relaxed);
+    if (n == 0) [self loopResetGridIfEmpty];
     [self pushLoopState];
 }
 
@@ -458,15 +508,29 @@ static BOOL isDevServerRunning(void) {
     JamSharedState* sh = self.sharedState;
     if (!sh || i < 0 || i >= JamSharedState::kLoopTracks) return;
     sh->loopState[i].store(0, std::memory_order_relaxed);   // empty
-    // If every track is empty, drop the master grid so the next first loop
-    // can set a fresh tempo/length.
-    bool any = false;
-    for (int t = 0; t < JamSharedState::kLoopTracks; ++t)
-        if (sh->loopState[t].load(std::memory_order_relaxed) != 0) { any = true; break; }
-    if (!any) {
-        sh->loopLen.store(0, std::memory_order_relaxed);
-        sh->loopPhase.store(0, std::memory_order_relaxed);
+    [self loopResetGridIfEmpty];
+    [self pushLoopState];
+}
+
+- (void)handleLoopStopAll {
+    JamSharedState* sh = self.sharedState;
+    if (!sh) return;
+    for (int t = 0; t < JamSharedState::kLoopTracks; ++t) {
+        const int s = sh->loopState[t].load(std::memory_order_relaxed);
+        if (s != 0) sh->loopState[t].store(6, std::memory_order_relaxed);  // stopped
     }
+    sh->loopCountInLeft.store(0, std::memory_order_relaxed);
+    [self pushLoopState];
+}
+
+- (void)handleLoopClearAll {
+    JamSharedState* sh = self.sharedState;
+    if (!sh) return;
+    for (int t = 0; t < JamSharedState::kLoopTracks; ++t)
+        sh->loopState[t].store(0, std::memory_order_relaxed);
+    sh->loopLen.store(0, std::memory_order_relaxed);
+    sh->loopPhase.store(0, std::memory_order_relaxed);
+    sh->loopCountInLeft.store(0, std::memory_order_relaxed);
     [self pushLoopState];
 }
 
@@ -489,10 +553,30 @@ static BOOL isDevServerRunning(void) {
     const long len = sh->loopLen.load(std::memory_order_relaxed);
     const double frac = len > 0
         ? (double)sh->loopPhase.load(std::memory_order_relaxed) / (double)len : 0.0;
+    // Count-in: beats remaining (0 = none) for the "preparation" display.
+    const long ciLeft = sh->loopCountInLeft.load(std::memory_order_relaxed);
+    const long ciTot  = sh->loopCountInTotal.load(std::memory_order_relaxed);
+    const int  bpb    = sh->beatsPerBar.load(std::memory_order_relaxed);
+    int ciBeats = 0;
+    if (ciLeft > 0 && ciTot > 0 && bpb > 0)
+        ciBeats = (int)ceil((double)ciLeft / ((double)ciTot / bpb));
+    // Current beat within the bar (1..bpb) for the beat indicator.
+    int beat = 0;
+    if (len > 0 && bpb > 0) {
+        const int bars = MAX(1, sh->loopBars.load(std::memory_order_relaxed));
+        const long totalBeats = (long)bars * bpb;
+        const long bi = (long)(frac * totalBeats);
+        beat = (int)(bi % bpb) + 1;
+    }
     [self sendStateUpdate:@{@"loop": @{
         @"states": states,
         @"phase": @(frac),
         @"bars": @(sh->loopBars.load(std::memory_order_relaxed)),
+        @"beat": @(beat),
+        @"bpb": @(bpb),
+        @"countIn": @(ciBeats),
+        @"auto": @(sh->loopAuto.load(std::memory_order_relaxed)),
+        @"countInOn": @(sh->loopCountInOn.load(std::memory_order_relaxed)),
     }}];
 }
 
@@ -722,6 +806,46 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
     else if ([key isEqualToString:@"volume"])      sy.volume.store(v, std::memory_order_relaxed);
 }
 
+// Apply one named param to the West-Coast modular voice (Modular tab).
+static void JamSetModularParam(JamModular& md, NSString* key, NSNumber* value) {
+    const float v = value.floatValue;
+    const int iv = value.intValue;
+    if      ([key isEqualToString:@"voiceMode"])  md.voiceMode.store(MAX(0, MIN(2, iv)), std::memory_order_relaxed);
+    else if ([key isEqualToString:@"glide"])      md.glide.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"vcoWaveSel"]) md.vcoWaveSel.store(MAX(0, MIN(2, iv)), std::memory_order_relaxed);
+    else if ([key isEqualToString:@"vcoPitch"])   md.vcoPitch.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"vcoWave"])    md.vcoWave.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"vcoScale"])   md.vcoScale.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"vcoFold"])    md.vcoFold.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"foldAmt"])    md.foldAmt.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"foldBias"])   md.foldBias.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"fn1Rise"])    md.fn1Rise.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"fn1Fall"])    md.fn1Fall.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"fn1Shape"])   md.fn1Shape.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"fn1Cycle"])   md.fn1Cycle.store(iv ? 1 : 0, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"fn2Rise"])    md.fn2Rise.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"fn2Fall"])    md.fn2Fall.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"fn2Shape"])   md.fn2Shape.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"fn2Cycle"])   md.fn2Cycle.store(iv ? 1 : 0, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"rndMode"])    md.rndMode.store(MAX(0, MIN(3, iv)), std::memory_order_relaxed);
+    else if ([key isEqualToString:@"rndRate"])    md.rndRate.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"rndProb"])    md.rndProb.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"lpgCutoff"])  md.lpgCutoff.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"lpgReso"])    md.lpgReso.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"lpgDecay"])   md.lpgDecay.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"lpgDrive"])   md.lpgDrive.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"spaceType"])  md.spaceType.store(MAX(0, MIN(4, iv)), std::memory_order_relaxed);
+    else if ([key isEqualToString:@"spaceSize"])  md.spaceSize.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"outVol"])     md.outVol.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"outWidth"])   md.outWidth.store(v, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"seqRun"])     md.seqRun.store(v > 0.5f, std::memory_order_relaxed);
+    else if ([key isEqualToString:@"seqDiv"])     md.seqDiv.store(MAX(0, MIN(5, iv)), std::memory_order_relaxed);
+    else if ([key isEqualToString:@"seqLen"])     md.seqLen.store(MAX(1, MIN(16, iv)), std::memory_order_relaxed);
+    else if ([key isEqualToString:@"seqScale"])   md.seqScale.store(MAX(0, MIN(4, iv)), std::memory_order_relaxed);
+    else if ([key isEqualToString:@"seqOctave"])  md.seqOctave.store(MAX(-2, MIN(2, iv)), std::memory_order_relaxed);
+    else if ([key isEqualToString:@"seqSwing"])   md.seqSwing.store(v, std::memory_order_relaxed);
+}
+
 - (void)userContentController:(WKUserContentController *)userContentController didReceiveScriptMessage:(WKScriptMessage *)message {
     if (![message.name isEqualToString:@"auHost"] || ![message.body isKindOfClass:[NSDictionary class]]) return;
     NSDictionary* body = message.body;
@@ -800,6 +924,66 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
         if ([key isKindOfClass:[NSString class]] &&
             [value isKindOfClass:[NSNumber class]] && self.sharedState) {
             JamSetSynthParam(self.sharedState->synth, key, value);
+        }
+    }
+    else if ([type isEqualToString:@"modularActive"]) {
+        NSNumber* value = body[@"value"];
+        if ([value isKindOfClass:[NSNumber class]] && self.sharedState) {
+            const BOOL on = value.boolValue;
+            self.sharedState->modular.active.store(on, std::memory_order_relaxed);
+            if (on) [self ensureModularTimer];
+        }
+    }
+    else if ([type isEqualToString:@"modularParam"]) {
+        NSString* key = body[@"key"];
+        NSNumber* value = body[@"value"];
+        if ([key isKindOfClass:[NSString class]] &&
+            [value isKindOfClass:[NSNumber class]] && self.sharedState) {
+            JamSetModularParam(self.sharedState->modular, key, value);
+        }
+    }
+    else if ([type isEqualToString:@"modularPatch"]) {
+        // One matrix cell: { src, dst, value } (bipolar -1..1).
+        NSNumber* srcN = body[@"src"];
+        NSNumber* dstN = body[@"dst"];
+        NSNumber* value = body[@"value"];
+        if ([srcN isKindOfClass:[NSNumber class]] && [dstN isKindOfClass:[NSNumber class]] &&
+            [value isKindOfClass:[NSNumber class]] && self.sharedState) {
+            const int s = srcN.intValue, d = dstN.intValue;
+            if (s >= 0 && s < JamModular::kSrc && d >= 0 && d < JamModular::kDst) {
+                float v = value.floatValue;
+                if (v < -1.0f) v = -1.0f; if (v > 1.0f) v = 1.0f;
+                self.sharedState->modular.patch[s * JamModular::kDst + d].store(
+                    v, std::memory_order_relaxed);
+            }
+        }
+    }
+    else if ([type isEqualToString:@"modularSeq"]) {
+        // One sequencer cell: { lane, step, value }.
+        //   lane: "gate" | "note" | "fn1" | "fn2" | "lpg" | "space"
+        NSString* lane = body[@"lane"];
+        NSNumber* stepN = body[@"step"];
+        NSNumber* value = body[@"value"];
+        if ([lane isKindOfClass:[NSString class]] && [stepN isKindOfClass:[NSNumber class]] &&
+            [value isKindOfClass:[NSNumber class]] && self.sharedState) {
+            const int st = stepN.intValue;
+            if (st >= 0 && st < JamModular::kSteps) {
+                JamModular& md = self.sharedState->modular;
+                const int iv = value.intValue;
+                const bool bv = value.boolValue;
+                if      ([lane isEqualToString:@"gate"])  md.stepGate[st].store(bv, std::memory_order_relaxed);
+                else if ([lane isEqualToString:@"note"])  md.stepNote[st].store(MAX(0, MIN(13, iv)), std::memory_order_relaxed);
+                else if ([lane isEqualToString:@"fn1"])   md.laneFn1[st].store(bv, std::memory_order_relaxed);
+                else if ([lane isEqualToString:@"fn2"])   md.laneFn2[st].store(bv, std::memory_order_relaxed);
+                else if ([lane isEqualToString:@"lpg"])   md.laneLpg[st].store(bv, std::memory_order_relaxed);
+                else if ([lane isEqualToString:@"space"]) md.laneSpace[st].store(bv, std::memory_order_relaxed);
+            }
+        }
+    }
+    else if ([type isEqualToString:@"modularDice"]) {
+        if (self.sharedState) {
+            self.sharedState->modular.diceSeed.fetch_add(
+                0x9E3779B9u + 1u, std::memory_order_relaxed);
         }
     }
     else if ([type isEqualToString:@"detectBpm"]) {
@@ -1055,6 +1239,22 @@ static void JamSetSynthParam(JamSynth& sy, NSString* key, NSNumber* value) {
             b = (b == 1 || b == 2 || b == 4 || b == 8) ? b : 4;
             sh->loopBars.store(b, std::memory_order_relaxed);
         }
+    }
+    else if ([type isEqualToString:@"loopStopAll"]) {
+        [self handleLoopStopAll];
+    }
+    else if ([type isEqualToString:@"loopClearAll"]) {
+        [self handleLoopClearAll];
+    }
+    else if ([type isEqualToString:@"loopAutoOverdub"]) {
+        JamSharedState* sh = self.sharedState;
+        if (sh) { sh->loopAuto.store([body[@"on"] boolValue], std::memory_order_relaxed);
+                  [self pushLoopState]; }
+    }
+    else if ([type isEqualToString:@"loopCountIn"]) {
+        JamSharedState* sh = self.sharedState;
+        if (sh) { sh->loopCountInOn.store([body[@"on"] boolValue], std::memory_order_relaxed);
+                  [self pushLoopState]; }
     }
     else if ([type isEqualToString:@"calibrationDone"]) {
         [self finishCalibration];
