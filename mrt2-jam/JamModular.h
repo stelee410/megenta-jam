@@ -90,6 +90,7 @@ struct JamModular {
     std::atomic<int>   seqLen{16};
     std::atomic<int>   seqScale{1};        // 0 major · 1 minor · 2 dorian · 3 penta · 4 chromatic
     std::atomic<int>   seqOctave{0};       // -2..+2
+    std::atomic<int>   seqRoot{48};        // sequencer root note (C3 = 48)
     std::atomic<float> seqSwing{0.0f};
     std::atomic<int>   stepNote[kSteps] = {};   // scale degree offset 0..7
     std::atomic<bool>  stepGate[kSteps] = {};
@@ -383,10 +384,10 @@ struct JamModular {
         const int sd = seqDiv.load(std::memory_order_relaxed);
         const float seqInc = beatHz * divSteps[sd < 0 ? 0 : (sd > 5 ? 5 : sd)] / kSR;
         const int seqLenN = std::max(1, std::min(kSteps, seqLen.load(std::memory_order_relaxed)));
-        const int sScale = seqScale.load(std::memory_order_relaxed);
         const int sOct = seqOctave.load(std::memory_order_relaxed);
         const float seqSw = clamp01f(seqSwing.load(std::memory_order_relaxed));
-        const int seqRoot = (int)lastPitch <= 0 ? 48 : (int)lastPitch;
+        const int rootBase = seqRoot.load(std::memory_order_relaxed);
+        (void)seqScale;   // scale now used by the UI (note entry / dice), not native
 
         // Keep fx tails alive a moment after the voice falls silent.
         const bool activity = anySounding() || seqOn || fn1Loop || fn2Loop ||
@@ -415,8 +416,9 @@ struct JamModular {
                     seqStepCount++;
                     seqDurMult = (seqStepCount & 1) ? (1.0f - seqSw * 0.42f) : (1.0f + seqSw * 0.42f);
                     if (stepGate[seqStep].load(std::memory_order_relaxed)) {
-                        const int deg = stepNote[seqStep].load(std::memory_order_relaxed);
-                        seqTrigNote = scaleNote(seqRoot, deg, sScale, sOct);
+                        // stepNote = chromatic semitone offset above the root.
+                        const int semi = stepNote[seqStep].load(std::memory_order_relaxed);
+                        seqTrigNote = rootBase + semi + 12 * sOct;
                         const bool acc = laneLpg[seqStep].load(std::memory_order_relaxed);
                         seqTrigVel = acc ? 1.0f : 0.8f;
                         if (acc) seqAccent = 1.0f;

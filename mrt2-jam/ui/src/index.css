@@ -4318,8 +4318,9 @@ input.pgm-align-ms:focus { border-color: rgba(111, 179, 255, 0.8); }
 .jam-loop-master:hover { background: rgba(255,255,255,0.12); }
 .jam-loop-master.is-del:hover { color: #ff5f78; border-color: rgba(255,95,120,0.5); }
 
+
 /* ═══════════════════════════════════════════════════════════════════════
-   MODULAR TAB — "FLOW MODULAR" West-Coast semi-modular synth
+   MODULAR TAB — "FLOW MODULAR" West-Coast semi-modular synth (compact)
    Cream hardware panels on the dark app background, after the reference unit.
    ═══════════════════════════════════════════════════════════════════════ */
 .modular {
@@ -4328,11 +4329,11 @@ input.pgm-align-ms:focus { border-color: rgba(111, 179, 255, 0.8); }
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin-top: 14px;
-  padding: 16px 18px 18px;
+  gap: 7px;
+  margin-top: 8px;
+  padding: 9px 12px 11px;
   box-sizing: border-box;
-  border-radius: 12px;
+  border-radius: 11px;
   background: linear-gradient(180deg, #26272b, #1a1b1e 70%, #161719);
   border: 1px solid rgba(255,255,255,0.10);
   box-shadow: inset 0 1px 0 rgba(255,255,255,0.06), 0 18px 42px rgba(0,0,0,0.5);
@@ -4345,35 +4346,40 @@ input.pgm-align-ms:focus { border-color: rgba(111, 179, 255, 0.8); }
 .mod-header {
   display: flex; align-items: center; justify-content: space-between;
   background: linear-gradient(180deg, var(--cream), var(--cream2));
-  border-radius: 10px; padding: 10px 16px; color: var(--panel-ink);
-  box-shadow: 0 2px 8px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.5);
+  border-radius: 9px; padding: 6px 12px; color: var(--panel-ink);
+  box-shadow: 0 2px 7px rgba(0,0,0,0.32), inset 0 1px 0 rgba(255,255,255,0.5);
 }
-.mod-title { display: flex; flex-direction: column; line-height: 1.05; }
-.mod-title-main { font-weight: 800; font-size: 19px; letter-spacing: 0.06em; color: #1f1f22; }
-.mod-title-sub { font-size: 10px; letter-spacing: 0.18em; text-transform: uppercase; color: #7a756a; }
-.mod-transport { display: flex; align-items: center; gap: 10px; }
-.mod-voicemode { display: inline-flex; border-radius: 7px; overflow: hidden; border: 1px solid #b9b29f; }
+.mod-title { display: flex; flex-direction: column; line-height: 1.04; }
+.mod-title-main { font-weight: 800; font-size: 15px; letter-spacing: 0.05em; color: #1f1f22; }
+.mod-title-sub { font-size: 8.5px; letter-spacing: 0.16em; text-transform: uppercase; color: #7a756a; }
+.mod-transport { display: flex; align-items: center; gap: 8px; }
+.mod-bpm { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; font-weight: 700; color: #5a564c; letter-spacing: 0.05em; }
+.mod-bpm input {
+  width: 46px; text-align: center; background: #f3eee0; border: 1px solid #b9b29f;
+  border-radius: 5px; padding: 3px 4px; font-size: 12px; font-weight: 700; color: #2a2a2c;
+}
+.mod-voicemode { display: inline-flex; border-radius: 6px; overflow: hidden; border: 1px solid #b9b29f; }
 .mod-voicemode button {
-  border: none; background: #cfc8b6; color: #5a564c; padding: 5px 11px; font-size: 11px;
-  cursor: pointer; font-weight: 600; letter-spacing: 0.04em;
+  border: none; background: #cfc8b6; color: #5a564c; padding: 4px 9px; font-size: 10px;
+  cursor: pointer; font-weight: 600; letter-spacing: 0.03em;
 }
 .mod-voicemode button.is-active { background: #7b61ff; color: #fff; }
 .mod-run, .mod-dice {
-  border: 1px solid #b9b29f; background: #cfc8b6; color: #3a382f; border-radius: 7px;
-  padding: 6px 13px; font-size: 12px; font-weight: 700; cursor: pointer; letter-spacing: 0.05em;
+  border: 1px solid #b9b29f; background: #cfc8b6; color: #3a382f; border-radius: 6px;
+  padding: 5px 11px; font-size: 11px; font-weight: 700; cursor: pointer; letter-spacing: 0.04em;
 }
 .mod-run.is-on { background: #e0524a; color: #fff; border-color: #c43c34; }
 .mod-dice:hover, .mod-run:hover { filter: brightness(1.05); }
 
 /* ── Module rack ── */
 .mod-rack {
-  display: grid; gap: 10px;
-  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  display: grid; gap: 8px;
+  grid-template-columns: repeat(auto-fill, minmax(174px, 1fr));
 }
 .mod-module {
   background: linear-gradient(180deg, var(--cream), var(--cream2));
-  border-radius: 9px; padding: 8px 10px 11px; color: var(--panel-ink);
-  box-shadow: 0 2px 7px rgba(0,0,0,0.32), inset 0 1px 0 rgba(255,255,255,0.45);
+  border-radius: 9px; padding: 7px 11px 10px; color: var(--panel-ink);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.45);
   border-top: 3px solid #8c8676;
 }
 .mod-module.is-vco   { border-top-color: #e0623a; }
@@ -4381,21 +4387,21 @@ input.pgm-align-ms:focus { border-color: rgba(111, 179, 255, 0.8); }
 .mod-module.is-purple{ border-top-color: #7b61ff; }
 .mod-module.is-out   { border-top-color: #e0a23a; }
 .mod-module-head {
-  font-size: 10px; font-weight: 800; letter-spacing: 0.09em; color: #5d584c;
-  text-transform: uppercase; margin-bottom: 8px; white-space: nowrap;
+  font-size: 9.5px; font-weight: 800; letter-spacing: 0.07em; color: #5d584c;
+  text-transform: uppercase; margin-bottom: 7px; white-space: nowrap;
 }
-.mod-knobs { display: flex; flex-wrap: wrap; gap: 9px 7px; align-items: flex-start; }
+.mod-knobs { display: flex; flex-wrap: wrap; gap: 8px 7px; align-items: flex-start; }
 
 /* ── Knob ── */
-.mod-knob { display: flex; flex-direction: column; align-items: center; gap: 3px; width: 44px; }
-.mod-knob.is-sm { width: 38px; }
+.mod-knob { display: flex; flex-direction: column; align-items: center; gap: 3px; width: 42px; }
+.mod-knob.is-sm { width: 34px; }
 .mod-knob-dial {
-  position: relative; width: 36px; height: 36px; border-radius: 50%; cursor: ns-resize;
+  position: relative; width: 34px; height: 34px; border-radius: 50%; cursor: ns-resize;
   background: radial-gradient(circle at 38% 32%, #54535a, #1d1d20 78%);
   box-shadow: 0 2px 4px rgba(0,0,0,0.4), inset 0 1px 1px rgba(255,255,255,0.18);
   outline: none; touch-action: none;
 }
-.mod-knob.is-sm .mod-knob-dial { width: 30px; height: 30px; }
+.mod-knob.is-sm .mod-knob-dial { width: 28px; height: 28px; }
 .mod-knob.is-orange .mod-knob-dial { background: radial-gradient(circle at 38% 32%, #ff8a5c, #b93a14 80%); }
 .mod-knob.is-blue   .mod-knob-dial { background: radial-gradient(circle at 38% 32%, #7cc1f0, #2c6fa8 80%); }
 .mod-knob.is-purple .mod-knob-dial { background: radial-gradient(circle at 38% 32%, #a48cff, #5536c8 80%); }
@@ -4407,78 +4413,79 @@ input.pgm-align-ms:focus { border-color: rgba(111, 179, 255, 0.8); }
 }
 .mod-knob.is-orange .mod-knob-pointer, .mod-knob.is-cream .mod-knob-pointer { background: #2a1006; }
 .mod-knob-label {
-  font-size: 8.5px; font-weight: 700; letter-spacing: 0.05em; color: #5d584c; text-align: center;
+  font-size: 8.5px; font-weight: 700; letter-spacing: 0.03em; color: #5d584c; text-align: center;
 }
 
 /* ── Selectors (wave / mode / space type) ── */
-.mod-sel { display: flex; flex-direction: column; gap: 2px; }
-.mod-wavesel .mod-sel, .mod-modesel .mod-sel { gap: 1px; }
+.mod-sel { display: flex; flex-direction: column; gap: 1px; }
 .mod-sel-led {
-  display: flex; align-items: center; gap: 5px; border: none; background: transparent;
-  color: #6a6457; font-size: 9px; font-weight: 600; cursor: pointer; padding: 1px 2px;
-  letter-spacing: 0.03em; text-transform: lowercase;
+  display: flex; align-items: center; gap: 4px; border: none; background: transparent;
+  color: #6a6457; font-size: 8px; font-weight: 600; cursor: pointer; padding: 0 1px;
+  letter-spacing: 0.02em; text-transform: lowercase;
 }
 .mod-sel-dot {
-  width: 8px; height: 8px; border-radius: 50%; background: #b6af9c;
+  width: 7px; height: 7px; border-radius: 50%; background: #b6af9c;
   box-shadow: inset 0 1px 1px rgba(0,0,0,0.3);
 }
 .mod-sel-led.is-on { color: #1f1f22; font-weight: 800; }
-.mod-sel-led.is-on .mod-sel-dot { background: #e0623a; box-shadow: 0 0 6px #e0623a; }
-.mod-cycle { display: flex; flex-direction: column; gap: 3px; justify-content: center; }
+.mod-sel-led.is-on .mod-sel-dot { background: #e0623a; box-shadow: 0 0 5px #e0623a; }
+.mod-cycle { display: flex; flex-direction: column; gap: 2px; justify-content: center; }
 .mod-cycle button {
-  border: 1px solid #b9b29f; background: #d3ccba; color: #5a564c; font-size: 9px;
-  border-radius: 5px; padding: 3px 8px; cursor: pointer; font-weight: 700; letter-spacing: 0.04em;
+  border: 1px solid #b9b29f; background: #d3ccba; color: #5a564c; font-size: 8px;
+  border-radius: 4px; padding: 2px 7px; cursor: pointer; font-weight: 700; letter-spacing: 0.03em;
 }
 .mod-cycle button.is-active { background: #e0623a; color: #fff; border-color: #c44b25; }
 
-/* ── Patch matrix ── */
+/* ── Patch matrix: circular jacks (after the reference patchbay) ── */
 .mod-section-label {
-  font-size: 10px; font-weight: 800; letter-spacing: 0.14em; color: #9a958a;
-  text-transform: uppercase; margin-bottom: 6px;
+  font-size: 9px; font-weight: 800; letter-spacing: 0.12em; color: #9a958a;
+  text-transform: uppercase; margin-bottom: 4px;
 }
 .mod-patch {
-  background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 9px; padding: 10px 12px;
+  background: rgba(255,255,255,0.025); border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 8px; padding: 7px 10px;
 }
-.mod-matrix { display: flex; flex-direction: column; gap: 4px; }
-.mod-matrix-row { display: grid; grid-template-columns: 60px repeat(8, 1fr); gap: 4px; align-items: center; }
+.mod-matrix { display: flex; flex-direction: column; gap: 3px; }
+.mod-matrix-row { display: grid; grid-template-columns: 52px repeat(8, 1fr); gap: 3px; align-items: center; }
 .mod-matrix-head .mod-matrix-dst {
-  font-size: 8.5px; font-weight: 700; letter-spacing: 0.03em; color: #8f8a9c; text-align: center;
+  font-size: 7.5px; font-weight: 700; letter-spacing: 0.01em; color: #8f8a9c; text-align: center;
 }
-.mod-matrix-corner { }
-.mod-matrix-src { font-size: 9.5px; font-weight: 700; color: #c8c3d6; letter-spacing: 0.04em; }
+.mod-matrix-src { font-size: 8.5px; font-weight: 700; color: #c8c3d6; letter-spacing: 0.03em; }
 .mod-matrix-cell {
-  position: relative; height: 22px; border-radius: 5px; cursor: ns-resize;
-  border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.04);
-  overflow: hidden; touch-action: none; padding: 0;
+  position: relative; width: 22px; height: 22px; border-radius: 50%; cursor: ns-resize;
+  border: 1.5px solid rgba(255,255,255,0.20); background: radial-gradient(circle at 40% 35%, #2e2f34, #17181b 80%);
+  box-shadow: inset 0 1px 2px rgba(0,0,0,0.5); touch-action: none; padding: 0;
+  margin: 0 auto; display: block;
 }
 .mod-matrix-cell .mod-matrix-fill {
-  position: absolute; inset: 0; opacity: var(--mag, 0); transition: opacity 0.06s;
+  position: absolute; inset: 3px; border-radius: 50%; opacity: var(--mag, 0); transition: opacity 0.06s;
 }
-.mod-matrix-cell.is-pos .mod-matrix-fill { background: radial-gradient(circle, #ffd27a, #e0623a); }
-.mod-matrix-cell.is-neg .mod-matrix-fill { background: radial-gradient(circle, #9cc8ff, #4a86e0); }
-.mod-matrix-cell:hover { border-color: rgba(255,255,255,0.3); }
+.mod-matrix-cell.is-pos { border-color: rgba(255,180,90,0.85); }
+.mod-matrix-cell.is-pos .mod-matrix-fill { background: radial-gradient(circle, #ffd27a, #e0623a); box-shadow: 0 0 6px rgba(224,98,58,0.6); }
+.mod-matrix-cell.is-neg { border-color: rgba(120,180,255,0.85); }
+.mod-matrix-cell.is-neg .mod-matrix-fill { background: radial-gradient(circle, #9cc8ff, #4a86e0); box-shadow: 0 0 6px rgba(74,134,224,0.6); }
+.mod-matrix-cell:hover { border-color: rgba(255,255,255,0.55); }
 
 /* ── Motion sequencer ── */
 .mod-seq {
-  background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 9px; padding: 10px 12px;
+  background: rgba(255,255,255,0.025); border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 8px; padding: 7px 10px;
 }
-.mod-seq-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.mod-seq-cfg { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.mod-seq-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.mod-seq-cfg { display: flex; align-items: flex-end; gap: 9px; flex-wrap: wrap; }
 .mod-seq-cfg label {
-  display: flex; flex-direction: column; gap: 3px; font-size: 9px; font-weight: 700;
-  letter-spacing: 0.08em; color: #9a958a; text-transform: uppercase;
+  display: flex; flex-direction: column; gap: 2px; font-size: 8px; font-weight: 700;
+  letter-spacing: 0.06em; color: #9a958a; text-transform: uppercase;
 }
 .mod-seq-cfg select {
   background: #232427; color: #e8e8ea; border: 1px solid rgba(255,255,255,0.16);
-  border-radius: 6px; padding: 4px 6px; font-size: 11px;
+  border-radius: 5px; padding: 3px 5px; font-size: 10px;
 }
-.mod-seq-lanes { display: flex; gap: 6px; margin: 10px 0 8px; flex-wrap: wrap; }
+.mod-seq-lanes { display: flex; gap: 5px; margin: 7px 0 6px; flex-wrap: wrap; }
 .mod-lane-btn {
   border: 1px solid rgba(255,255,255,0.14); background: rgba(255,255,255,0.05); color: #b9bac0;
-  border-radius: 6px; padding: 4px 11px; font-size: 10px; font-weight: 700; cursor: pointer;
-  letter-spacing: 0.06em;
+  border-radius: 5px; padding: 3px 9px; font-size: 9px; font-weight: 700; cursor: pointer;
+  letter-spacing: 0.05em;
 }
 .mod-lane-btn.is-active { background: #3a3b40; color: #fff; border-color: rgba(255,255,255,0.35); }
 .mod-lane-btn.is-gate.is-active  { box-shadow: inset 0 -2px 0 #49d7a6; }
@@ -4488,27 +4495,47 @@ input.pgm-align-ms:focus { border-color: rgba(111, 179, 255, 0.8); }
 .mod-lane-btn.is-lpg.is-active   { box-shadow: inset 0 -2px 0 #7b61ff; }
 .mod-lane-btn.is-space.is-active { box-shadow: inset 0 -2px 0 #4aa3e0; }
 
-.mod-seq-grid { display: grid; grid-template-columns: repeat(16, 1fr); gap: 4px; }
+.mod-seq-grid { display: grid; grid-template-columns: repeat(16, 1fr); gap: 3px; }
 .mod-step-col {
-  display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 4px 0;
-  border-radius: 6px;
+  display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 3px 0;
+  border-radius: 5px;
 }
 .mod-step-col.beat-0 { background: rgba(255,255,255,0.02); }
 .mod-step-col.is-cur { background: rgba(123,97,255,0.22); box-shadow: inset 0 0 0 1px rgba(123,97,255,0.5); }
-.mod-step-num { font-size: 8px; color: #6a6b72; }
+.mod-step-num { font-size: 7px; color: #6a6b72; }
 .mod-step-cell {
-  width: 100%; height: 30px; border-radius: 6px; cursor: pointer; border: 1px solid rgba(255,255,255,0.12);
+  width: 100%; height: 24px; border-radius: 5px; cursor: pointer; border: 1px solid rgba(255,255,255,0.12);
   background: rgba(255,255,255,0.05); transition: background 0.06s, box-shadow 0.06s;
 }
-.mod-step-cell.is-on.is-gate  { background: #49d7a6; box-shadow: 0 0 8px rgba(73,215,166,0.5); }
-.mod-step-cell.is-on.is-fn1   { background: #e0623a; box-shadow: 0 0 8px rgba(224,98,58,0.5); }
-.mod-step-cell.is-on.is-fn2   { background: #e0a23a; box-shadow: 0 0 8px rgba(224,162,58,0.5); }
-.mod-step-cell.is-on.is-lpg   { background: #7b61ff; box-shadow: 0 0 8px rgba(123,97,255,0.5); }
-.mod-step-cell.is-on.is-space { background: #4aa3e0; box-shadow: 0 0 8px rgba(74,163,224,0.5); }
+.mod-step-cell.is-on.is-gate  { background: #49d7a6; box-shadow: 0 0 7px rgba(73,215,166,0.5); }
+.mod-step-cell.is-on.is-fn1   { background: #e0623a; box-shadow: 0 0 7px rgba(224,98,58,0.5); }
+.mod-step-cell.is-on.is-fn2   { background: #e0a23a; box-shadow: 0 0 7px rgba(224,162,58,0.5); }
+.mod-step-cell.is-on.is-lpg   { background: #7b61ff; box-shadow: 0 0 7px rgba(123,97,255,0.5); }
+.mod-step-cell.is-on.is-space { background: #4aa3e0; box-shadow: 0 0 7px rgba(74,163,224,0.5); }
 .mod-step-note {
-  width: 100%; height: 44px; border-radius: 6px; cursor: ns-resize; border: 1px solid rgba(255,255,255,0.12);
+  width: 100%; height: 34px; border-radius: 5px; cursor: ns-resize; border: 1px solid rgba(255,255,255,0.12);
   background: rgba(255,255,255,0.05); position: relative; display: flex; align-items: flex-end;
   justify-content: center; touch-action: none; overflow: hidden; padding: 0;
 }
-.mod-step-note-bar { width: 100%; background: linear-gradient(180deg, #ffd27a, #e0623a); border-radius: 4px 4px 0 0; }
-.mod-step-note-val { position: absolute; top: 2px; left: 0; right: 0; text-align: center; font-size: 9px; color: #e8e8ea; font-weight: 700; }
+.mod-step-note-bar { width: 100%; background: linear-gradient(180deg, #ffd27a, #e0623a); border-radius: 3px 3px 0 0; }
+.mod-step-note-val { position: absolute; top: 1px; left: 0; right: 0; text-align: center; font-size: 8px; color: #e8e8ea; font-weight: 700; }
+
+/* ── Modular: preset selector + step-record additions ── */
+.mod-preset { display: flex; align-items: center; gap: 4px; margin: 0 auto 0 14px; }
+.mod-preset-arrow {
+  border: 1px solid #b9b29f; background: #cfc8b6; color: #3a382f; border-radius: 5px;
+  width: 22px; height: 24px; font-size: 14px; line-height: 1; cursor: pointer; font-weight: 700;
+}
+.mod-preset-arrow:hover { filter: brightness(1.05); }
+.mod-preset-sel {
+  background: #f3eee0; color: #2a2a2c; border: 1px solid #b9b29f; border-radius: 5px;
+  padding: 4px 6px; font-size: 11px; font-weight: 600; min-width: 130px; max-width: 180px;
+}
+.mod-seq-spacer { flex: 1 1 auto; }
+.mod-lane-btn.is-rec.is-active { background: #e0524a; color: #fff; border-color: #c43c34; box-shadow: 0 0 8px rgba(224,82,74,0.5); }
+.mod-lane-btn.is-rest { color: #cfc8b6; }
+.mod-lane-btn.is-rest:hover { background: rgba(255,255,255,0.1); }
+.mod-step-col.is-edit { background: rgba(224,82,74,0.22); box-shadow: inset 0 0 0 1px rgba(224,82,74,0.7); }
+.mod-step-col.is-edit.is-cur { background: rgba(224,82,74,0.3); }
+.mod-step-note.is-rest { opacity: 0.4; }
+.mod-step-note.is-rest .mod-step-note-bar { background: #555; }

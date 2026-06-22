@@ -20,7 +20,7 @@
  * voice via post({type:'modularParam'|'modularPatch'|'modularSeq'}).
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type React from 'react';
 
 const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
@@ -45,6 +45,14 @@ export interface ModularParams {
   outVol: number; outWidth: number;
   seqRun: number; seqDiv: number; seqLen: number;
   seqScale: number; seqOctave: number; seqSwing: number;
+  seqRoot: number;     // root MIDI note (C3 = 48)
+}
+
+const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+/** Display name for a step: root + chromatic semitone offset. */
+export function modNoteName(root: number, semi: number): string {
+  const m = root + semi;
+  return `${NOTE_NAMES[((m % 12) + 12) % 12]}${Math.floor(m / 12) - 1}`;
 }
 
 export const DEFAULT_MODULAR: ModularParams = {
@@ -57,7 +65,7 @@ export const DEFAULT_MODULAR: ModularParams = {
   lpgCutoff: 0.55, lpgReso: 0.15, lpgDecay: 0.4, lpgDrive: 0.3,
   spaceType: 1, spaceSize: 0.4,
   outVol: 0.7, outWidth: 0.6,
-  seqRun: 0, seqDiv: 3, seqLen: 16, seqScale: 1, seqOctave: 0, seqSwing: 0,
+  seqRun: 0, seqDiv: 3, seqLen: 16, seqScale: 1, seqOctave: 0, seqSwing: 0, seqRoot: 48,
 };
 
 export const MOD_SRC = ['FUNC1', 'FUNC2', 'RND1', 'RND2', 'VELO', 'KEY', 'GATE'] as const;
@@ -171,7 +179,9 @@ function Selector({
 }
 
 export function ModularPanel({
-  params, onParam, patch, onPatch, seq, onSeq, step, onDice,
+  params, onParam, patch, onPatch, seq, onSeq, step, onDice, bpm, onBpm,
+  presetNames, presetIdx, onPreset,
+  recOn, recStep, onRecToggle, onRest, onRecSetStep,
 }: {
   params: ModularParams;
   onParam: (key: keyof ModularParams, value: number) => void;
@@ -181,9 +191,28 @@ export function ModularPanel({
   onSeq: (lane: keyof ModularSeq, stepIdx: number, value: number) => void;
   step: number;
   onDice: () => void;
+  bpm: number;
+  onBpm: (value: number) => void;
+  presetNames: string[];
+  presetIdx: number;
+  onPreset: (idx: number) => void;
+  recOn: boolean;
+  recStep: number;
+  onRecToggle: () => void;
+  onRest: () => void;
+  onRecSetStep: (idx: number) => void;
 }) {
   const [activeLane, setActiveLane] = useState<keyof ModularSeq>('gate');
+  const [bpmText, setBpmText] = useState(String(bpm));
   const running = params.seqRun > 0.5;
+  // Reflect BPM changed elsewhere (jam box / detect) when not editing here.
+  useEffect(() => { setBpmText(String(bpm)); }, [bpm]);
+  const commitBpm = () => {
+    const v = parseInt(bpmText.trim(), 10);
+    if (Number.isNaN(v)) { setBpmText(String(bpm)); return; }
+    const clamped = Math.max(40, Math.min(220, v));
+    onBpm(clamped); setBpmText(String(clamped));
+  };
 
   return (
     <div className="modular">
@@ -193,7 +222,40 @@ export function ModularPanel({
           <span className="mod-title-main">FLOW MODULAR</span>
           <span className="mod-title-sub">Semi-Modular Synthesizer</span>
         </div>
+        <div className="mod-preset">
+          <button
+            className="mod-preset-arrow"
+            title="Previous preset"
+            onClick={() => onPreset((presetIdx - 1 + presetNames.length) % presetNames.length)}
+          >‹</button>
+          <select
+            className="mod-preset-sel"
+            value={presetIdx}
+            onChange={(e) => onPreset(+e.target.value)}
+          >
+            {presetNames.map((name, i) => (
+              <option key={i} value={i}>{`${String(i + 1).padStart(2, '0')} ${name}`}</option>
+            ))}
+          </select>
+          <button
+            className="mod-preset-arrow"
+            title="Next preset"
+            onClick={() => onPreset((presetIdx + 1) % presetNames.length)}
+          >›</button>
+        </div>
         <div className="mod-transport">
+          <label className="mod-bpm" title="全局 BPM（与 jam / instrument 共用）— 驱动序列器与 FUNCTION LOOP">
+            <span>BPM</span>
+            <input
+              data-mod-bpm="1"
+              type="text"
+              inputMode="numeric"
+              value={bpmText}
+              onChange={(e) => setBpmText(e.target.value)}
+              onBlur={commitBpm}
+              onKeyDown={(e) => { if (e.key === 'Enter') (e.target as HTMLInputElement).blur(); }}
+            />
+          </label>
           <div className="mod-voicemode">
             {VOICE_MODES.map((m, i) => (
               <button
@@ -366,6 +428,12 @@ export function ModularPanel({
                 {SEQ_DIVS.map((s, i) => <option key={s} value={i}>{s}</option>)}
               </select>
             </label>
+            <label>KEY
+              <select value={params.seqRoot} onChange={(e) => onParam('seqRoot', +e.target.value)}>
+                {[36, 41, 43, 45, 47, 48, 50, 52, 53, 55, 57, 59, 60].map((r) =>
+                  <option key={r} value={r}>{modNoteName(r, 0)}</option>)}
+              </select>
+            </label>
             <label>OCT
               <select value={params.seqOctave} onChange={(e) => onParam('seqOctave', +e.target.value)}>
                 {[-2, -1, 0, 1, 2].map((o) => <option key={o} value={o}>{o > 0 ? `+${o}` : o}</option>)}
@@ -385,42 +453,60 @@ export function ModularPanel({
             <button
               key={lane}
               className={`mod-lane-btn ${activeLane === lane ? 'is-active' : ''} is-${lane}`}
-              onClick={() => setActiveLane(lane)}
+              onClick={() => { setActiveLane(lane); }}
             >{lane.toUpperCase()}</button>
           ))}
+          <span className="mod-seq-spacer" />
+          <button
+            className={`mod-lane-btn is-rec ${recOn ? 'is-active' : ''}`}
+            title="STEP REC：开后,在底部键盘上弹音 → 写入当前步并自动前进"
+            onClick={() => { setActiveLane('note'); onRecToggle(); }}
+          >⌨ STEP REC</button>
+          <button
+            className="mod-lane-btn is-rest"
+            title="写入空拍(休止)到当前步并前进"
+            onClick={() => { setActiveLane('note'); onRest(); }}
+          >REST ·</button>
         </div>
 
         <div className="mod-seq-grid">
           {Array.from({ length: 16 }, (_, i) => {
-            const isCur = i === step;
+            const isPlay = i === step;
+            const isEdit = recOn && i === recStep;
             const beat = Math.floor(i / 4);
+            const cls = `mod-step-col ${isPlay ? 'is-cur' : ''} ${isEdit ? 'is-edit' : ''} beat-${beat % 2}`;
             if (activeLane === 'note') {
-              const deg = seq.note[i] ?? 0;
+              const semi = seq.note[i] ?? 0;
+              const gated = seq.gate[i] ?? false;
               return (
-                <div key={i} className={`mod-step-col ${isCur ? 'is-cur' : ''} beat-${beat % 2}`}>
+                <div key={i} className={cls}>
                   <button
-                    className="mod-step-note"
-                    title={`Step ${i + 1}: degree ${deg} (drag up/down)`}
+                    className={`mod-step-note ${gated ? '' : 'is-rest'}`}
+                    title={`Step ${i + 1}: ${gated ? modNoteName(params.seqRoot, semi) : '休止'} — 拖动改音高 · 单击切休止`}
                     onPointerDown={(e) => {
                       e.preventDefault();
                       const el = e.currentTarget;
                       el.setPointerCapture(e.pointerId);
                       const startY = e.clientY;
-                      const startV = deg;
+                      const startV = semi;
+                      let moved = false;
                       const move = (ev: PointerEvent) => {
-                        const nv = Math.max(0, Math.min(13, Math.round(startV + (startY - ev.clientY) / 16)));
+                        if (Math.abs(ev.clientY - startY) > 3) moved = true;
+                        const nv = Math.max(0, Math.min(24, Math.round(startV + (startY - ev.clientY) / 12)));
                         if (nv !== (seq.note[i] ?? 0)) onSeq('note', i, nv);
                       };
                       const up = () => {
                         el.removeEventListener('pointermove', move as any);
                         el.removeEventListener('pointerup', up as any);
+                        onRecSetStep(i);              // park the edit cursor here
+                        if (!moved) onSeq('gate', i, gated ? 0 : 1);  // click toggles rest
                       };
                       el.addEventListener('pointermove', move as any);
                       el.addEventListener('pointerup', up as any);
                     }}
                   >
-                    <span className="mod-step-note-bar" style={{ height: `${10 + deg * 6}%` }} />
-                    <span className="mod-step-note-val">{deg}</span>
+                    <span className="mod-step-note-bar" style={{ height: `${12 + semi * 3.4}%` }} />
+                    <span className="mod-step-note-val">{gated ? modNoteName(params.seqRoot, semi) : '·'}</span>
                   </button>
                   <span className="mod-step-num">{i + 1}</span>
                 </div>
@@ -428,7 +514,7 @@ export function ModularPanel({
             }
             const on = (seq[activeLane] as boolean[])[i] ?? false;
             return (
-              <div key={i} className={`mod-step-col ${isCur ? 'is-cur' : ''} beat-${beat % 2}`}>
+              <div key={i} className={cls}>
                 <button
                   className={`mod-step-cell is-${activeLane} ${on ? 'is-on' : ''}`}
                   onClick={() => onSeq(activeLane, i, on ? 0 : 1)}

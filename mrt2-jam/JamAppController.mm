@@ -843,6 +843,7 @@ static void JamSetModularParam(JamModular& md, NSString* key, NSNumber* value) {
     else if ([key isEqualToString:@"seqLen"])     md.seqLen.store(MAX(1, MIN(16, iv)), std::memory_order_relaxed);
     else if ([key isEqualToString:@"seqScale"])   md.seqScale.store(MAX(0, MIN(4, iv)), std::memory_order_relaxed);
     else if ([key isEqualToString:@"seqOctave"])  md.seqOctave.store(MAX(-2, MIN(2, iv)), std::memory_order_relaxed);
+    else if ([key isEqualToString:@"seqRoot"])    md.seqRoot.store(MAX(24, MIN(84, iv)), std::memory_order_relaxed);
     else if ([key isEqualToString:@"seqSwing"])   md.seqSwing.store(v, std::memory_order_relaxed);
 }
 
@@ -972,7 +973,7 @@ static void JamSetModularParam(JamModular& md, NSString* key, NSNumber* value) {
                 const int iv = value.intValue;
                 const bool bv = value.boolValue;
                 if      ([lane isEqualToString:@"gate"])  md.stepGate[st].store(bv, std::memory_order_relaxed);
-                else if ([lane isEqualToString:@"note"])  md.stepNote[st].store(MAX(0, MIN(13, iv)), std::memory_order_relaxed);
+                else if ([lane isEqualToString:@"note"])  md.stepNote[st].store(MAX(0, MIN(24, iv)), std::memory_order_relaxed);
                 else if ([lane isEqualToString:@"fn1"])   md.laneFn1[st].store(bv, std::memory_order_relaxed);
                 else if ([lane isEqualToString:@"fn2"])   md.laneFn2[st].store(bv, std::memory_order_relaxed);
                 else if ([lane isEqualToString:@"lpg"])   md.laneLpg[st].store(bv, std::memory_order_relaxed);

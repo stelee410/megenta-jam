@@ -34,6 +34,7 @@ import {
 import type { SynthParams, SynthPreset } from './InstrumentPanel';
 import { ModularPanel, DEFAULT_MODULAR, DEFAULT_SEQ } from './ModularPanel';
 import type { ModularParams, ModularSeq } from './ModularPanel';
+import { MODULAR_PRESETS, MODULAR_PRESET_NAMES } from './ModularPresets';
 import { FACTORY_PRESETS } from './SynthPresets';
 import { StudioPanel, STUDIO_INIT, GM_FAMILIES } from './StudioPanel';
 import type { StudioState } from './StudioPanel';
@@ -613,23 +614,63 @@ function App() {
     post({ type: 'modularSeq', lane, step, value });
   }, []);
   const [modularStep, setModularStep] = useState(-1);
-  const modularDice = useCallback(() => {
-    // UI is the source of truth: generate a fresh pattern and push every cell
-    // so the displayed grid and the native voice stay in sync.
-    const next: ModularSeq = {
-      gate: Array.from({ length: 16 }, () => Math.random() < 0.7),
-      note: Array.from({ length: 16 }, () => Math.floor(Math.random() * 8)),
-      fn1: Array.from({ length: 16 }, () => Math.random() < 0.3),
-      fn2: Array(16).fill(false),
-      lpg: Array.from({ length: 16 }, () => Math.random() < 0.35),
-      space: Array.from({ length: 16 }, () => Math.random() < 0.18),
-    };
-    setModularSeq(next);
+  /** Push a whole sequence to native (one cell per post). */
+  const pushModularSeq = useCallback((s: ModularSeq) => {
     (['gate', 'note', 'fn1', 'fn2', 'lpg', 'space'] as Array<keyof ModularSeq>).forEach(lane => {
-      (next[lane] as any[]).forEach((v, step) =>
+      (s[lane] as any[]).forEach((v, step) =>
         post({ type: 'modularSeq', lane, step, value: lane === 'note' ? v : (v ? 1 : 0) }));
     });
   }, []);
+  const modularDice = useCallback(() => {
+    // UI is the source of truth: generate a fresh in-scale pattern and push it.
+    const SCALE = [0, 2, 3, 5, 7, 8, 10];   // minor degrees → semitones
+    const deg = () => SCALE[Math.floor(Math.random() * SCALE.length)] + (Math.random() < 0.3 ? 12 : 0);
+    const next: ModularSeq = {
+      gate: Array.from({ length: 16 }, (_, i) => i % 4 === 0 || Math.random() < 0.6),
+      note: Array.from({ length: 16 }, deg),
+      fn1: Array.from({ length: 16 }, () => Math.random() < 0.25),
+      fn2: Array(16).fill(false),
+      lpg: Array.from({ length: 16 }, (_, i) => i % 4 === 0 || Math.random() < 0.3),
+      space: Array.from({ length: 16 }, () => Math.random() < 0.14),
+    };
+    setModularSeq(next);
+    pushModularSeq(next);
+  }, [pushModularSeq]);
+
+  // ── Modular presets (32 factory templates) ──
+  const [modularPresetIdx, setModularPresetIdx] = useState(0);
+  const loadModularPreset = useCallback((idx: number) => {
+    const p = MODULAR_PRESETS[idx];
+    if (!p) return;
+    setModularPresetIdx(idx);
+    setModularParams(p.params);
+    Object.entries(p.params).forEach(([key, value]) => post({ type: 'modularParam', key, value }));
+    setModularPatch(p.patch);
+    p.patch.forEach((value, i) => post({ type: 'modularPatch', src: Math.floor(i / 8), dst: i % 8, value }));
+    setModularSeq(p.seq);
+    pushModularSeq(p.seq);
+  }, [pushModularSeq]);
+
+  // ── Step-record: play the keyboard to write notes into the sequence ──
+  const [modRecOn, setModRecOn] = useState(false);
+  const [modRecStep, setModRecStep] = useState(0);
+  const modRecRef = useRef({ on: false, step: 0, len: 16, root: 48 });
+  modRecRef.current = { on: modRecOn, step: modRecStep, len: modularParams.seqLen, root: modularParams.seqRoot };
+  const advanceRec = useCallback(() => {
+    setModRecStep(s => (s + 1) % (modRecRef.current.len || 16));
+  }, []);
+  /** Write a played MIDI note into the current edit step, then advance. */
+  const recordModNote = useCallback((midiNote: number) => {
+    const { step, root } = modRecRef.current;
+    const semi = Math.max(0, Math.min(24, midiNote - root));
+    setModularSeqCell('note', step, semi);
+    setModularSeqCell('gate', step, 1);
+    advanceRec();
+  }, [setModularSeqCell, advanceRec]);
+  const recordModRest = useCallback(() => {
+    setModularSeqCell('gate', modRecRef.current.step, 0);
+    advanceRec();
+  }, [setModularSeqCell, advanceRec]);
 
   /** Push a full param set to the engine and the UI. */
   const applySynthParams = (params: SynthParams) => {
@@ -3238,6 +3279,16 @@ function App() {
             onSeq={setModularSeqCell}
             step={modularStep}
             onDice={modularDice}
+            bpm={bpmValue}
+            onBpm={(v) => { setBpmValue(v); setBpmText(String(v)); }}
+            presetNames={MODULAR_PRESET_NAMES}
+            presetIdx={modularPresetIdx}
+            onPreset={loadModularPreset}
+            recOn={modRecOn}
+            recStep={modRecStep}
+            onRecToggle={() => setModRecOn(o => !o)}
+            onRest={recordModRest}
+            onRecSetStep={setModRecStep}
           />
         )}
 
@@ -4049,6 +4100,8 @@ function App() {
               : visualNote;
             if (note >= 0 && note <= 127) {
               post({ type: 'kbdNote', note, on: true });
+              // Modular step-record: capture the played note into the sequence.
+              if (mainTab === 'modular' && modRecRef.current.on) recordModNote(note);
               if (engineModeRef.current === 'lyria' && mainTab !== 'instrument') {
                 selectLyriaScaleFromNote(note);
               }
