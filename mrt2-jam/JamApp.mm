@@ -1211,6 +1211,21 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
         // ── Distribute busses → device channels per the routing masks ──
         {
             const int nch = (int)outputData->mNumberBuffers;
+            // One-shot diagnostic: log the actual buffer layout the OS hands us
+            // the first time it appears (and whenever it changes). If a "4-out"
+            // device shows nch != 4 here, the extra outs never reach the router
+            // (per-channel click would then be impossible — mirror/aggregate).
+            {
+                static std::atomic<int> sLastNch{-1};
+                const int b0ch = nch > 0 ? (int)outputData->mBuffers[0].mNumberChannels : 0;
+                const int b0bytes = nch > 0 ? (int)outputData->mBuffers[0].mDataByteSize : 0;
+                int packed = (nch << 16) | (b0ch << 8) | (b0bytes == (int)(frameCount * sizeof(float)) ? 1 : 0);
+                if (sLastNch.exchange(packed, std::memory_order_relaxed) != packed) {
+                    NSLog(@"Jam ROUTE: render sees mNumberBuffers=%d  buf0.mNumberChannels=%d  buf0.bytes=%d  frames=%u (interleaved=%@)",
+                          nch, b0ch, b0bytes, (unsigned)frameCount,
+                          (nch == 1 && b0ch > 1) ? @"YES" : @"NO");
+                }
+            }
             const uint32_t mMask = shared->mainOutMask.load(std::memory_order_relaxed);
             const uint32_t cMask = shared->clickOutMask.load(std::memory_order_relaxed);
             int sel[32];
@@ -1241,6 +1256,32 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                 if (!dst) continue;
                 for (AVAudioFrameCount i = 0; i < frameCount; ++i) {
                     dst[i] += shared->clickBus[i];
+                }
+            }
+            // Diagnostic: ~1×/sec, log the masks and the per-channel peak we
+            // actually WROTE. Tells us whether outs 3/4 silence is upstream (we
+            // never write signal there → mask/UI) or downstream (we write but
+            // the engine/HAL doesn't carry buffers 2/3 to the physical outs).
+            {
+                static std::atomic<int> sAcc{0};
+                static float sPk[8] = {0,0,0,0,0,0,0,0};
+                for (int c = 0; c < nch && c < 8; ++c) {
+                    float* dst = (float*)outputData->mBuffers[c].mData;
+                    if (!dst) continue;
+                    float pk = sPk[c];
+                    for (AVAudioFrameCount i = 0; i < frameCount; ++i) {
+                        float a = dst[i] < 0 ? -dst[i] : dst[i];
+                        if (a > pk) pk = a;
+                    }
+                    sPk[c] = pk;
+                }
+                int acc = sAcc.fetch_add((int)frameCount, std::memory_order_relaxed) + (int)frameCount;
+                if (acc >= 48000) {
+                    sAcc.store(0, std::memory_order_relaxed);
+                    NSLog(@"Jam ROUTE peaks: main=0x%x click=0x%x nch=%d  pk[0..%d]= %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f",
+                          mMask, cMask, nch, nch - 1,
+                          sPk[0], sPk[1], sPk[2], sPk[3], sPk[4], sPk[5], sPk[6], sPk[7]);
+                    for (int c = 0; c < 8; ++c) sPk[c] = 0;
                 }
             }
         }
@@ -1313,17 +1354,25 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
     const bool wantMC = _sharedState.multichannelOut.load(std::memory_order_relaxed) &&
                         devCh > 2 && devCh <= 16;
     if (wantMC) {
-        // Multichannel source → mainMixer, but DO NOT force the mixer→output
-        // format. Forcing any output sample-rate is what plays slow on these
-        // devices; letting the engine auto-negotiate mixer→output keeps the
-        // real device clock, and the multichannel source carries the extra
-        // channels through for click routing.
-        AVAudioFormat* srcFmt = [[AVAudioFormat alloc]
-            initStandardFormatWithSampleRate:48000.0 channels:devCh];
+        // Multichannel source → outputNode DIRECTLY (bypass mainMixerNode).
+        // The mainMixerNode is a stereo-oriented downmixer: feeding it a >2ch
+        // source spatialises/folds channels 3+ back into the L/R field, so they
+        // never reach the physical outs.
+        //
+        // Critically, use the outputNode's EXACT output format object — not a
+        // freshly built initStandardFormatWithSampleRate:channels: one. A
+        // "standard" 4ch format carries a quadraphonic channel-LAYOUT tag; the
+        // device wants discrete channels, and that layout mismatch made the
+        // engine insert a spatialising converter that collapsed the source to
+        // 2 buffers (so outs 3/4 stayed silent — confirmed via the render-block
+        // diagnostic: mNumberBuffers=2 despite a 4ch device). Reusing devFmt
+        // matches channel count AND layout, so the engine inserts no remapping
+        // and the render block gets one buffer per physical channel (1:1).
+        AVAudioFormat* srcFmt = devFmt;
         _sourceNode = [[AVAudioSourceNode alloc] initWithFormat:srcFmt
                                                     renderBlock:_renderBlock];
         [_audioEngine attachNode:_sourceNode];
-        [_audioEngine connect:_sourceNode to:_audioEngine.mainMixerNode format:srcFmt];
+        [_audioEngine connect:_sourceNode to:_audioEngine.outputNode format:srcFmt];
         _sharedState.outChannels.store((int)devCh, std::memory_order_relaxed);
     } else {
         AVAudioFormat* srcFmt = [[AVAudioFormat alloc]
@@ -1336,8 +1385,11 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
     }
     // Restart the speed-compensation measurement for the new graph/device.
     _sharedState.rateMeasReset.store(true, std::memory_order_release);
-    NSLog(@"Jam: source node connected — %s; device %u ch @ %.0f Hz",
-          wantMC ? "multichannel" : "stereo", (unsigned)devCh, hwRate);
+    AVAudioFormat* outFmt = [_audioEngine.outputNode outputFormatForBus:0];
+    NSLog(@"Jam: source node connected — %s; device reports %u ch @ %.0f Hz; "
+          @"outputNode out-format = %u ch @ %.0f Hz",
+          wantMC ? "multichannel" : "stereo", (unsigned)devCh, hwRate,
+          (unsigned)outFmt.channelCount, outFmt.sampleRate);
 }
 
 // Tear down and rebuild the graph for the current device / routing mode.
