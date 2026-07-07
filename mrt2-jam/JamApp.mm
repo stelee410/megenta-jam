@@ -437,6 +437,8 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
     MIDIClientRef _midiClient;
     MIDIPortRef _midiInputPort;
     MIDIEndpointRef _midiVirtualDest;
+    BOOL _graphRebuildPending;
+    AudioDeviceID _pinnedOutputDevice;
     NSWindow* _window;
     JamAppController* _controller;
     JamSettingsController* _settingsController;
@@ -537,6 +539,52 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
 }
 
 // ─── AVAudioEngine ───────────────────────────────────────────────────────────
+
+// Pin the outputNode's AUHAL to the system default output device.
+// AVAudioEngine's automatic device selection refuses some aggregate devices —
+// a Multi-Output Device with a currently-disconnected Bluetooth sub-device
+// made it silently fall back to the built-in speakers (engine ran, user heard
+// nothing on their selected output). Explicit binding makes those devices
+// work. Pinning disables the AUHAL's own default-device tracking, so
+// setupAudioEngine installs a HAL listener that rebuilds the graph (and
+// re-binds) whenever the user switches the default output.
+- (void)bindOutputToDefaultDevice {
+    AudioDeviceID dev = 0;
+    UInt32 sz = sizeof(dev);
+    AudioObjectPropertyAddress addr = {
+        kAudioHardwarePropertyDefaultOutputDevice,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, NULL,
+                                   &sz, &dev) != noErr || dev == 0) return;
+    AudioUnit au = _audioEngine.outputNode.audioUnit;
+    if (!au) return;
+    OSStatus st = AudioUnitSetProperty(au, kAudioOutputUnitProperty_CurrentDevice,
+                                       kAudioUnitScope_Global, 0, &dev, sizeof(dev));
+    if (st != noErr) {
+        NSLog(@"Jam: binding output to default device %u failed: %d",
+              (unsigned)dev, (int)st);
+    } else {
+        _pinnedOutputDevice = dev;
+    }
+}
+
+// Coalesce the rebuild triggers — a device switch can fire both the HAL
+// default-device listener and AVAudioEngineConfigurationChangeNotification;
+// one rebuild (and one calibration pass) is enough.
+- (void)scheduleGraphRebuild {
+    // May be called from any thread (the engine posts its config-change
+    // notification off-main); the flag is only touched on the main queue.
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (self->_graphRebuildPending) return;
+        self->_graphRebuildPending = YES;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            self->_graphRebuildPending = NO;
+            [self rebuildAudioGraph];
+        });
+    });
+}
 
 - (void)setupAudioEngine {
     _audioEngine = [[AVAudioEngine alloc] init];
@@ -1266,6 +1314,7 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
         _sharedState.clickGain.store(MAX(0.0f, MIN(2.0f, g)), std::memory_order_relaxed);
     }
 
+    [self bindOutputToDefaultDevice];
     [self connectSourceNodeForCurrentDevice];
 
     // When the output device changes (plug in headphones, switch speakers,
@@ -1276,6 +1325,23 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                                              selector:@selector(handleAudioEngineConfigChange:)
                                                  name:AVAudioEngineConfigurationChangeNotification
                                                object:_audioEngine];
+    // The output device is PINNED (see bindOutputToDefaultDevice), so the
+    // engine no longer follows default-output switches by itself — watch the
+    // HAL default-output property and rebuild onto the new device.
+    {
+        AudioObjectPropertyAddress defAddr = {
+            kAudioHardwarePropertyDefaultOutputDevice,
+            kAudioObjectPropertyScopeGlobal,
+            kAudioObjectPropertyElementMain
+        };
+        __weak AppDelegate* weakSelf = self;
+        AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &defAddr,
+                                            dispatch_get_main_queue(),
+                                            ^(UInt32 n, const AudioObjectPropertyAddress* a) {
+            NSLog(@"Jam: system default output changed — rebuilding graph");
+            [weakSelf scheduleGraphRebuild];
+        });
+    }
     // The UI toggles multichannel output / routing → rebuild the graph.
     [[NSNotificationCenter defaultCenter] addObserverForName:@"JamRebuildAudioGraph"
                                                       object:nil queue:[NSOperationQueue mainQueue]
@@ -1362,7 +1428,11 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
 // Tear down and rebuild the graph for the current device / routing mode.
 - (void)rebuildAudioGraph {
     if (!_audioEngine) return;
+    const AudioDeviceID prevDev = _pinnedOutputDevice;
+    const int prevCh = _sharedState.outChannels.load(std::memory_order_relaxed);
+    const double prevRate = [_audioEngine.outputNode outputFormatForBus:0].sampleRate;
     [_audioEngine stop];
+    [self bindOutputToDefaultDevice];
     @try {
         [self connectSourceNodeForCurrentDevice];
     } @catch (NSException* e) {
@@ -1372,16 +1442,20 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
     if (![_audioEngine startAndReturnError:&err]) {
         NSLog(@"Jam: AVAudioEngine restart failed: %@", err);
     }
-    // Device / channel changed → gate playback behind a 120 BPM calibration
-    // pass so timing is verified on the new output before performing.
-    [_controller enterCalibration];
+    // Device / channel / rate changed → gate playback behind a 120 BPM
+    // calibration pass so timing is verified on the new output before
+    // performing. Skipped when nothing effectively changed (e.g. the
+    // startup config-change fired by pinning the already-current device).
+    const double newRate = [_audioEngine.outputNode outputFormatForBus:0].sampleRate;
+    const int newCh = _sharedState.outChannels.load(std::memory_order_relaxed);
+    if (_pinnedOutputDevice != prevDev || newCh != prevCh || newRate != prevRate) {
+        [_controller enterCalibration];
+    }
 }
 
 - (void)handleAudioEngineConfigChange:(NSNotification*)note {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        NSLog(@"Jam: output device changed — rebuilding graph for the new device");
-        [self rebuildAudioGraph];
-    });
+    NSLog(@"Jam: engine configuration changed — rebuilding graph");
+    [self scheduleGraphRebuild];
 }
 
 // Export the current backing mix (per mute/solo, with audio + MIDI lanes +
