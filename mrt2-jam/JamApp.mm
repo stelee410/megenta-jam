@@ -891,18 +891,9 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                     if (m == 0) {
                         const long bi = (rel - m) / B;
                         const int phase = (int)(((bi % bpb) + bpb) % bpb);
-                        shared->clickEnv = 1.0f;
-                        shared->clickPhase = 0.0f;
-                        shared->clickFreq = (phase == barPh) ? 1760.0f : 1175.0f;
+                        shared->triggerClick(phase == barPh);
                     }
-                    if (shared->clickEnv > 0.0005f) {
-                        shared->clickPhase += shared->clickFreq / 48000.0f;
-                        if (shared->clickPhase >= 1.0f) shared->clickPhase -= 1.0f;
-                        shared->clickBus[i] += sinf(shared->clickPhase * 2.0f * (float)M_PI)
-                                               * shared->clickEnv * 0.5f
-                                               * shared->clickGain.load(std::memory_order_relaxed);
-                        shared->clickEnv *= 0.9988f;
-                    }
+                    shared->clickBus[i] += shared->tickClick(0.5f);
                 }
                 shared->countInVPos.store(v, std::memory_order_relaxed);
                 shared->countInLeft.store(left, std::memory_order_relaxed);
@@ -1095,19 +1086,9 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                         if (m == 0) {
                             const long bi = (rel - m) / B;     // beat index (may be <0)
                             const int phase = (int)(((bi % bpb) + bpb) % bpb);
-                            shared->clickEnv = 1.0f;
-                            shared->clickPhase = 0.0f;
-                            shared->clickFreq = (phase == barPh) ? 1760.0f : 1175.0f;
+                            shared->triggerClick(phase == barPh);
                         }
-                        if (shared->clickEnv > 0.0005f) {
-                            shared->clickPhase += shared->clickFreq / 48000.0f;
-                            if (shared->clickPhase >= 1.0f) shared->clickPhase -= 1.0f;
-                            const float c = sinf(shared->clickPhase * 2.0f * (float)M_PI)
-                                            * shared->clickEnv * 0.4f
-                                            * shared->clickGain.load(std::memory_order_relaxed);
-                            shared->clickEnv *= 0.9988f;
-                            shared->clickBus[i] += c;
-                        }
+                        shared->clickBus[i] += shared->tickClick(0.4f);
                     }
                     outL[i] += l;
                     outR[i] += r;
@@ -1166,17 +1147,9 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                 for (AVAudioFrameCount i = 0; i < genFrames; ++i) {
                     const long pos = (total - ci) + (long)i;     // frames into count-in
                     if (pos >= 0 && beatFrames > 0 && (pos % beatFrames) == 0) {
-                        shared->clickEnv = 1.0f; shared->clickPhase = 0.0f;
-                        shared->clickFreq = (pos == 0) ? 1760.0f : 1175.0f;
+                        shared->triggerClick(pos == 0);
                     }
-                    if (shared->clickEnv > 0.0005f) {
-                        shared->clickPhase += shared->clickFreq / 48000.0f;
-                        if (shared->clickPhase >= 1.0f) shared->clickPhase -= 1.0f;
-                        shared->clickBus[i] += sinf(shared->clickPhase * 2.0f * (float)M_PI)
-                            * shared->clickEnv * 0.5f
-                            * shared->clickGain.load(std::memory_order_relaxed);
-                        shared->clickEnv *= 0.9988f;
-                    }
+                    shared->clickBus[i] += shared->tickClick(0.5f);
                 }
                 const long nci = ci - (long)genFrames;
                 if (nci <= 0) { shared->loopCountInLeft.store(0, std::memory_order_relaxed);

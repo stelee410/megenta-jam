@@ -133,6 +133,29 @@ struct JamSharedState {
     // render-local click synth state:
     float clickPhase = 0.0f, clickEnv = 0.0f, clickFreq = 1000.0f;
 
+    // ── Metronome click voice (render thread only) ────────────────────────
+    // One shared sine-ping voice reused by every click source (count-in,
+    // stem playback metronome, looper count-in). Trigger on a beat, then
+    // tick once per frame. NO alloc / NO lock / NO logging.
+    static constexpr float kClickAccentHz = 1760.0f;   // downbeat ("1")
+    static constexpr float kClickBeatHz   = 1175.0f;   // other beats
+    void triggerClick(bool accent) {
+        clickEnv = 1.0f;
+        clickPhase = 0.0f;
+        clickFreq = accent ? kClickAccentHz : kClickBeatHz;
+    }
+    // Advance the click voice one frame; returns the sample (0 when idle).
+    float tickClick(float amp) {
+        if (clickEnv <= 0.0005f) return 0.0f;
+        clickPhase += clickFreq / 48000.0f;
+        if (clickPhase >= 1.0f) clickPhase -= 1.0f;
+        const float s = sinf(clickPhase * 2.0f * (float)M_PI)
+                        * clickEnv * amp
+                        * clickGain.load(std::memory_order_relaxed);
+        clickEnv *= 0.9988f;    // ~25 ms decay at 48 kHz
+        return s;
+    }
+
     // ── Multi-track looper (jam tab) ──────────────────────────────────────
     // Capture the program output (pre-loop) into loop tracks and layer them
     // back in, all synced to a master grid set by the first loop's bars × BPM.
