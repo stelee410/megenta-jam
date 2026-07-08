@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <cstring>
 #include <utility>
+#include "JamDsp.h"
 
 struct JamModular {
     static constexpr float kSR = 48000.0f;
@@ -169,18 +170,7 @@ struct JamModular {
     int apPos = 0;
     float springZ = 0.0f, springZ2 = 0.0f;   // spring "boing" allpass chain
 
-    static float clamp01f(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
-    static float clampB(float v) { return v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v); }
-    static float polyblep(float t, float dt) {
-        if (t < dt) { t /= dt; return t + t - t * t - 1.0f; }
-        if (t > 1.0f - dt) { t = (t - 1.0f) / dt; return t * t + t + t + 1.0f; }
-        return 0.0f;
-    }
-    static float frand(uint32_t& s) {
-        s ^= s << 13; s ^= s >> 17; s ^= s << 5;
-        return (float)(int32_t)s * (1.0f / 2147483648.0f);
-    }
-    static float frand01(uint32_t& s) { return frand(s) * 0.5f + 0.5f; }
+    // clamp01f/clampB/polyblep/frand/frand01 live in JamDsp.h (shared).
 
     // West-coast reflective wavefolder: reflect x off the ±1 rails.
     static float fold(float x) {
