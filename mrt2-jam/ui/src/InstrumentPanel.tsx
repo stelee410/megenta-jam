@@ -23,7 +23,7 @@
  * OLED preset display) plus an AI patch designer.
  */
 
-import { useState } from 'react';
+import { memo, useState } from 'react';
 
 export interface SynthParams {
   oscType: number;     // 0 analog · 1 supersaw · 2 wavetable · 3 fm · 4 harmonic
@@ -259,7 +259,7 @@ export interface SynthPreset {
   matrix: number[];
 }
 
-export function InstrumentPanel({
+function InstrumentPanelImpl({
   synth,
   matrix,
   onParam,
@@ -588,3 +588,7 @@ export function InstrumentPanel({
     </div>
   );
 }
+
+// Memoized: the app re-renders at the native push rate (~25 Hz);
+// skip reconciling this subtree when its props are unchanged.
+export const InstrumentPanel = memo(InstrumentPanelImpl);

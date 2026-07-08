@@ -20,7 +20,7 @@
  * voice via post({type:'modularParam'|'modularPatch'|'modularSeq'}).
  */
 
-import { useEffect, useState } from 'react';
+import { memo, useEffect, useState } from 'react';
 import type React from 'react';
 
 const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
@@ -178,7 +178,7 @@ function Selector({
   );
 }
 
-export function ModularPanel({
+function ModularPanelImpl({
   params, onParam, patch, onPatch, seq, onSeq, step, onDice, bpm, onBpm,
   presetNames, presetIdx, onPreset,
   recOn, recStep, onRecToggle, onRest, onRecSetStep,
@@ -529,3 +529,7 @@ export function ModularPanel({
     </div>
   );
 }
+
+// Memoized: the app re-renders at the native push rate (~25 Hz);
+// skip reconciling this subtree when its props are unchanged.
+export const ModularPanel = memo(ModularPanelImpl);

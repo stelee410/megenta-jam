@@ -28,7 +28,7 @@
  * Raw WebGL1, no dependencies.
  */
 
-import { useEffect, useRef } from 'react';
+import { memo, useEffect, useRef } from 'react';
 
 export interface VisualData {
   level: number;        // smoothed peak 0..~1
@@ -217,7 +217,7 @@ interface ImageGL {
   aspect: number;  // image w/h
 }
 
-export function VisualLayer({
+function VisualLayerImpl({
   mode,
   accent,
   bpm,
@@ -520,3 +520,7 @@ export function VisualLayer({
     </div>
   );
 }
+
+// Memoized: the app re-renders at the native push rate (~25 Hz);
+// skip reconciling this subtree when its props are unchanged.
+export const VisualLayer = memo(VisualLayerImpl);

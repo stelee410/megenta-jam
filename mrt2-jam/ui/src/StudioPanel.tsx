@@ -20,7 +20,7 @@
  * A/B each cover against the original, and package everything as a live PGM.
  */
 
-import React, { useState, useRef } from 'react';
+import React, { memo, useState, useRef } from 'react';
 import { MidiEditor } from './MidiEditor';
 import type { ClipNote } from './MidiEditor';
 
@@ -178,7 +178,7 @@ function NoteRibbon({ ribbon, duration, main }: {
   );
 }
 
-export function StudioPanel({
+function StudioPanelImpl({
   studio,
   onLoadSong,
   onLoadPgm,
@@ -1173,3 +1173,7 @@ export function StudioPanel({
     </div>
   );
 }
+
+// Memoized: the app re-renders at the native push rate (~25 Hz);
+// skip reconciling this subtree when its props are unchanged.
+export const StudioPanel = memo(StudioPanelImpl);

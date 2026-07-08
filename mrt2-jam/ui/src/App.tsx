@@ -17,8 +17,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { WECHAT_QR } from './wechatQr';
 import { PianoKeyboard } from './PianoKeyboard';
-import { JamSlider } from './JamSlider';
-import { JamSliderElastic } from './JamSliderElastic';
 import { MagentaDropdown, MidiSelector, ModelSelector, ResourceOnboardingModal, PROMPT_SUGGESTIONS, INSTRUMENT_SUGGESTIONS, AudioMeter, TimingIndicator, SettingsPanel, GREY_900, ALL_COLORS, DEFAULT_TEMPERATURE, DEFAULT_TOPK, DEFAULT_CFG_NOTES, DEFAULT_CFG_MUSICCOCA, DEFAULT_CFG_DRUMS, DEFAULT_UNMASK_WIDTH, DEFAULT_BUFFER_SIZE, DEFAULT_VOLUME, PromptSurface, calculateWeights } from '@magenta-rt/common';
 import type { PromptNode, ListenerNode } from '@magenta-rt/common';
 import { Turtle, Rabbit } from 'lucide-react';
