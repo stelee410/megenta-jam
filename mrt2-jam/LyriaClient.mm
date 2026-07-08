@@ -28,7 +28,6 @@ static NSString* const kLyriaModel = @"models/lyria-realtime-exp";
     // Epoch guards: callbacks from a cancelled socket are ignored.
     std::atomic<uint64_t> _epoch;
     BOOL _connected;          // setupComplete received (main-queue confined)
-    BOOL _connecting;
     NSArray<NSDictionary*>* _cachedPrompts;
     NSMutableDictionary* _cachedConfig;
     void (^_statusHandler)(NSString*);
@@ -74,7 +73,6 @@ static NSString* const kLyriaModel = @"models/lyria-realtime-exp";
             [self emitStatus:@"error: no api key (defaults: Jam_LyriaApiKey)"];
             return;
         }
-        self->_connecting = YES;
         self->_connected = NO;
         self->_announcedStreaming = NO;
         self->_ring.clear();
@@ -104,7 +102,6 @@ static NSString* const kLyriaModel = @"models/lyria-realtime-exp";
             });
         }
         self->_connected = NO;
-        self->_connecting = NO;
         self->_ring.clear();
         [self emitStatus:@"idle"];
     });
@@ -175,7 +172,6 @@ static NSString* const kLyriaModel = @"models/lyria-realtime-exp";
                                                              error.localizedDescription]];
                 self2->_task = nil;
                 self2->_connected = NO;
-                self2->_connecting = NO;
                 // Invalidate stale receive/ping loops before the reconnect.
                 self2->_epoch.fetch_add(1, std::memory_order_relaxed);
                 return;
@@ -199,7 +195,6 @@ static NSString* const kLyriaModel = @"models/lyria-realtime-exp";
 
     if (obj[@"setupComplete"]) {
         _connected = YES;
-        _connecting = NO;
         if (_cachedPrompts.count > 0) {
             [self sendJson:@{@"clientContent" : @{@"weightedPrompts" : _cachedPrompts}}];
         }
@@ -265,7 +260,6 @@ static NSString* const kLyriaModel = @"models/lyria-realtime-exp";
     if (task != _task) return;
     _task = nil;
     _connected = NO;
-    _connecting = NO;
     NSString* why = reason.length
         ? [[NSString alloc] initWithData:reason encoding:NSUTF8StringEncoding]
         : @"";
