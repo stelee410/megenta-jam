@@ -43,6 +43,15 @@ static BOOL JamWriteWav(NSURL* url, const int16_t* interleaved, long frames);
 #include <unistd.h>
 
 using magentart::core::RealtimeRunner;
+
+// Engine parameter addresses mirrored to the UI (keys resolved through
+// MagentaSettings paramKeyForAddress:). One list, used by the metrics
+// pusher, connect handshake, and model-loaded push alike.
+static const int kBridgedParamAddresses[] = {0,1,3,4,5,6,7,8,9,32,39,46,48};
+
+// Stem slot names, in JamSharedState stem order.
+static NSString* const kStemNames[8] = {@"drums", @"bass", @"other", @"vocals",
+                                        @"guitar", @"piano", @"aux1", @"aux2"};
 using magentart::core::EngineMetrics;
 
 // ─── Dev server probe ────────────────────────────────────────────────────────
@@ -338,8 +347,7 @@ static BOOL isDevServerRunning(void) {
 
     // Params — send only changed values
     NSMutableDictionary* params = [NSMutableDictionary dictionary];
-    int addresses[] = {0,1,3,4,5,6,7,8,9,32,39,46,48};
-    for (int addr : addresses) {
+    for (int addr : kBridgedParamAddresses) {
         NSString* key = [MagentaSettings paramKeyForAddress:addr];
         if (!key) continue;
         float rawVal = [self readParamFromEngine:addr];
@@ -615,8 +623,7 @@ static BOOL isDevServerRunning(void) {
     if (!engine) return;
 
     NSMutableDictionary* initialParams = [NSMutableDictionary dictionary];
-    int addresses[] = {0,1,3,4,5,6,7,8,9,32,39,46,48};
-    for (int addr : addresses) {
+    for (int addr : kBridgedParamAddresses) {
         NSString* key = [MagentaSettings paramKeyForAddress:addr];
         if (!key) continue;
         float rawVal = [self readParamFromEngine:addr];
@@ -717,8 +724,7 @@ static BOOL isDevServerRunning(void) {
         state[@"modelName"] = modelName;
 
         NSMutableDictionary* params = [NSMutableDictionary dictionary];
-        int addresses[] = {0,1,3,4,5,6,7,8,9,32,39,46,48};
-        for (int addr : addresses) {
+        for (int addr : kBridgedParamAddresses) {
             NSString* key = [MagentaSettings paramKeyForAddress:addr];
             if (!key) continue;
             float rawVal = [self readParamFromEngine:addr];
@@ -2737,8 +2743,7 @@ static NSString* const kJamKeyNames[12] = {@"C", @"C#", @"D", @"D#", @"E", @"F",
     NSOpenPanel* panel = [NSOpenPanel openPanel];
     [panel setCanChooseFiles:YES];
     [panel setAllowedContentTypes:@[[UTType typeWithIdentifier:@"public.audio"]]];
-    static NSString* const stemNames[8] = {@"drums", @"bass", @"other", @"vocals",
-                                           @"guitar", @"piano", @"aux1", @"aux2"};
+    NSString* const* stemNames = kStemNames;
     [panel setMessage:[NSString stringWithFormat:@"Select an audio file for the %@ stem",
                        stemNames[idx]]];
     void (^completion)(NSModalResponse) = ^(NSModalResponse result) {
@@ -3600,8 +3605,7 @@ static BOOL JamWriteWav(NSURL* url, const int16_t* interleaved, long frames) {
             }
 
             // Stems by canonical name.
-            static NSString* const names[8] = {@"drums", @"bass", @"other", @"vocals",
-                                               @"guitar", @"piano", @"aux1", @"aux2"};
+            NSString* const* names = kStemNames;
             // The packaged `stems` array skips empty stems (compacted), so it
             // must be matched by NAME, not by index — otherwise offset/dry get
             // restored to the wrong lane (notably aux when an earlier stem is
@@ -4603,8 +4607,7 @@ static NSString* const kSwModelURL =
         [sections addObject:@{@"start": @(s.start), @"end": @(s.end),
                               @"label": labels[s.label & 3], @"energy": @(s.energy)}];
     }
-    static NSString* const stemNames[8] = {@"drums", @"bass", @"other", @"vocals",
-                                            @"guitar", @"piano", @"aux1", @"aux2"};
+    NSString* const* stemNames = kStemNames;
     static NSString* const tmpl[8] = {
         @"solo drums, drum kit only, no melody no bass",
         @"solo bass line, deep round bass, no drums",
@@ -4736,8 +4739,7 @@ static NSString* const kSwModelURL =
             }
             [data writeToURL:[root URLByAppendingPathComponent:@"program.json"]
                   atomically:YES];
-            static NSString* const names[8] = {@"drums", @"bass", @"other", @"vocals",
-                                               @"guitar", @"piano", @"aux1", @"aux2"};
+            NSString* const* names = kStemNames;
             BOOL ok = YES;
             int written = 0;
             for (int i = 0; i < 8; ++i) {
