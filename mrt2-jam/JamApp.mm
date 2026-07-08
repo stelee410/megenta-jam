@@ -663,8 +663,8 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
                     if (comp > 1.5) comp = 1.5;
                     shared->outSpeedComp.store((float)comp, std::memory_order_release);
                     shared->rateMeasLocked = true;
-                    NSLog(@"[SpeedComp] measured device content rate %.1f Hz -> comp %.4f",
-                          C, comp);
+                    // (No logging here: audio render thread. The measured comp is
+                    // visible in the calibration UI via outSpeedComp.)
                 }
                 shared->rateMeasFrames += (double)frameCount;
             }
@@ -788,14 +788,6 @@ static NSSlider* makeSlider(CGFloat x, CGFloat y, CGFloat w, double min, double 
             }
             cfgNotesLevel->store(cfgNotes, std::memory_order_relaxed);
             engine->set_cfg_notes(cfgNotes);
-
-            // DEBUG: throttled log (~1Hz)
-            static int _dbgCounter = 0;
-            if (++_dbgCounter >= (int)(48000.0f / genFrames)) {
-                _dbgCounter = 0;
-                NSLog(@"[Solo ramp] noteHeld=%d slider=%.2f cfgNotes=%.2f gate=%.3f",
-                      anyNoteHeld, sliderVal, cfgNotes, gate);
-            }
         } else {
             // Accompany mode: reset gate/cfg notes level to slider value, bypass gate
             cfgNotesLevel->store(cfgNotesSliderVal->load(std::memory_order_relaxed), std::memory_order_relaxed);
