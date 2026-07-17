@@ -58,6 +58,22 @@ add_definitions(-DMAGENTART_GIT_SHA="${MAGENTART_GIT_SHA}")
 include(FetchContent)
 
 # --- MLX (static, from source) ------------------------------------------------
+# Guard: mlx's JIT preamble generation (make_compiled_preamble.sh) shells out to
+# `xcrun metal` and SILENTLY emits corrupted preambles when the Metal Toolchain
+# is missing (Xcode updates can drop the downloaded component) — the app then
+# builds fine but crashes at model warmup with "unknown type name 'bfloat16_t'".
+# Fail loudly at configure time instead.
+if(APPLE)
+    execute_process(COMMAND xcrun -sdk macosx metal --version
+                    RESULT_VARIABLE MAGENTART_METAL_TOOL_RC
+                    OUTPUT_QUIET ERROR_QUIET)
+    if(NOT MAGENTART_METAL_TOOL_RC EQUAL 0)
+        message(FATAL_ERROR "Metal compiler unavailable (`xcrun -sdk macosx metal` "
+            "failed). Install it with: xcodebuild -downloadComponent MetalToolchain. "
+            "Building without it corrupts MLX's JIT kernel preambles and the app "
+            "crashes at model load.")
+    endif()
+endif()
 FetchContent_Declare(
     mlx
     GIT_REPOSITORY https://github.com/ml-explore/mlx.git
