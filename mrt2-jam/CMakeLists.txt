@@ -44,6 +44,7 @@ set_target_properties(demucscpp PROPERTIES CXX_STANDARD 17)
 add_executable(mrt2_jam MACOSX_BUNDLE
     JamApp.mm
     JamAppController.mm
+    JamHandTracker.mm
     JamSeparate.mm
     JamTranscribe.mm
     JamTranscribePiano.mm
@@ -80,6 +81,8 @@ target_link_libraries(mrt2_jam PRIVATE
     "-framework WebKit"
     "-framework UniformTypeIdentifiers"
     "-framework IOKit"
+    "-framework Vision"
+    "-framework CoreMedia"
 )
 
 set_target_properties(mrt2_jam PROPERTIES

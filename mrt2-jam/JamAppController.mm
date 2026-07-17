@@ -32,6 +32,7 @@
 #import "JamTranscribe.h"
 #import "JamTranscribePiano.h"
 #import "JamRoformer.h"
+#import "JamHandTracker.h"
 
 static BOOL JamWriteWav(NSURL* url, const int16_t* interleaved, long frames);
 #import "JamChords.h"
@@ -161,6 +162,8 @@ static BOOL isDevServerRunning(void) {
     AVAudioConverter* _recordConverter;
     std::vector<float> _recordSamples;
     BOOL _isRecording;
+
+    JamHandTracker* _handTracker;         // camera gesture control (mix views)
 }
 
 // ─── Parameter bridging ──────────────────────────────────────────────────────
@@ -371,6 +374,41 @@ static BOOL isDevServerRunning(void) {
     if (params.count > 0) stateUpdate[@"params"] = params;
 
     if (stateUpdate.count > 0) [self sendStateUpdate:stateUpdate];
+}
+
+// ─── Camera gesture control (mix circle / surface views) ────────────────────
+// Poses bypass updateState: they arrive at camera rate (~30 Hz) and go through
+// a dedicated lightweight callback the UI reads with refs.
+
+- (void)setHandTrackingEnabled:(BOOL)on {
+    if (!on) {
+        [_handTracker stop];
+        _handTracker = nil;
+        [self sendStateUpdate:@{@"handTracking": @{@"active": @NO}}];
+        return;
+    }
+    if (_handTracker.running) return;
+    if (!_handTracker) {
+        _handTracker = [[JamHandTracker alloc] init];
+        __weak JamAppController* weakSelf = self;
+        _handTracker.poseHandler = ^(float x, float y, BOOL pinching, BOOL visible) {
+            JamAppController* s = weakSelf;
+            if (!s || !s->_webView) return;
+            NSString* js = [NSString stringWithFormat:
+                @"if(window.updateHandPose)window.updateHandPose(%.4f,%.4f,%d,%d);",
+                x, y, pinching ? 1 : 0, visible ? 1 : 0];
+            [s->_webView evaluateJavaScript:js completionHandler:nil];
+        };
+        _handTracker.failureHandler = ^(NSString* reason) {
+            JamAppController* s = weakSelf;
+            if (!s) return;
+            s->_handTracker = nil;
+            [s sendStateUpdate:@{@"handTracking": @{@"active": @NO,
+                                                    @"error": reason ?: @"camera unavailable"}}];
+        };
+    }
+    [_handTracker start];
+    [self sendStateUpdate:@{@"handTracking": @{@"active": @YES}}];
 }
 
 // ─── State push to React ─────────────────────────────────────────────────────
@@ -1790,6 +1828,9 @@ static void JamSetModularParam(JamModular& md, NSString* key, NSNumber* value) {
     }
     else if ([type isEqualToString:@"openSettings"]) {
         [NSApp sendAction:@selector(menuShowSettings:) to:nil from:self];
+    }
+    else if ([type isEqualToString:@"setHandTracking"]) {
+        [self setHandTrackingEnabled:[body[@"enabled"] boolValue]];
     }
     else if ([type isEqualToString:@"savePromptHistory"]) {
         NSArray* history = body[@"history"];

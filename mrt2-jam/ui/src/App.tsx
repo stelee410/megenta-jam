@@ -166,6 +166,8 @@ import {
 declare global {
   interface Window {
     updateState: (state: any) => void;
+    // Camera hand-pose stream (~30 Hz) — dedicated channel, bypasses updateState.
+    updateHandPose?: (x: number, y: number, pinch: number, visible: number) => void;
     webkit?: {
       messageHandlers?: {
         auHost?: { postMessage: (msg: any) => void };
@@ -1309,11 +1311,9 @@ function App() {
     setIsPromptEdited(true);
   }, []);
 
-  const updateMixWeightsFromPointer = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x = clamp01((e.clientX - rect.left) / rect.width) * 100;
-    const y = clamp01((e.clientY - rect.top) / rect.height) * 100;
-
+  // Core mix-point update, shared by pointer drags and camera hand gestures.
+  // x/y are in the 0–100 map coordinate space.
+  const applyMixPointFromMapCoords = useCallback((x: number, y: number) => {
     if (mixLayout === 'standard') {
       // DJ crossfader: horizontal position blends deck A (slot 1) ↔ deck B (slot 2).
       const f = clamp01((x - 25) / 50); // full sweep across the middle half
@@ -1349,6 +1349,13 @@ function App() {
       return next;
     });
   }, [mixLayout]);
+
+  const updateMixWeightsFromPointer = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = clamp01((e.clientX - rect.left) / rect.width) * 100;
+    const y = clamp01((e.clientY - rect.top) / rect.height) * 100;
+    applyMixPointFromMapCoords(x, y);
+  }, [applyMixPointFromMapCoords]);
 
   // ─── Surface layout state (Collider-style) ───────────────────────────────
   const [surfacePrompts, setSurfacePrompts] = useState<PromptNode[]>([]);
@@ -1503,6 +1510,47 @@ function App() {
   const handleSurfaceListenerMove = useCallback((x: number, y: number) => {
     setSurfaceListener({ x, y });
   }, []);
+
+  // ─── Camera hand-gesture control (circle / surface mix views) ─────────────
+  // Native pushes hand poses at ~30 Hz via window.updateHandPose. The open
+  // hand aims a cursor; pinching (thumb+index) grabs and drags the mix point
+  // (circle) or the listener (surface).
+  const [handTrackingOn, setHandTrackingOn] = useState(false);
+  const [handTrackingError, setHandTrackingError] = useState<string | null>(null);
+  const [handCursor, setHandCursor] = useState<{ x: number; y: number; pinch: boolean } | null>(null);
+  const handGestureCtxRef = useRef({ active: false, mode: 'single' as PromptMode, layout: 'standard' as MixLayoutMode });
+  handGestureCtxRef.current = { active: handTrackingOn, mode: promptMode, layout: mixLayout };
+
+  useEffect(() => {
+    window.updateHandPose = (x, y, pinch, visible) => {
+      const ctx = handGestureCtxRef.current;
+      if (!ctx.active) return;
+      if (!visible) { setHandCursor(null); return; }
+      const pinching = !!pinch;
+      setHandCursor({ x, y, pinch: pinching });
+      if (!pinching || ctx.mode !== 'mix') return;
+      if (ctx.layout === 'circle') {
+        applyMixPointFromMapCoords(clamp01(x) * 100, clamp01(y) * 100);
+      } else if (ctx.layout === 'surface') {
+        const el = surfaceHostRef.current;
+        if (!el) return;
+        const { width, height } = el.getBoundingClientRect();
+        const pad = 12;
+        handleSurfaceListenerMove(
+          Math.min(width - pad, Math.max(pad, x * width)),
+          Math.min(height - pad, Math.max(pad, y * height)),
+        );
+      }
+    };
+    return () => { delete window.updateHandPose; };
+  }, [applyMixPointFromMapCoords, handleSurfaceListenerMove]);
+
+  // Camera off when leaving the gesture-enabled views (mix circle / surface).
+  useEffect(() => {
+    if (handTrackingOn && (promptMode !== 'mix' || mixLayout === 'standard')) {
+      post({ type: 'setHandTracking', enabled: false });
+    }
+  }, [handTrackingOn, promptMode, mixLayout]);
 
   const handleSurfaceAdd = useCallback((x: number, y: number) => {
     if (surfacePromptsRef.current.length >= MAX_SURFACE_PROMPTS) return;
@@ -1915,6 +1963,12 @@ function App() {
       }
       if (state.modelName !== undefined) setModelName(state.modelName);
       if (state.isPlaying !== undefined) setIsPlaying(state.isPlaying);
+      if (state.handTracking) {
+        const active = !!state.handTracking.active;
+        setHandTrackingOn(active);
+        setHandTrackingError(state.handTracking.error ?? null);
+        if (!active) setHandCursor(null);
+      }
       if (state.activeNotes) {
         setActiveNotes(state.activeNotes);
         if (state.activeNotes.length > 0) {
@@ -3374,6 +3428,17 @@ function App() {
                       </button>
                     </>
                   )}
+                  {promptMode === 'mix' && mixLayout !== 'standard' && (
+                    <button
+                      className={`jam-mini-button ${handTrackingOn ? 'is-active' : ''}`}
+                      title={handTrackingError
+                        ? `camera: ${handTrackingError}`
+                        : 'Camera hand gestures: open hand aims, pinch to grab'}
+                      onClick={() => post({ type: 'setHandTracking', enabled: !handTrackingOn })}
+                    >
+                      {handTrackingError ? 'cam ⚠' : handTrackingOn ? 'cam ✋' : 'cam'}
+                    </button>
+                  )}
                   {promptMode === 'mix' && (
                     <>
                       {(['standard', 'circle', 'surface'] as MixLayoutMode[]).map(layout => (
@@ -3517,6 +3582,12 @@ function App() {
                       + add
                     </button>
                   </div>
+                  {handTrackingOn && handCursor && (
+                    <div
+                      className={`jam-hand-cursor ${handCursor.pinch ? 'is-pinch' : ''}`}
+                      style={{ left: `${handCursor.x * 100}%`, top: `${handCursor.y * 100}%` }}
+                    />
+                  )}
                 </div>
               )}
 
@@ -3645,6 +3716,12 @@ function App() {
                     </>
                   )}
 
+                  {handTrackingOn && handCursor && mixLayout === 'circle' && (
+                    <div
+                      className={`jam-hand-cursor ${handCursor.pinch ? 'is-pinch' : ''}`}
+                      style={{ left: `${handCursor.x * 100}%`, top: `${handCursor.y * 100}%` }}
+                    />
+                  )}
                   <div className="jam-expand-glyph">open</div>
                   <div className="jam-prompt-hint">
                     {draftText

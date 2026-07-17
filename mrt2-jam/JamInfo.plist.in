@@ -26,6 +26,8 @@
     <string>${MAGENTART_VERSION}</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>NSCameraUsageDescription</key>
+    <string>VerveFlow uses the camera for hand-gesture control of the prompt mix surfaces.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>MRT2 - Jam records short audio clips you choose to capture, to use as style prompts for music generation.</string>
 </dict>
